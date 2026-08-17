@@ -125,6 +125,22 @@ where
       r := r.push (← go)
     return r
 
+/--
+Generate a trie node from values and an array of children.
+-/
+def Trie.mkNode (vs : Array α) (cs : Array (Key × Trie α)) : Trie α :=
+  if h : vs.isEmpty ∧ cs.size = 1 then
+    .chain cs[0].1 cs[0].2
+  else
+    .node vs cs
+
+/--
+Inspect a trie node as an array of values and an array of children.
+-/
+def Trie.asNode : Trie α → Array α × Array (Key × Trie α)
+  | .chain k v => ⟨#[], #[(k, v)]⟩
+  | .node vs cs => ⟨vs, cs⟩
+
 private partial def createNodes (keys : Array Key) (v : α) (i : Nat) : Trie α :=
   if h : i < keys.size then
     let k := keys[i]
