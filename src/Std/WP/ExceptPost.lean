@@ -165,6 +165,31 @@ theorem EPost.Cons.head_bot {eh : Type u} {et : Type v}
   have h : (⊥ : EPost.Cons eh et) ⊑ EPost.Cons.mk (⊥ : eh) (⊥ : et) := bot_le _
   exact EPost.Cons.le_head h
 
+/-- The tail component of the bottom `EPost.Cons` is the bottom element. Propositional (not
+definitional), because `⊥` of a complete lattice is `csup ∅`, not a constructor application. -/
+theorem EPost.Cons.tail_bot {eh : Type u} {et : Type v}
+    [CompleteLattice eh] [CompleteLattice et] :
+    EPost.Cons.tail (⊥ : EPost.Cons eh et) = (⊥ : et) := by
+  refine PartialOrder.rel_antisymm ?_ (bot_le _)
+  have h : (⊥ : EPost.Cons eh et) ⊑ EPost.Cons.mk (⊥ : eh) (⊥ : et) := bot_le _
+  exact EPost.Cons.le_tail h
+
+/-- `EPost.Nil` has a single value. -/
+instance : Subsingleton EPost.Nil := ⟨fun _ _ => rfl⟩
+
+/-- The empty exception postcondition converts to the empty tuple. -/
+instance : AssertionHom EPost.Nil Unit (fun _ => ()) where
+  le_of_hom_le _ := trivial
+  hom_bot := Subsingleton.elim _ _
+
+/-- An `EPost.Cons` converts to the pair of its head and the conversion of its tail. -/
+instance {eh : Type u} {et T : Type v} {hom : et → T} [Assertion eh] [Assertion et] [Assertion T]
+    [AssertionHom et T hom] :
+    AssertionHom (EPost.Cons eh et) (eh × T) (fun p => (p.head, hom p.tail)) where
+  le_of_hom_le h := EPost.Cons.mk_le _ _ _ h.1 (AssertionHom.le_of_hom_le h.2)
+  hom_bot := by
+    rw [EPost.Cons.head_bot, EPost.Cons.tail_bot, AssertionHom.hom_bot (E := et), Prod.mk_bot]
+
 /-- `mk` of the componentwise meets is the meet. -/
 theorem EPost.Cons.mk_meet {eh : Type u} {et : Type v}
     [CompleteLattice eh] [CompleteLattice et] (p q : EPost.Cons eh et) :

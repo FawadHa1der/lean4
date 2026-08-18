@@ -43,52 +43,137 @@ private def mkPostPointwisePremise (postSpec postTarget postTy : Expr) (ssTypes 
       let rhs := mkAppN (mkApp postTarget a) ss'
       mkForallFVars (#[a] ++ ss') (← mkAppM ``PartialOrder.rel #[lhs, rhs])
 
-/-- Recursively decompose `epostSpec ⊑ epostAbstract` into per-component proofs.
-    - `EPost.Cons.mk head tail` → mvar for `head ⊑ epostAbstract.head`, recurse on tail
-    - `EPost.Nil.mk` → trivial via `EPost.Nil.le`
-    - Otherwise, if `EPred` is `EPost.Cons`, project `epostSpec.head`/`.tail` and decompose those
-    - Otherwise → single mvar for `epostSpec ⊑ epostAbstract` -/
-private partial def decomposeEPostRel (EPred epostSpec epostAbstract : Expr)
+/-- An `AssertionHom E T hom` instance together with the arguments of its type,
+`#[E, T, hom, instE, instT]`. -/
+private structure AssertionHomInst where
+  levels : List Level
+  args : Array Expr
+  inst : Expr
+
+namespace AssertionHomInst
+
+/-- The assertion type the conversion targets. -/
+private def T (p : AssertionHomInst) : Expr := p.args[1]!
+/-- The conversion itself. -/
+private def hom (p : AssertionHomInst) : Expr := p.args[2]!
+
+/-- Apply the `AssertionHom` field `field` to `args`. -/
+private def mkField (p : AssertionHomInst) (field : Name) (args : Array Expr) : Expr :=
+  mkAppN (mkConst field p.levels) (p.args ++ #[p.inst] ++ args)
+
+end AssertionHomInst
+
+/-- The `AssertionHom` instance of `E`, or `none` if there is none, in which case `E` is atomic. -/
+private def assertionHom? (E : Expr) : MetaM (Option AssertionHomInst) := withNewMCtxDepth do
+  let some u ← decLevel? (← getLevel E) | return none
+  let .some instE ← trySynthInstance (mkApp (mkConst ``Assertion [u]) E) | return none
+  let T ← mkFreshExprMVar (mkSort (.succ u))
+  let hom ← mkFreshExprMVar (← mkArrow E T)
+  let instT ← mkFreshExprMVar (mkApp (mkConst ``Assertion [u]) T)
+  let .some inst ← trySynthInstance
+      (mkAppN (mkConst ``AssertionHom [u]) #[E, T, hom, instE, instT])
+    | return none
+  let instType ← instantiateMVars (← Meta.inferType inst)
+  let .const _ levels := instType.getAppFn | return none
+  return some { levels, args := instType.getAppArgs, inst := ← instantiateMVars inst }
+
+/-- The proof of `x ⊑ y` for an atomic assertion type `α`: discharged when `α` has at most one
+value, and an mvar for the verification condition otherwise. -/
+private def mkAtomicRel (α x y : Expr) : MetaM Expr := do
+  if let .some _ ← trySynthInstance (mkApp (mkConst ``Subsingleton [← getLevel α]) α) then
+    return ← mkAppM ``PartialOrder.rel_of_subsingleton #[x, y]
+  mkFreshExprMVar (userName := `epostImpl) (← mkAppM ``PartialOrder.rel #[x, y])
+
+/-- Transport `h : reduced ⊑ rhs` to `original ⊑ rhs` along `eq? : original = reduced`. -/
+private def castRel (eq? : Option Expr) (reduced rhs h : Expr) : MetaM Expr := do
+  let some eq := eq? | return h
+  let h ← mkExpectedTypeHint h (← mkAppM ``PartialOrder.rel #[reduced, rhs])
+  mkAppM ``PartialOrder.rel_trans #[← mkAppM ``PartialOrder.rel_of_eq #[eq], h]
+
+/-- Reduce `e` when its last argument is a constructor application, so that a projection of a
+constructor becomes the projected component while a projection of a free or metavariable stays a
+projection. -/
+private def whnfCtorArg (e : Expr) : MetaM Expr := do
+  unless e.isApp do return e
+  if ← isConstructorApp e.appArg!.consumeMData then
+    withTransparency .instances <| whnf e
+  else
+    return e
+
+/-- The two components of the pair `t` of type `A × B`, each alongside a proof that the
+corresponding projection of `t` equals it whenever the two are not definitionally equal, and the
+form of `t` the components belong to. A pair that reduces to `Prod.mk` hands out its arguments, `⊥`
+has `⊥` components by `Prod.fst_bot`/`Prod.snd_bot`, and any other pair keeps its projections. -/
+private def pairComponents (A B t : Expr) :
+    MetaM (Expr × (Expr × Option Expr) × (Expr × Option Expr)) := do
+  if t.consumeMData.isAppOfArity ``Lean.Order.bot 2 then
+    let fstBot ← mkAppOptM ``Prod.fst_bot #[A, B, none, none]
+    let sndBot ← mkAppOptM ``Prod.snd_bot #[A, B, none, none]
+    if let some (_, _, fst) := (← Meta.inferType fstBot).eq? then
+      if let some (_, _, snd) := (← Meta.inferType sndBot).eq? then
+        return (t, (fst, some fstBot), (snd, some sndBot))
+  let t' ← withTransparency .instances <| whnf t
+  if t'.isAppOfArity ``Prod.mk 4 then
+    return (t', (← whnfCtorArg t'.appFn!.appArg!, none), (← whnfCtorArg t'.appArg!, none))
+  return (t, (← mkAppM ``Prod.fst #[t], none), (← mkAppM ``Prod.snd #[t], none))
+
+/-- Recursively decompose `spec ⊑ abstract` between assertion tuples of type `T` into per-factor
+proofs, assembling them with `Prod.le_of_fst_le_of_snd_le`. A factor of `spec` that is schematic is
+assigned the matching factor of `abstract`; any other factor yields an mvar for the pointwise
+`factor ⊑ abstract.factor`. A `T` that is not a pair terminates the walk: the relation is discharged
+when `T` has at most one value, and otherwise becomes a single mvar for `spec ⊑ abstract`. -/
+private partial def decomposePairRel (T spec abstract : Expr)
     (stateArgNames : Array Name := #[]) : MetaM Expr := do
-  match_expr epostSpec with
-  | EPost.Cons.mk ehTy etTy head tail =>
-    let absHead ← mkAppM ``EPost.Cons.head #[epostAbstract]
-    let absTail ← mkAppM ``EPost.Cons.tail #[epostAbstract]
-    let hTail ← decomposeEPostRel etTy tail absTail stateArgNames
+  let T := T.consumeMData
+  unless T.isAppOfArity ``Prod 2 do
+    return ← mkAtomicRel T spec abstract
+  let A := T.appFn!.appArg!
+  let B := T.appArg!
+  let (spec, (specFst, specFstEq?), (specSnd, specSndEq?)) ← pairComponents A B spec
+  let (abstract, (absFst, _), (absSnd, _)) ← pairComponents A B abstract
+  let hFst ←
     /- Sometimes, even though `epost` is not schematic itself, its components might be schematic.
       Think of a triple of a kind `⦃ pre ⦄ x ⦃ post; epost₁, ⊥, epost₃, ⊥, ... ⦄`.
       In this case we do not want to create new metavariables for `epost₁`, `epost₃`, etc.
       Instead, we will just assign them to `epostAbstract.tail.head` and
       `epostAbstract.tail.tail.head`, etc. -/
-    if head.isMVar then
-      head.mvarId!.assign absHead
-      mkAppM ``EPost.Cons.mk_le_tail #[tail, epostAbstract, hTail]
+    if specFst.isMVar then
+      specFst.mvarId!.assign absFst
+      mkAppOptM ``PartialOrder.rel_refl #[none, none, absFst]
     else
       -- Collect state types: e.g. String → Nat → Prop → skip first (exc type), rest are state types
-      let ssTypes ← forallTelescope ehTy fun xs _ => xs.drop 1 |>.mapM (Meta.inferType ·)
-      let headTy ← Meta.inferType head
-      let hHeadTy ← mkPostPointwisePremise head absHead headTy ssTypes stateArgNames
-      let hHead ← mkFreshExprMVar (userName := `epostImpl) hHeadTy
-      mkAppM ``EPost.Cons.mk_le #[head, tail, epostAbstract, hHead, hTail]
-  | EPost.Nil.mk => mkAppM ``EPost.Nil.le #[epostAbstract]
-  | _ =>
-    match_expr EPred.consumeMData with
-    | EPost.Cons ehTy etTy =>
-      let specHead ← mkAppM ``EPost.Cons.head #[epostSpec]
-      let specTail ← mkAppM ``EPost.Cons.tail #[epostSpec]
-      let absHead ← mkAppM ``EPost.Cons.head #[epostAbstract]
-      let absTail ← mkAppM ``EPost.Cons.tail #[epostAbstract]
-      let headTy ← Meta.inferType specHead
-      -- Collect state types: e.g. String → Nat → Prop → skip first (exc type), rest are state types
-      let ssTypes ← forallTelescope ehTy fun xs _ => xs.drop 1 |>.mapM (Meta.inferType ·)
-      let hHeadTy ← mkPostPointwisePremise specHead absHead headTy ssTypes stateArgNames
-      let hHead ← mkFreshExprMVar (userName := `epostImpl) hHeadTy
-      let hTail ← decomposeEPostRel etTy specTail absTail stateArgNames
-      mkAppM ``EPost.Cons.mk_le #[specHead, specTail, epostAbstract, hHead, hTail]
-    | EPost.Nil => mkAppM ``EPost.Nil.le #[epostAbstract]
-    | _ =>
-      let hTy ← mkAppM ``PartialOrder.rel #[epostSpec, epostAbstract]
-      mkFreshExprMVar (userName := `epostImpl) hTy
+      let ssTypes ← forallTelescope A fun xs _ => xs.drop 1 |>.mapM (Meta.inferType ·)
+      let fstTy ← Meta.inferType specFst
+      let hFstTy ← mkPostPointwisePremise specFst absFst fstTy ssTypes stateArgNames
+      let hFst ← mkFreshExprMVar (userName := `epostImpl) hFstTy
+      castRel specFstEq? specFst absFst hFst
+  let hSnd ← decomposePairRel B specSnd absSnd stateArgNames
+  let hSnd ← castRel specSndEq? specSnd absSnd hSnd
+  mkAppM ``Prod.le_of_fst_le_of_snd_le #[spec, abstract, hFst, hSnd]
+
+/-- Decompose `epostSpec ⊑ epostAbstract` into per-layer proofs. The `AssertionHom` instance of the
+exception postcondition type `EPred` converts both sides into assertion tuples, whose factors are
+the layers; `decomposePairRel` decomposes the entailment between the tuples, and
+`AssertionHom.le_of_hom_le` reflects it back to `EPred`. An `EPred` without an `AssertionHom`
+instance is atomic: the relation is discharged when `EPred` has at most one value, and otherwise
+becomes a single mvar for `epostSpec ⊑ epostAbstract`. -/
+private def decomposeEPostRel (EPred epostSpec epostAbstract : Expr)
+    (stateArgNames : Array Name := #[]) : MetaM Expr := do
+  let some p ← assertionHom? EPred.consumeMData
+    | mkAtomicRel EPred epostSpec epostAbstract
+  let homSpec := mkApp p.hom epostSpec
+  let homAbstract := mkApp p.hom epostAbstract
+  let (specT, specEq?) ←
+    if epostSpec.consumeMData.isAppOfArity ``Lean.Order.bot 2 then
+      -- The conversion of `⊥` is `⊥`, and propositionally so; every other conversion reduces.
+      let homBot := p.mkField ``AssertionHom.hom_bot #[]
+      let some (_, _, bot) := (← Meta.inferType homBot).eq? | pure (homSpec, none)
+      pure (bot, some homBot)
+    else
+      pure (homSpec, none)
+  let h ← decomposePairRel p.T specT homAbstract stateArgNames
+  let h ← castRel specEq? specT homAbstract h
+  return p.mkField ``AssertionHom.le_of_hom_le #[epostSpec, epostAbstract, h]
 
 /--
 Create the proof term for the backward rule built from an instantiated spec theorem.
@@ -130,13 +215,15 @@ proof is generalized with `WP.wp_consequence_le`.
 
 #### Exception postcondition VCs
 
-A VC is also generated for the exception postcondition if it is not schematic. For an `EPost.Cons`
-value, the relation `epostSpec ⊑ epost` is decomposed component by component:
+A VC is also generated for the exception postcondition if it is not schematic. For an exception
+postcondition type with an `AssertionHom` instance, both sides are converted into assertion tuples
+and the relation `epostSpec ⊑ epost` is decomposed factor by factor:
 ```
 ∀ e s₁ ... sₙ, epostSpec.head e s₁ ... sₙ ⊑ epost.head e s₁ ... sₙ
 ```
-and recursively for the tail. `decomposeEPostRel` assembles these component VCs using
-`EPost.Cons.mk_le` and `EPost.Nil.le`; the proof is then generalized with `WP.wp_econs_le`.
+and recursively for the remaining factors. `decomposeEPostRel` assembles these factor VCs using
+`Prod.le_of_fst_le_of_snd_le` and `AssertionHom.le_of_hom_le`; the proof is then generalized with
+`WP.wp_econs_le`.
 When the spec exception postcondition is `⊥`, no VC is needed and `WP.wp_econs_bot_le` is
 used instead.
 
@@ -236,8 +323,8 @@ private def mkSpecBackwardProof
         This proof DOES NOT have a `?epostImpl` premise -/
       specApplied ← mkAppM ``WP.wp_econs_bot_le #[prog, postAbstract, epostAbstract, specApplied]
     else
-      /- Decompose `epostSpec ⊑ epostAbstract` into per-component proofs
-        using `EPost.Cons.mk_le` and `EPost.Nil.le` -/
+      /- Decompose `epostSpec ⊑ epostAbstract` into per-layer proofs
+        along the assertion tuple `EPred` converts to -/
       let hepost ← decomposeEPostRel EPred epostSpec epostAbstract stateArgNames
       specApplied ← mkAppM ``WP.wp_econs_le #[prog, postAbstract, epostSpec, epostAbstract, hepost, specApplied]
 

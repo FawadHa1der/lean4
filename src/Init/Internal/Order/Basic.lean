@@ -757,6 +757,47 @@ theorem admissible_pprod_snd {α : Sort u} {β : Sort v} [CCPO α] [CCPO β] (P 
 
 end pprod_order
 
+section prod_order
+
+open PartialOrder
+
+variable {α : Type u}
+variable {β : Type v}
+
+/-- Componentwise order on `α × β`, via `PProd`. -/
+instance [PartialOrder α] [PartialOrder β] : PartialOrder (α × β) where
+  rel a b := (⟨a.1, a.2⟩ : α ×' β) ⊑ ⟨b.1, b.2⟩
+  rel_refl := rel_refl
+  rel_trans h₁ h₂ := rel_trans h₁ h₂
+  rel_antisymm := fun {a b} h₁ h₂ => by
+    have := rel_antisymm (α := α ×' β) h₁ h₂
+    cases a; cases b; cases this; rfl
+
+/-- Componentwise complete lattice on `α × β`, via `PProd`. -/
+instance [CompleteLattice α] [CompleteLattice β] : CompleteLattice (α × β) where
+  has_sup c :=
+    let ⟨sup, hsup⟩ := CompleteLattice.has_sup (fun p : α ×' β => c (p.1, p.2))
+    ⟨(sup.1, sup.2), fun q =>
+      ⟨fun hq p hp => (hsup ⟨q.1, q.2⟩).mp hq ⟨p.1, p.2⟩ hp,
+       fun h => (hsup ⟨q.1, q.2⟩).mpr fun p hp => h (p.1, p.2) hp⟩⟩
+
+end prod_order
+
+section punit_order
+
+/-- The trivial order on `PUnit`: all values are equal. -/
+instance : PartialOrder PUnit.{u} where
+  rel _ _ := True
+  rel_refl := trivial
+  rel_trans _ _ := trivial
+  rel_antisymm := fun {p q} _ _ => by cases p; cases q; rfl
+
+/-- The trivial complete lattice on `PUnit`. -/
+instance : CompleteLattice PUnit.{u} where
+  has_sup _ := ⟨⟨⟩, fun _ => ⟨fun _ _ _ => trivial, fun _ => trivial⟩⟩
+
+end punit_order
+
 section flat_order
 
 variable {α : Sort u}

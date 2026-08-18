@@ -23,6 +23,43 @@ lattices, and the laws of the `Prop` lattice.
 
 namespace Lean.Order
 
+/-- Any two elements of a type with at most one element are related. -/
+theorem PartialOrder.rel_of_subsingleton {α : Sort u} [PartialOrder α] [Subsingleton α]
+    (x y : α) : x ⊑ y :=
+  PartialOrder.rel_of_eq (Subsingleton.elim x y)
+
+section prod
+
+variable {α : Type u} {β : Type v}
+
+/-- A pair is below another if both components are below. -/
+theorem Prod.le_of_fst_le_of_snd_le [PartialOrder α] [PartialOrder β] (p q : α × β) :
+    p.1 ⊑ q.1 → p.2 ⊑ q.2 → p ⊑ q :=
+  fun h₁ h₂ => ⟨h₁, h₂⟩
+
+/-- The first component of the bottom pair is the bottom element. Propositional (not definitional),
+because `⊥` of a complete lattice is `csup ∅`, not a constructor application. -/
+theorem Prod.fst_bot [CompleteLattice α] [CompleteLattice β] : (⊥ : α × β).1 = (⊥ : α) := by
+  refine PartialOrder.rel_antisymm ?_ (bot_le _)
+  have h : (⊥ : α × β) ⊑ ((⊥ : α), (⊥ : β)) := bot_le _
+  exact h.1
+
+/-- The second component of the bottom pair is the bottom element. -/
+theorem Prod.snd_bot [CompleteLattice α] [CompleteLattice β] : (⊥ : α × β).2 = (⊥ : β) := by
+  refine PartialOrder.rel_antisymm ?_ (bot_le _)
+  have h : (⊥ : α × β) ⊑ ((⊥ : α), (⊥ : β)) := bot_le _
+  exact h.2
+
+/-- The pair of the bottom elements is the bottom pair. -/
+theorem Prod.mk_bot [CompleteLattice α] [CompleteLattice β] :
+    ((⊥ : α), (⊥ : β)) = (⊥ : α × β) :=
+  PartialOrder.rel_antisymm
+    (Prod.le_of_fst_le_of_snd_le _ _ (PartialOrder.rel_of_eq Prod.fst_bot.symm)
+      (PartialOrder.rel_of_eq Prod.snd_bot.symm))
+    (bot_le _)
+
+end prod
+
 section CompleteLattice
 
 open PartialOrder Std.Internal.Order
