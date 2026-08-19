@@ -9,6 +9,7 @@ prelude
 public import Std.Sat.CNF.Literal
 public import Init.Data.Prod  -- shake: keep (proof instance elab'd in public scope, fix?)
 public import Init.Data.Array.Lemmas
+import Init.ByCases
 
 @[expose] public section
 
@@ -20,7 +21,9 @@ A clause in a CNF.
 
 The literal `(i, b)` is satisfied if the assignment to `i` agrees with `b`.
 -/
-abbrev CNF.Clause (α : Type u) : Type u := List (Literal α)
+structure CNF.Clause (α : Type u) where
+  literals : List (Literal α)
+  deriving DecidableEq, Inhabited
 
 /--
 A CNF formula.
@@ -32,14 +35,25 @@ structure CNF (α : Type u) where
 
 namespace CNF
 
+namespace Clause
+
+@[inline]
+def empty : Clause α := ⟨[]⟩
+
+@[inline]
+def add (c : Clause α) (atom : α) (pol : Bool) : Clause α :=
+  { c with literals := (atom, pol) :: c.literals }
+
 /--
 Evaluating a `Clause` with respect to an assignment `a`.
 -/
-def Clause.eval (a : α → Bool) (c : Clause α) : Bool := c.any fun (i, n) => a i == n
+def eval (a : α → Bool) (c : Clause α) : Bool := c.literals.any fun (i, n) => a i == n
 
-@[simp] theorem Clause.eval_nil (a : α → Bool) : Clause.eval a [] = false := rfl
-@[simp] theorem Clause.eval_cons (a : α → Bool) :
-    Clause.eval a (i :: c) = (a i.1 == i.2 || Clause.eval a c) := rfl
+@[simp] theorem eval_empty (a : α → Bool) : Clause.eval a .empty = false := rfl
+@[simp] theorem eval_add (a : α → Bool) :
+    Clause.eval a (c.add atom pol) = (a atom == pol || Clause.eval a c) := rfl
+
+end Clause
 
 /--
 Evaluating a `CNF` formula with respect to an assignment `a`.
@@ -83,7 +97,7 @@ theorem unsat_def (f : CNF α) : Unsat f ↔ (∀ a, eval a f = false) := by rfl
 @[simp] theorem sat_empty {assign : α → Bool} : Sat assign (.empty : CNF α) := by
   simp [sat_def]
 
-@[simp] theorem unsat_add_nil {g : CNF α} : Unsat (g.add []) := by
+@[simp] theorem unsat_add_empty {g : CNF α} : Unsat (g.add .empty) := by
   simp [unsat_def]
 
 namespace Clause
@@ -91,38 +105,47 @@ namespace Clause
 /--
 Variable `v` occurs in `Clause` `c`.
 -/
-def Mem (v : α) (c : Clause α) : Prop := (v, false) ∈ c ∨ (v, true) ∈ c
+def Mem (v : α) (c : Clause α) : Prop := (v, false) ∈ c.literals ∨ (v, true) ∈ c.literals
 
 instance {v : α} {c : Clause α} [DecidableEq α] : Decidable (Mem v c) :=
   inferInstanceAs <| Decidable (_ ∨ _)
 
-@[simp] theorem not_mem_nil {v : α} : ¬Mem v ([] : Clause α) := by simp [Mem]
-@[simp] theorem mem_cons {v : α} : Mem v (l :: c : Clause α) ↔ (v = l.1 ∨ Mem v c) := by
-  rcases l with ⟨b, (_|_)⟩
-  · simp [Mem, or_assoc]
-  · simp [Mem]
-    rw [or_left_comm]
+@[simp] theorem not_mem_empty {v : α} : ¬Mem v .empty := by simp [Mem, empty]
 
-theorem mem_of (h : (v, p) ∈ c) : Mem v c := by
-  cases p
-  · left; exact h
-  · right; exact h
+theorem mem_add_self {c : Clause α} : Mem atom (c.add atom pol) := by
+  cases pol <;> simp [Mem, add]
+
+theorem mem_add_ne_self {c : Clause α} {atom1 atom2 : α} (h : atom1 ≠ atom2) :
+    Mem atom1 (c.add atom2 pol) ↔ Mem atom1 c := by
+  simp [Mem, add, h]
+
+@[simp] theorem mem_add {v : α} : Mem v (c.add atom pol) ↔ (v = atom ∨ Mem v c) := by
+  by_cases h : v = atom
+  · simp [mem_add_self, h]
+  · simp [mem_add_ne_self, h]
+
+@[elab_as_elim]
+theorem induct {motive : Clause α → Prop} (empty : motive .empty)
+    (add : (c : Clause α) → (atom : α) → (pol : Bool) → motive c → motive (c.add atom pol))
+    (c : Clause α) : motive c := by
+  rcases c with ⟨ls⟩
+  induction ls with
+  | nil => exact empty
+  | cons l ls ih =>
+    specialize add ⟨ls⟩ l.1 l.2 ih
+    exact add
 
 theorem eval_congr (a1 a2 : α → Bool) (c : Clause α) (hw : ∀ i, Mem i c → a1 i = a2 i) :
     eval a1 c = eval a2 c := by
-  induction c
-  case nil => rfl
-  case cons i c ih =>
-    simp only [eval_cons]
+  induction c using induct with
+  | empty => simp
+  | add c atom pol ih =>
+    simp
     rw [ih, hw]
-    · rcases i with ⟨b, (_|_)⟩ <;> simp [Mem]
-    · intro j h
+    · simp
+    · intro i hm
       apply hw
-      rcases h with h | h
-      · left
-        apply List.mem_cons_of_mem _ h
-      · right
-        apply List.mem_cons_of_mem _ h
+      simp [hm]
 
 end Clause
 
@@ -146,7 +169,7 @@ instance {v : α} {f : CNF α} [DecidableEq α] : Decidable (VarMem v f) :=
   inferInstanceAs <| Decidable (∃ _, _)
 
 theorem Internal.any_not_isEmpty_iff_exists_mem {f : CNF α} :
-    (f.clauses.any fun c => !List.isEmpty c) = true ↔ ∃ v, VarMem v f := by
+    (f.clauses.any fun c => !List.isEmpty c.literals) = true ↔ ∃ v, VarMem v f := by
   simp only [Array.any_eq_true, Bool.not_eq_true', List.isEmpty_eq_false_iff_exists_mem, VarMem,
     Clause.Mem]
   constructor
@@ -173,7 +196,7 @@ theorem Internal.any_not_isEmpty_iff_exists_mem {f : CNF α} :
 
 @[no_expose]
 instance {f : CNF α} [DecidableEq α] : Decidable (∃ v, VarMem v f) :=
-  decidable_of_iff (f.clauses.any fun c => !c.isEmpty) Internal.any_not_isEmpty_iff_exists_mem
+  decidable_of_iff (f.clauses.any fun c => !c.literals.isEmpty) Internal.any_not_isEmpty_iff_exists_mem
 
 theorem not_VarMem_empty {v : α} : ¬VarMem v (.empty : CNF α) := by simp [VarMem, empty]
 

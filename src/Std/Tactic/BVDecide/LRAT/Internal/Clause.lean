@@ -33,7 +33,7 @@ Typeclass for clauses. An instance `[Clause α β]` indicates that `β` is the t
 variables of type `α`.
 -/
 class Clause (α : outParam (Type u)) (β : Type v) where
-  toList : β → CNF.Clause α
+  toList : β → List (Literal α)
   not_tautology : ∀ c : β, ∀ l : Literal α, l ∉ toList c ∨ Literal.negate l ∉ toList c
   /-- Returns none if the given array contains complementary literals -/
   ofArray : Array (Literal α) → Option β
@@ -43,7 +43,7 @@ class Clause (α : outParam (Type u)) (β : Type v) where
   unit_eq : ∀ l : Literal α, toList (unit l) = [l]
   isUnit : β → Option (Literal α)
   isUnit_iff : ∀ c : β, ∀ l : Literal α, isUnit c = some l ↔ toList c = [l]
-  negate : β → CNF.Clause α
+  negate : β → List (Literal α)
   negate_eq : ∀ c : β, negate c = (toList c).map Literal.negate
   delete : β → Literal α → β
   delete_iff : ∀ c : β, ∀ l : Literal α, ∀ l' : Literal α,

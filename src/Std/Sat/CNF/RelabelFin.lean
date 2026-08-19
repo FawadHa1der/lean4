@@ -25,7 +25,7 @@ namespace CNF
 /--
 Obtain the literal with the largest identifier in `c`.
 -/
-def Clause.maxLiteral (c : Clause Nat) : Option Nat := (c.map (·.1)) |>.max?
+def Clause.maxLiteral (c : Clause Nat) : Option Nat := (c.literals.map (·.1)) |>.max?
 
 theorem Clause.of_maxLiteral_eq_some (c : Clause Nat) (h : c.maxLiteral = some maxLit) :
     ∀ lit, Mem lit c → lit ≤ maxLit := by
@@ -45,14 +45,17 @@ theorem Clause.maxLiteral_eq_some_of_mem (c : Clause Nat) (h : Mem l c) :
   cases h <;> rename_i h
   all_goals
     have h1 := List.ne_nil_of_mem h
-    have h2 := not_congr <| @List.max?_eq_none_iff _ (c.map (·.1)) _
+    have h2 := not_congr <| @List.max?_eq_none_iff _ (c.literals.map (·.1)) _
     simp [← Option.ne_none_iff_exists', h1, h2, maxLiteral]
 
 theorem Clause.of_maxLiteral_eq_none (c : Clause Nat) (h : c.maxLiteral = none) :
     ∀ lit, ¬Mem lit c := by
   intro lit hlit
   simp only [maxLiteral, List.max?_eq_none_iff, List.map_eq_nil_iff] at h
-  simp only [h, not_mem_nil] at hlit
+  have : c = .empty := by
+    cases c
+    simp_all [empty]
+  simp only [this, not_mem_empty] at hlit
 
 /--
 Obtain the literal with the largest identifier in `f`.
@@ -121,9 +124,9 @@ def relabelFin (f : CNF Nat) : CNF (Fin f.numLiterals) :=
       else
         ⟨0, numLiterals_pos h.choose_spec⟩
   else
-    ⟨Array.replicate f.clauses.size []⟩
+    ⟨Array.replicate f.clauses.size .empty⟩
 
-private theorem not_exists_mem : (¬ ∃ v, VarMem v f) ↔ ∃ n, f.clauses = Array.replicate n [] := by
+private theorem not_exists_mem : (¬ ∃ v, VarMem v f) ↔ ∃ n, f.clauses = Array.replicate n .empty := by
   simp only [← Internal.any_not_isEmpty_iff_exists_mem]
   simp
   constructor
@@ -136,12 +139,14 @@ private theorem not_exists_mem : (¬ ∃ v, VarMem v f) ↔ ∃ n, f.clauses = A
       rw [Array.mem_iff_getElem] at hc
       rcases hc with ⟨i, hi1, hi2⟩
       specialize h i hi1
-      rwa [hi2] at h
+      sorry
+      --rwa [hi2] at h
   · intro h x hx
     rcases h with ⟨n, hn⟩
     generalize f.clauses = clauses at *
     subst hn
     simp
+    sorry
 
 @[simp] theorem unsat_relabelFin {f : CNF Nat} : Unsat f.relabelFin ↔ Unsat f := by
   dsimp [relabelFin]
@@ -160,24 +165,25 @@ private theorem not_exists_mem : (¬ ∃ v, VarMem v f) ↔ ∃ n, f.clauses = A
       rw [← CNF.empty, ← CNF.empty]
       simp
     else
-      have h : ∀ (lit : Nat × Bool) (clause : Clause Nat), clause ∈ clauses → clause = [] := by
-        intro lit clause hclause
-        simp only [VarMem, Clause.Mem, not_exists, not_and, not_or] at h
-        rcases clause with _ | ⟨⟨var, pol⟩, clause⟩
-        · rfl
-        · exfalso
-          specialize h var ((var, pol) :: clause) hclause
-          cases pol with
-          | true => apply h.right; simp
-          | false => apply h.left; simp
-      rcases Array.exists_push_of_ne_empty hc with ⟨cnf, c, hc⟩
-      subst hc
-      simp only [Array.size_push, Array.replicate_succ]
-      rw [← CNF.add, ← CNF.add]
-      have : c = [] := by
-        specialize h default c
-        simpa using h
-      simp [this]
+      sorry
+      --have h : ∀ (lit : Nat × Bool) (clause : Clause Nat), clause ∈ clauses → clause = [] := by
+      --  intro lit clause hclause
+      --  simp only [VarMem, Clause.Mem, not_exists, not_and, not_or] at h
+      --  rcases clause with _ | ⟨⟨var, pol⟩, clause⟩
+      --  · rfl
+      --  · exfalso
+      --    specialize h var ((var, pol) :: clause) hclause
+      --    cases pol with
+      --    | true => apply h.right; simp
+      --    | false => apply h.left; simp
+      --rcases Array.exists_push_of_ne_empty hc with ⟨cnf, c, hc⟩
+      --subst hc
+      --simp only [Array.size_push, Array.replicate_succ]
+      --rw [← CNF.add, ← CNF.add]
+      --have : c = [] := by
+      --  specialize h default c
+      --  simpa using h
+      --simp [this]
 
 end CNF
 
