@@ -3267,7 +3267,7 @@ static inline lean_obj_res lean_runtime_hold(b_lean_obj_arg a) {
 // a native 32-bit build (e.g. the stage0 of the wasm cross-build) must take the
 // two-slot form, or the 64-bit cast truncates the value and leaves the second
 // slot zero, silently corrupting statically-emitted scalars such as Name hashes.
-#if defined(LEAN_EMSCRIPTEN) || UINTPTR_MAX == UINT32_MAX
+#if UINTPTR_MAX == UINT32_MAX
 #define LEAN_SCALAR_PTR_LITERAL(b1, b2, b3, b4, b5, b6, b7, b8) (lean_object*)((uint32_t)b1 | ((uint32_t)b2 << 8) | ((uint32_t)b3 << 16) | ((uint32_t)b4 << 24)), (lean_object*)((uint32_t)b5 | ((uint32_t)b6 << 8) | ((uint32_t)b7 << 16) | ((uint32_t)b8 << 24))
 #else
 #define LEAN_SCALAR_PTR_LITERAL(b1, b2, b3, b4, b5, b6, b7, b8) (lean_object*)((uint64_t)b1 | ((uint64_t)b2 << 8) | ((uint64_t)b3 << 16) | ((uint64_t)b4 << 24) | ((uint64_t)b5 << 32) | ((uint64_t)b6 << 40) | ((uint64_t)b7 << 48) | ((uint64_t)b8 << 56))
