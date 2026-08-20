@@ -209,50 +209,16 @@ static char const * g_opt_str =
 ; // NOLINT
 
 namespace lean {
-extern "C" obj_res lean_shell_main(obj_arg args, obj_arg shell_opts, obj_arg world);
+extern "C" obj_res lean_shell_main(obj_arg args, obj_arg shell_opts);
 int run_shell_main(int argc, char* argv[], object_ref const & shell_opts) {
-    // #region agent log
-#ifdef LEAN_EMSCRIPTEN
-    EM_ASM({ console.log("[DEBUG:G] run_shell_main entered, building args list"); });
-#endif
-    // #endregion
     list_ref<string_ref> args;
     while (argc > 0) {
         argc--;
         args = list_ref<string_ref>(string_ref(argv[argc]), args);
     }
-    // #region agent log
-#ifdef LEAN_EMSCRIPTEN
-    EM_ASM({ console.log("[DEBUG:G] Args list built, preparing arguments..."); });
-#endif
-    // #endregion
-    
-    // Prepare arguments separately to isolate crash
-#ifdef LEAN_EMSCRIPTEN
-    EM_ASM({ console.log("[DEBUG:G] Calling args.steal()..."); });
-#endif
     object * args_obj = args.steal();
-#ifdef LEAN_EMSCRIPTEN
-    EM_ASM({ console.log("[DEBUG:G] args.steal() returned: " + $0); }, (int)(uintptr_t)args_obj);
-#endif
-    
-#ifdef LEAN_EMSCRIPTEN
-    EM_ASM({ console.log("[DEBUG:G] Calling shell_opts.to_obj_arg()..."); });
-#endif
     object * opts_obj = shell_opts.to_obj_arg();
-#ifdef LEAN_EMSCRIPTEN
-    EM_ASM({ console.log("[DEBUG:G] shell_opts.to_obj_arg() returned: " + $0); }, (int)(uintptr_t)opts_obj);
-#endif
-
-#ifdef LEAN_EMSCRIPTEN
-    EM_ASM({ console.log("[DEBUG:G] Now calling lean_shell_main..."); });
-#endif
-    object * result = lean_shell_main(args_obj, opts_obj, lean_box(0));
-    // #region agent log
-#ifdef LEAN_EMSCRIPTEN
-    EM_ASM({ console.log("[DEBUG:G] lean_shell_main returned, processing result..."); });
-#endif
-    // #endregion
+    object * result = lean_shell_main(args_obj, opts_obj);
     return get_io_scalar_result<uint32>(result);
 }
 
@@ -319,15 +285,6 @@ static void report_task_get_blocked_time(std::chrono::nanoseconds d) {
 
 extern "C" LEAN_EXPORT int lean_main(int argc, char ** argv) {
 #ifdef LEAN_EMSCRIPTEN
-    // #region agent log
-    EM_ASM({
-        console.log("[DEBUG:A] lean_main entered, argc=" + $0);
-        for (var i = 0; i < $0; i++) {
-            var argPtr = HEAPU32[($1 >> 2) + i];
-            console.log("[DEBUG:A] argv[" + i + "]=" + UTF8ToString(argPtr));
-        }
-    }, argc, argv);
-    // #endregion
     // Set up the virtual filesystem based on the runtime environment.
     // Node.js: Use NODEFS to access the real filesystem.
     // Browser: Use MEMFS (default) with pre-created directories.
@@ -382,31 +339,6 @@ extern "C" LEAN_EXPORT int lean_main(int argc, char ** argv) {
                 ENV["LEAN_PATH"] = "/lib/lean/library";
             }
             
-            console.log("Lean 4 WASM running in browser mode");
-            console.log("LEAN_PATH:", ENV["LEAN_PATH"]);
-            console.log("Working directory:", FS.cwd());
-            // #region agent log
-            // Debug: List files in LEAN_PATH to verify .olean files are present
-            try {
-                var leanPath = ENV["LEAN_PATH"] || "/lib/lean/library";
-                console.log("[DEBUG:B] Checking for .olean files in LEAN_PATH:", leanPath);
-                try {
-                    var files = FS.readdir(leanPath);
-                    console.log("[DEBUG:B] Files in " + leanPath + ":", JSON.stringify(files.slice(0, 10)));
-                } catch(e) {
-                    console.log("[DEBUG:B] ERROR: Cannot read LEAN_PATH directory:", e.message);
-                }
-                // Check for Init.olean specifically
-                try {
-                    var stat = FS.stat(leanPath + "/Init.olean");
-                    console.log("[DEBUG:B] Init.olean exists, size:", stat.size);
-                } catch(e) {
-                    console.log("[DEBUG:B] ERROR: Init.olean not found:", e.message);
-                }
-            } catch(e) {
-                console.log("[DEBUG:B] LEAN_PATH check failed:", e.message);
-            }
-            // #endregion
         }
     );
 #elif defined(LEAN_WINDOWS)
@@ -416,70 +348,25 @@ extern "C" LEAN_EXPORT int lean_main(int argc, char ** argv) {
     // see https://github.com/leanprover/lean4/issues/4291
     SetConsoleOutputCP(CP_UTF8);
 #endif
-    // #region agent log
-#ifdef LEAN_EMSCRIPTEN
-    EM_ASM({ console.log("[DEBUG:C] About to create lean::initializer"); });
-#endif
-    // #endregion
     auto init_start = std::chrono::steady_clock::now();
     lean::initializer init;
     second_duration init_time = std::chrono::steady_clock::now() - init_start;
-    // #region agent log
-#ifdef LEAN_EMSCRIPTEN
-    EM_ASM({ console.log("[DEBUG:C] lean::initializer completed successfully"); });
-#endif
-    // #endregion
 
     try {
-        // #region agent log
-#ifdef LEAN_EMSCRIPTEN
-        EM_ASM({ console.log("[DEBUG:D] About to call init_search_path()"); });
-#endif
-        // #endregion
         // Remark: This currently runs under `IO.initializing = true`.
         init_search_path();
-        // #region agent log
-#ifdef LEAN_EMSCRIPTEN
-        EM_ASM({ console.log("[DEBUG:D] init_search_path() completed successfully"); });
-#endif
-        // #endregion
     } catch (lean::throwable & ex) {
-        // #region agent log
-#ifdef LEAN_EMSCRIPTEN
-        EM_ASM({ console.log("[DEBUG:D] init_search_path() threw exception"); });
-#endif
-        // #endregion
         std::cerr << "error: " << ex.what() << std::endl;
         return 1;
     }
     consume_io_result(lean_enable_initializer_execution());
-    // #region agent log
-#ifdef LEAN_EMSCRIPTEN
-    EM_ASM({ console.log("[DEBUG:E] lean_enable_initializer_execution completed"); });
-#endif
-    // #endregion
 
     int rc;
     object_ref shell_opts;
     try {
-        // #region agent log
-#ifdef LEAN_EMSCRIPTEN
-        EM_ASM({ console.log("[DEBUG:E] Creating shell options"); });
-#endif
-        // #endregion
         shell_opts = mk_shell_options();
-        // #region agent log
-#ifdef LEAN_EMSCRIPTEN
-        EM_ASM({ console.log("[DEBUG:E] Shell options created, processing command line"); });
-#endif
-        // #endregion
         for (;;) {
             int c = getopt_long(argc, argv, g_opt_str, g_long_options, NULL);
-            // #region agent log
-#ifdef LEAN_EMSCRIPTEN
-            EM_ASM({ console.log("[DEBUG:E] getopt_long returned: " + $0); }, c);
-#endif
-            // #endregion
             if (c == -1)
                 break; // end of command line
             if (process_shell_option(shell_opts, c, optarg, rc))
@@ -488,20 +375,10 @@ extern "C" LEAN_EXPORT int lean_main(int argc, char ** argv) {
                 break; // stop consuming arguments after `--run`
         }
     } catch (lean::throwable & ex) {
-        // #region agent log
-#ifdef LEAN_EMSCRIPTEN
-        EM_ASM({ console.log("[DEBUG:E] Exception during option processing"); });
-#endif
-        // #endregion
         std::cerr << "error: " << ex.what() << std::endl;
         return 1;
     }
 
-    // #region agent log
-#ifdef LEAN_EMSCRIPTEN
-    EM_ASM({ console.log("[DEBUG:E] About to call io_mark_end_initialization"); });
-#endif
-    // #endregion
     lean::io_mark_end_initialization();
 
     if (get_shell_profiler(shell_opts)) {
@@ -509,76 +386,17 @@ extern "C" LEAN_EXPORT int lean_main(int argc, char ** argv) {
         report_profiling_time("initialization", init_time);
     }
 
-    // #region agent log
-#ifdef LEAN_EMSCRIPTEN
-    EM_ASM({ console.log("[DEBUG:E] Creating scoped_task_manager"); });
-#endif
-    // #endregion
     scoped_task_manager scope_task_man(get_shell_num_threads(shell_opts));
-    // #region agent log
-#ifdef LEAN_EMSCRIPTEN
-    EM_ASM({ console.log("[DEBUG:E] scoped_task_manager created"); });
-#endif
-    // #endregion
 
     try {
-        // #region agent log
-#ifdef LEAN_EMSCRIPTEN
-        EM_ASM({ console.log("[DEBUG:E] About to call run_shell_main with argc=" + $0); }, argc - optind);
-        // Log the arguments being passed to shell_main
-        for (int i = optind; i < argc; i++) {
-            EM_ASM({
-                console.log("[DEBUG:F] shell_main arg[" + $0 + "]=" + UTF8ToString($1));
-            }, i - optind, argv[i]);
-        }
-        // Check if input file exists
-        EM_ASM({
-            var inputFile = UTF8ToString($0);
-            console.log("[DEBUG:F] Checking if input file exists: " + inputFile);
-            try {
-                var stat = FS.stat(inputFile);
-                console.log("[DEBUG:F] Input file exists, size: " + stat.size + " bytes");
-                // Try to read first 100 chars
-                var content = FS.readFile(inputFile, { encoding: 'utf8' });
-                console.log("[DEBUG:F] Input file content (first 200 chars): " + content.substring(0, 200));
-            } catch(e) {
-                console.log("[DEBUG:F] ERROR: Input file does not exist or cannot be read: " + e.message);
-            }
-        }, argv[optind]);
-#endif
-        // #endregion
         return run_shell_main(argc - optind, argv + optind, shell_opts);
     } catch (lean::throwable & ex) {
-        // #region agent log
-#ifdef LEAN_EMSCRIPTEN
-        EM_ASM({
-            console.log("[DEBUG:F] run_shell_main threw lean::throwable: " + UTF8ToString($0));
-        }, ex.what());
-#endif
-        // #endregion
         std::cerr << ex.what() << "\n";
     } catch (std::bad_alloc & ex) {
-        // #region agent log
-#ifdef LEAN_EMSCRIPTEN
-        EM_ASM({ console.log("[DEBUG:F] run_shell_main threw bad_alloc"); });
-#endif
-        // #endregion
         std::cerr << "out of memory" << std::endl;
     } catch (std::exception & ex) {
-        // #region agent log
-#ifdef LEAN_EMSCRIPTEN
-        EM_ASM({
-            console.log("[DEBUG:F] run_shell_main threw std::exception: " + UTF8ToString($0));
-        }, ex.what());
-#endif
-        // #endregion
         std::cerr << "exception: " << ex.what() << std::endl;
     } catch (...) {
-        // #region agent log
-#ifdef LEAN_EMSCRIPTEN
-        EM_ASM({ console.log("[DEBUG:F] run_shell_main threw unknown exception"); });
-#endif
-        // #endregion
         std::cerr << "unknown exception" << std::endl;
     }
     return 1;

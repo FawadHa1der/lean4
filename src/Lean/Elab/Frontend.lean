@@ -299,8 +299,6 @@ def runFrontend
     (incrLoadFileName? : Option System.FilePath := none)
     (incrHeaderSaveFileName? : Option System.FilePath := none)
     : IO (Option Environment) := do
-  IO.println "[DEBUG:L] runFrontend entered"
-  IO.println s!"[DEBUG:L] fileName = {fileName}, mainModuleName = {mainModuleName}"
   let startTime := (← IO.monoNanosNow).toFloat / 1000000000
   let inputCtx := Parser.mkInputContext input fileName
   -- default `cmdlineSnapshots` to true (not done as default value for API back-compat reasons)
@@ -355,14 +353,11 @@ def runFrontend
   let snaps := Language.toSnapshotTree snap
   let severityOverrides := errorOnKinds.foldl (·.insert · .error) {}
 
-  IO.println "[DEBUG:N] About to run and report snapshots"
   -- reporting should be done before any early exit from the function
   let hasErrors ← snaps.runAndReport opts jsonOutput severityOverrides
-  IO.println s!"[DEBUG:N] Reporting complete, hasErrors = {hasErrors}"
 
   let some cmdState := Language.Lean.waitForFinalCmdState? snap
-    | IO.println "[DEBUG:N] waitForFinalCmdState? returned none"
-      return none
+    | return none
   let env := cmdState.env
   let finalOpts := cmdState.scopes[0]!.opts
 

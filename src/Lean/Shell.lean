@@ -683,14 +683,11 @@ def shellMain (args : List String) (opts : ShellOptions) : IO UInt32 := do
       IO.eprintln "Expected exactly one file name"
       displayHelp (useStderr := true)
       return 1
-  IO.println s!"[DEBUG:I] fileName = {fileName}"
-  IO.println "[DEBUG:I] Reading file contents"
   let contents ← decodeLossyUTF8 <$> do
     if opts.useStdin then
       (← IO.getStdin).readBinToEnd
     else
       IO.FS.readBinFile fileName
-  IO.println s!"[DEBUG:I] contents length = {contents.length}"
   if opts.onlyDeps then
     Elab.printImports contents fileName
     return 0
@@ -712,9 +709,7 @@ def shellMain (args : List String) (opts : ShellOptions) : IO UInt32 := do
       pure (contents.sliceFrom endLinePos).copy
     else
       pure contents
-  IO.println "[DEBUG:J] Loading module setup"
   let setup? ← opts.setupFileName?.mapM ModuleSetup.load
-  IO.println s!"[DEBUG:J] setup? = {setup?.isSome}"
   let mainModuleName ←
     if let some setup := setup? then
       pure setup.name
@@ -726,8 +721,6 @@ def shellMain (args : List String) (opts : ShellOptions) : IO UInt32 := do
           throw e
     else
       pure `_stdin
-  IO.println s!"[DEBUG:J] mainModuleName = {mainModuleName}"
-  IO.println "[DEBUG:K] Calling Elab.runFrontend"
   let env? ← Elab.runFrontend contents opts.leanOpts fileName mainModuleName
     opts.trustLevel opts.oleanFileName? opts.ileanFileName? opts.jsonOutput opts.errorOnKinds
     #[] opts.printStats setup?

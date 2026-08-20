@@ -14,12 +14,6 @@ Author: Leonardo de Moura
 #include "library/constructions/init_module.h"
 #include "library/print.h"
 #include "initialize/init.h"
-// #region agent log
-#if defined(LEAN_EMSCRIPTEN)
-#include <emscripten.h>
-#endif
-// #endregion
-
 namespace lean {
 extern "C" object* initialize_Init(uint8_t);
 extern "C" object* initialize_Std(uint8_t);
@@ -29,77 +23,22 @@ extern "C" object* initialize_Lean(uint8_t);
 you must first call this function, and then `lean::io_mark_end_initialization`. In between
 these two calls, you may also have to run additional initializers for your own modules. */
 extern "C" LEAN_EXPORT void lean_initialize() {
-    // #region agent log
-#if defined(LEAN_EMSCRIPTEN)
-    EM_ASM({ console.log("[DEBUG:INIT] lean_initialize() started"); });
-#endif
-    // #endregion
     save_stack_info();
-    // #region agent log
-#if defined(LEAN_EMSCRIPTEN)
-    EM_ASM({ console.log("[DEBUG:INIT] save_stack_info() done"); });
-#endif
-    // #endregion
     initialize_util_module();
-    // #region agent log
-#if defined(LEAN_EMSCRIPTEN)
-    EM_ASM({ console.log("[DEBUG:INIT] initialize_util_module() done"); });
-#endif
-    // #endregion
     uint8_t builtin = 1;
     // Initializing the core libs explicitly is necessary because of references to them other than
     // via `import`, such as:
     // * calling exported Lean functions from C++
     // * calling into native code of the current module from a previous stage when `prefer_native`
     //   is set
-    // #region agent log
-#if defined(LEAN_EMSCRIPTEN)
-    EM_ASM({ console.log("[DEBUG:INIT] About to initialize_Init..."); });
-#endif
-    // #endregion
     consume_io_result(initialize_Init(builtin));
-    // #region agent log
-#if defined(LEAN_EMSCRIPTEN)
-    EM_ASM({ console.log("[DEBUG:INIT] initialize_Init() done"); });
-#endif
-    // #endregion
-    // #region agent log
-#if defined(LEAN_EMSCRIPTEN)
-    EM_ASM({ console.log("[DEBUG:INIT] About to initialize_Std..."); });
-#endif
-    // #endregion
     consume_io_result(initialize_Std(builtin));
-    // #region agent log
-#if defined(LEAN_EMSCRIPTEN)
-    EM_ASM({ console.log("[DEBUG:INIT] initialize_Std() done"); });
-#endif
-    // #endregion
-    // #region agent log
-#if defined(LEAN_EMSCRIPTEN)
-    EM_ASM({ console.log("[DEBUG:INIT] About to initialize_Lean..."); });
-#endif
-    // #endregion
     consume_io_result(initialize_Lean(builtin));
-    // #region agent log
-#if defined(LEAN_EMSCRIPTEN)
-    EM_ASM({ console.log("[DEBUG:INIT] initialize_Lean() done"); });
-#endif
-    // #endregion
     initialize_kernel_module();
-    // #region agent log
-#if defined(LEAN_EMSCRIPTEN)
-    EM_ASM({ console.log("[DEBUG:INIT] initialize_kernel_module() done"); });
-#endif
-    // #endregion
     init_default_print_fn();
     initialize_library_core_module();
     initialize_library_module();
     initialize_constructions_module();
-    // #region agent log
-#if defined(LEAN_EMSCRIPTEN)
-    EM_ASM({ console.log("[DEBUG:INIT] lean_initialize() completed successfully"); });
-#endif
-    // #endregion
 }
 
 void finalize() {

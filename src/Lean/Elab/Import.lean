@@ -153,8 +153,6 @@ def processHeaderCore
     if Elab.inServer.get opts then .server else .exported
   else
     .private
-  if System.Platform.isEmscripten then
-    IO.println s!"[DEBUG:IMPORT] Emscripten detected, using level = {repr level}"
   let (env, messages) ← try
     let env ←
       importModules (leakEnv := leakEnv) (loadExts := true) (level := level)
