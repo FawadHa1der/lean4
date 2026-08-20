@@ -43,17 +43,17 @@ def AttributeIndex.AttributeReturnIndex : AttributeIndex := { val := 0 }
 -- This value is ~0 for 64 bit
 def AttributeIndex.AttributeFunctionIndex : AttributeIndex := { val := 18446744073709551615 }
 
-structure BasicBlock (ctx : Context)  where
+structure Context where
+  private mk :: ptr : USize
+instance : Nonempty Context := by exact ⟨{ ptr := default }⟩
+
+structure BasicBlock (ctx : Context) where
   private mk :: ptr : USize
 instance : Nonempty (BasicBlock ctx) := by exact ⟨{ ptr := default }⟩
 
 structure Builder (ctx : Context) where
   private mk :: ptr : USize
 instance : Nonempty (Builder ctx) := by exact ⟨{ ptr := default }⟩
-
-structure Context where
-  private mk :: ptr : USize
-instance : Nonempty Context := by exact ⟨{ ptr := default }⟩
 
 structure LLVMType (ctx : Context) where
   private mk :: ptr : USize
