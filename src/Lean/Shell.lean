@@ -135,14 +135,35 @@ def wasmCompile (code : String) (fileName : String := "<input>") : IO UInt32 := 
     { commandState := cmdState, parserState := parserState, cmdPos := parserState.pos }
   -- `Command.elabCommandTopLevel` resets `commandState.messages` at the start of
   -- every command, so the final state holds only the last command's messages.
-  -- Collect the log after each command instead of reading the end state; seed it
-  -- with any header (import) parse errors.
+  -- Collecting after each command recovers ELABORATION messages, but PARSER
+  -- messages (garbage text, unterminated declarations) are attached before
+  -- elaboration and were silently lost to that reset. Inline the parse step of
+  -- `Frontend.processCommand` so parse diagnostics reach the log directly:
+  --  * `parseCommand` gets an EMPTY log, so its result is exactly the new
+  --    parse errors, which we append to `acc` before elaborating;
+  --  * the command state is seeded with an empty log before elaboration, so
+  --    the post-command collection is exactly that command's elaboration
+  --    messages regardless of whether `elabCommandTopLevel` restores its
+  --    incoming log (behavior that has changed across toolchains).
   let collect : Elab.Frontend.FrontendM MessageLog := do
     let mut acc : MessageLog := headerMessages
     let mut done := false
     while !done do
-      done := (← Elab.Frontend.processCommand)
+      Elab.Frontend.updateCmdPos
+      let cmdState ← Elab.Frontend.getCommandState
+      let pstate ← Elab.Frontend.getParserState
+      let scope := cmdState.scopes.head!
+      let pmctx : Parser.ParserModuleContext :=
+        { env := cmdState.env, options := scope.opts,
+          currNamespace := scope.currNamespace, openDecls := scope.openDecls }
+      let (cmd, ps, parseMessages) := Parser.parseCommand inputCtx pmctx pstate {}
+      acc := acc ++ parseMessages
+      modify fun s => { s with commands := s.commands.push cmd }
+      Elab.Frontend.setParserState ps
+      Elab.Frontend.setMessages {}
+      Elab.Frontend.elabCommandAtFrontend cmd
       acc := acc ++ (← Elab.Frontend.getCommandState).messages
+      done := Parser.isTerminalCommand cmd
     return acc
   let (msgLog, _s) ← StateRefT'.run (ReaderT.run collect frontendCtx) frontendState
 
