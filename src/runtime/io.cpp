@@ -972,7 +972,7 @@ extern "C" LEAN_EXPORT obj_res lean_io_getenv(b_obj_arg env_var) {
 #if defined(LEAN_EMSCRIPTEN)
     // HACK(WN): getenv doesn't seem to work in Emscripten even though it should
     // see https://emscripten.org/docs/porting/connecting_cpp_and_javascript/Interacting-with-code.html#interacting-with-code-environment-variables
-    char* val = reinterpret_cast<char*>(EM_ASM_INT({
+    char* val = reinterpret_cast<char*>(EM_ASM_PTR({
         var envVar = UTF8ToString($0);
         var val = ENV[envVar];
         if (val) {
@@ -1376,8 +1376,8 @@ extern "C" LEAN_EXPORT obj_res lean_io_app_path() {
         return io_result_mk_error("failed to resolve symbolic links when locating application");
     return io_result_mk_ok(mk_string(buf2));
 #elif defined(LEAN_EMSCRIPTEN)
-    // See https://emscripten.org/docs/api_reference/emscripten.h.html#c.EM_ASM_INT
-    char* appPath = reinterpret_cast<char*>(EM_ASM_INT({
+    // A pointer return must use EM_ASM_PTR: EM_ASM_INT truncates wasm64 addresses.
+    char* appPath = reinterpret_cast<char*>(EM_ASM_PTR({
         var isNode = (typeof process !== "undefined") &&
                      (process.release && process.release.name === "node");
         
