@@ -60,6 +60,7 @@ class LEAN_EXPORT object_compactor {
     void * m_end;
     void * m_capacity;
     size_t capacity() const { return static_cast<char*>(m_capacity) - static_cast<char*>(m_begin); }
+    static size_t initial_capacity();
     object_offset save(object * o, object * new_o);
     object_offset save_max_sharing(object * o, object * new_o, size_t new_o_sz);
     object_offset to_offset(object * o);

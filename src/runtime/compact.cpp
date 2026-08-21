@@ -8,10 +8,12 @@ Author: Leonardo de Moura
 #include <string>
 #include <vector>
 #include <cstring>
+#include <cstdlib>
 #include <lean/lean.h>
 #include "runtime/hash.h"
 #include "runtime/compact.h"
 #include "runtime/exception.h"
+#include "runtime/sstream.h"
 #include "util/alloc.h"
 
 #ifdef LEAN_WINDOWS
@@ -150,9 +152,11 @@ object_compactor::object_compactor(void * base_addr, std::vector<region_view> de
     m_libs(get_loaded_libs()),
     m_allow_closures(allow_closures),
     m_base_addr(base_addr),
-    m_begin(malloc(LEAN_COMPACTOR_INIT_SZ)),
+    m_begin(malloc(initial_capacity())),
     m_end(m_begin),
-    m_capacity(static_cast<char*>(m_begin) + LEAN_COMPACTOR_INIT_SZ) {
+    m_capacity(static_cast<char*>(m_begin) + initial_capacity()) {
+    if (m_begin == nullptr)
+        throw exception("object compactor: failed to reserve the initial region buffer");
     // Sort dep regions by `begin` address for binary search in `to_offset`.
     std::sort(m_dep_regions.begin(), m_dep_regions.end(),
               [](region_view const & a, region_view const & b) { return a.begin < b.begin; });
@@ -169,18 +173,37 @@ object_compactor::~object_compactor() {
 */
 object_offset g_null_offset = reinterpret_cast<object_offset>(static_cast<size_t>(-1) - 1);
 
+/* Initial region buffer capacity. `LEAN_COMPACTOR_RESERVE` (bytes) lets a caller that
+   knows it is about to compact a multi-GB environment reserve the whole buffer up front:
+   growth-by-doubling needs the old and new buffers to coexist during the copy, which for
+   a 2 GiB buffer is a 6 GiB transient on top of the environment being saved — more than a
+   16 GiB wasm64 address space holds next to a whole-Mathlib environment. */
+size_t object_compactor::initial_capacity() {
+    if (char const * env = getenv("LEAN_COMPACTOR_RESERVE")) {
+        size_t v = strtoull(env, nullptr, 10);
+        if (v >= LEAN_COMPACTOR_INIT_SZ) return v;
+    }
+    return LEAN_COMPACTOR_INIT_SZ;
+}
+
 void * object_compactor::alloc(size_t sz) {
     size_t rem = sz % sizeof(void*);
     if (rem != 0)
         sz = sz + sizeof(void*) - rem;
     while (static_cast<char*>(m_end) + sz > m_capacity) {
         size_t new_capacity = capacity()*2;
-        void * new_begin = malloc(new_capacity);
-        memcpy(new_begin, m_begin, size());
-        m_end      = static_cast<char*>(new_begin) + size();
-        m_capacity = static_cast<char*>(new_begin) + new_capacity;
-        free(m_begin);
+        size_t used = size();
+        // `realloc` extends in place when the buffer tops the heap, avoiding the copy and
+        // its transient double footprint; a failed growth must be an error, not a write
+        // through a null pointer.
+        void * new_begin = realloc(m_begin, new_capacity);
+        if (new_begin == nullptr)
+            throw exception((sstream() << "object compactor: out of memory growing the region buffer to "
+                             << (new_capacity >> 20) << " MB (" << (used >> 20) << " MB used); "
+                             << "set LEAN_COMPACTOR_RESERVE to reserve the buffer up front").str());
         m_begin    = new_begin;
+        m_end      = static_cast<char*>(new_begin) + used;
+        m_capacity = static_cast<char*>(new_begin) + new_capacity;
     }
     void * r = m_end;
     memset(r, 0, sz);
