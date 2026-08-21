@@ -37,11 +37,49 @@ struct region_view {
     void * base_addr;
 };
 
+/** Open-addressing pointer → offset map for the compactor's seen-object table.
+
+    Compacting a whole Mathlib-scale environment visits ~10^8 objects. A node-based
+    `std::unordered_map` spends ~56 bytes per entry on that (several GB on top of the
+    environment and the output buffer — more than a 16 GiB wasm64 address space
+    holds); a flat table costs 16 bytes per slot at ≤ 0.7 load and walks faster. Keys
+    are non-null object pointers, so null marks an empty slot. */
+class object_offset_table {
+    struct slot { object * m_key; object_offset m_val; };
+    slot * m_slots = nullptr;
+    size_t m_mask = 0;
+    size_t m_size = 0;
+    static size_t hash(object * o) {
+        // pointers are 8-byte aligned: mix the informative bits
+        size_t h = reinterpret_cast<size_t>(o) >> 3;
+        h ^= h >> 29; h *= 0xbf58476d1ce4e5b9ULL; h ^= h >> 32;
+        return h;
+    }
+    void grow();
+public:
+    object_offset_table();
+    ~object_offset_table();
+    object_offset_table(object_offset_table const &) = delete;
+    object_offset_table & operator=(object_offset_table const &) = delete;
+    /** Returns the stored offset, or sets `found = false`. */
+    object_offset find(object * o, bool & found) const {
+        size_t i = hash(o) & m_mask;
+        for (;;) {
+            slot const & s = m_slots[i];
+            if (s.m_key == o) { found = true; return s.m_val; }
+            if (s.m_key == nullptr) { found = false; return nullptr; }
+            i = (i + 1) & m_mask;
+        }
+    }
+    void insert(object * o, object_offset off);
+    size_t size() const { return m_size; }
+};
+
 class LEAN_EXPORT object_compactor {
     struct max_sharing_table;
     friend struct max_sharing_hash;
     friend struct max_sharing_eq;
-    lean::unordered_map<object*, object_offset, std::hash<object*>, std::equal_to<object*>> m_obj_table;
+    object_offset_table m_obj_table;
     std::unique_ptr<max_sharing_table> m_max_sharing_table;
     // Scratch stack of child offsets, to avoid repeated stack allocs during recursion
     std::vector<object_offset> m_tmp;

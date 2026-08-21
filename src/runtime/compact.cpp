@@ -145,6 +145,48 @@ std::vector<lib_info> object_compactor::used_libs() const {
     return result;
 }
 
+object_offset_table::object_offset_table() {
+    m_mask = (1u << 16) - 1;
+    m_slots = static_cast<slot *>(calloc(m_mask + 1, sizeof(slot)));
+    if (m_slots == nullptr)
+        throw exception("object compactor: failed to allocate the object table");
+}
+
+object_offset_table::~object_offset_table() {
+    free(m_slots);
+}
+
+void object_offset_table::grow() {
+    size_t old_cap = m_mask + 1;
+    slot * old = m_slots;
+    size_t new_cap = old_cap * 2;
+    slot * fresh = static_cast<slot *>(calloc(new_cap, sizeof(slot)));
+    if (fresh == nullptr)
+        throw exception((sstream() << "object compactor: out of memory growing the object table to "
+                         << new_cap << " slots").str());
+    m_slots = fresh;
+    m_mask = new_cap - 1;
+    for (size_t j = 0; j < old_cap; j++) {
+        if (old[j].m_key == nullptr) continue;
+        size_t i = hash(old[j].m_key) & m_mask;
+        while (m_slots[i].m_key != nullptr) i = (i + 1) & m_mask;
+        m_slots[i] = old[j];
+    }
+    free(old);
+}
+
+void object_offset_table::insert(object * o, object_offset off) {
+    lean_assert(o != nullptr);
+    if ((m_size + 1) * 10 > (m_mask + 1) * 7) grow();
+    size_t i = hash(o) & m_mask;
+    for (;;) {
+        slot & s = m_slots[i];
+        if (s.m_key == nullptr) { s.m_key = o; s.m_val = off; m_size++; return; }
+        if (s.m_key == o) { s.m_val = off; return; }
+        i = (i + 1) & m_mask;
+    }
+}
+
 object_compactor::object_compactor(void * base_addr, std::vector<region_view> dep_regions,
                                    bool allow_closures):
     m_max_sharing_table(new max_sharing_table(this)),
@@ -215,7 +257,7 @@ void * object_compactor::alloc(size_t sz) {
 object_offset object_compactor::save(object * o, object * new_o) {
     lean_assert(m_begin <= new_o && new_o < m_end);
     object_offset off = reinterpret_cast<object_offset>(reinterpret_cast<char*>(new_o) - reinterpret_cast<char*>(m_begin) + reinterpret_cast<size_t>(m_base_addr));
-    m_obj_table.insert(std::make_pair(o, off));
+    m_obj_table.insert(o, off);
     return off;
 }
 
@@ -235,9 +277,10 @@ object_offset object_compactor::to_offset(object * o) {
     if (lean_is_scalar(o)) {
         return o;
     } else {
-        auto it = m_obj_table.find(o);
-        if (it != m_obj_table.end()) {
-            return it->second;
+        bool found;
+        object_offset seen = m_obj_table.find(o, found);
+        if (found) {
+            return seen;
         }
         // Only check dep regions for non-heap objects
         if (!m_dep_regions.empty() && !lean_has_rc(o)) {
@@ -254,7 +297,7 @@ object_offset object_compactor::to_offset(object * o) {
                     // Object is in this dep region, compute its base_addr-relative pointer
                     object_offset off = reinterpret_cast<object_offset>(
                         reinterpret_cast<size_t>(region.base_addr) + (addr - static_cast<char *>(region.begin)));
-                    m_obj_table.insert(std::make_pair(o, off));
+                    m_obj_table.insert(o, off);
                     return off;
                 }
             }
