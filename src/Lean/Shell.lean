@@ -240,6 +240,29 @@ def wasmLoadSnapshot (path : String) : IO UInt32 := do
     IO.eprintln s!"[WASM DEBUG] wasmLoadSnapshot failed: {e}"
     return 1
 
+/--
+`wasmLoadSnapshot` for a snapshot the host streamed straight into the wasm heap: `ptr` is a
+`malloc`-allocated buffer of `size` bytes holding the whole `.snap` file. Skips the MEMFS
+staging copy, which for a multi-GB region is a second multi-GB allocation in the host's JS heap.
+-/
+@[export lean_wasm_load_snapshot_mem]
+def wasmLoadSnapshotMem (ptr size : USize) : IO UInt32 := do
+  try
+    IO.eprintln s!"[WASM DEBUG] wasmLoadSnapshotMem: loading {size} bytes"
+    let (cmdState, initModIdxs) ← unsafe Elab.loadHeaderSnapshotCmdStateMem ptr size
+    let env := cmdState.env.setMainModule .anonymous
+    unsafe enableInitializersExecution
+    withImporting do
+      unsafe runInitAttrsForModules env initModIdxs {}
+    unsafe enableInitializersExecution
+    let key := env.header.imports.map (·.module)
+    wasmEnvCache.modify (·.push (key, env))
+    IO.eprintln s!"[WASM DEBUG] wasmLoadSnapshotMem: cached env for {key}"
+    return 0
+  catch e =>
+    IO.eprintln s!"[WASM DEBUG] wasmLoadSnapshotMem failed: {e}"
+    return 1
+
 /-- Whether Lean was built with an address sanitizer enabled. -/
 @[extern "lean_internal_has_address_sanitizer"]
 opaque Internal.hasAddressSanitizer (_ : Unit) : Bool

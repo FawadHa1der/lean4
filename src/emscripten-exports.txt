@@ -100051,6 +100051,7 @@ _lean_uv_udp_set_ttl
 _lean_uv_uptime
 _lean_wasm_compile
 _lean_wasm_load_snapshot
+_lean_wasm_load_snapshot_mem
 _lean_wasm_reset
 _lean_whnf
 _lean_windows_get_next_transition

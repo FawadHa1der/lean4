@@ -282,6 +282,20 @@ unsafe def loadHeaderSnapshotCmdState (fname : System.FilePath) :
     | throw <| IO.userError s!"snapshot {fname} has no processed header"
   return (hps.cmdState, incr.initModIdxs)
 
+/--
+`loadHeaderSnapshotCmdState` for a snapshot already resident in memory (see
+`CompactedRegion.readMem`). The snapshot must be self-contained (no dep regions), which is the
+case for every Emscripten-produced `--incr-header-save` file.
+-/
+unsafe def loadHeaderSnapshotCmdStateMem (ptr size : USize) :
+    IO (Command.State × Array Nat) := do
+  let (incr, _region) ← CompactedRegion.readMem (α := IncrSnapshot) ptr size #[]
+  let some parsed := incr.snap.result?
+    | throw <| IO.userError "in-memory snapshot has no parse result"
+  let some hps := parsed.processedSnap.get.result?
+    | throw <| IO.userError "in-memory snapshot has no processed header"
+  return (hps.cmdState, incr.initModIdxs)
+
 def runFrontend
     (input : String)
     (opts : Options)

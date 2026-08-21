@@ -445,6 +445,54 @@ static object * mk_compacted_region(b_obj_arg ofname, object * root,
     return r;
 }
 
+// Shared by the file and in-memory readers: parse the (v2/v3) sections that follow the header,
+// run the relocation walk, and frame the result as `(root, CompactedRegion)`. `buffer` is the
+// whole mapping/allocation (`size` bytes, header included); `base_addr` is the logical address
+// its pointers were saved relative to.
+static object * finish_region_read(b_obj_arg ofname, olean_header const & header, char * buffer,
+                                   size_t size, bool is_mmap, std::vector<region_view> dep_regions) {
+    char * base_addr = reinterpret_cast<char *>(header.base_addr);
+    // v3 format, default data otherwise
+    std::vector<std::pair<size_t, ptrdiff_t>> lib_relocs;
+    std::vector<size_t> closure_offsets;
+    size_t data_section_off = sizeof(olean_header);
+    size_t data_section_sz = size - sizeof(olean_header);
+    if (header.version == 3) {
+        size_t data_size;
+        memcpy(&data_size, buffer + sizeof(olean_header), sizeof(data_size));
+        data_section_off = sizeof(olean_header) + sizeof(size_t);
+        data_section_sz = data_size;
+        char const * p = buffer + data_section_off + data_size;
+        uint32_t num_closure_offsets;
+        memcpy(&num_closure_offsets, p, sizeof(num_closure_offsets));
+        p += sizeof(num_closure_offsets);
+        if (num_closure_offsets > 0) {
+            closure_offsets.reserve(num_closure_offsets);
+            for (uint32_t i = 0; i < num_closure_offsets; i++) {
+                uint64_t off;
+                memcpy(&off, p, sizeof(off));
+                p += sizeof(off);
+                closure_offsets.push_back(static_cast<size_t>(off));
+            }
+            lib_relocs = read_lib_table_from_buffer(p);
+        }
+    }
+
+    region_reader reader(
+        data_section_sz, buffer + data_section_off,
+        base_addr + data_section_off,
+        std::move(dep_regions),
+        std::move(lib_relocs), std::move(closure_offsets));
+    object * mod = reader.read();
+    object * pair = alloc_cnstr(0, 2, 0);
+    cnstr_set(pair, 0, mod);
+    // The Lean region is framed by its whole mapping (`buffer`, `base_addr` = the mapped-at
+    // logical address, `size` = the file size), not the inner data section.
+    cnstr_set(pair, 1, mk_compacted_region(ofname, mod,
+        buffer, reinterpret_cast<size_t>(base_addr), size, is_mmap));
+    return io_result_mk_ok(pair);
+}
+
 // Implements `Lean.CompactedRegion.read`. Loads a compacted region from disk. `odep_regions`
 // carries `CompactedRegion`s whose address ranges must be known to resolve cross-region pointers
 // in this file. Returns `(α × CompactedRegion)`, where `α` is the type the Lean caller asks the
@@ -576,47 +624,39 @@ extern "C" LEAN_EXPORT object * lean_compacted_region_read(b_obj_arg ofname, b_o
 #endif
         }
 
-        // v3 format, default data otherwise
-        std::vector<std::pair<size_t, ptrdiff_t>> lib_relocs;
-        std::vector<size_t> closure_offsets;
-        size_t data_section_off = sizeof(olean_header);
-        size_t data_section_sz = size - sizeof(olean_header);
-        if (header.version == 3) {
-            size_t data_size;
-            memcpy(&data_size, buffer + sizeof(olean_header), sizeof(data_size));
-            data_section_off = sizeof(olean_header) + sizeof(size_t);
-            data_section_sz = data_size;
-            char const * p = buffer + data_section_off + data_size;
-            uint32_t num_closure_offsets;
-            memcpy(&num_closure_offsets, p, sizeof(num_closure_offsets));
-            p += sizeof(num_closure_offsets);
-            if (num_closure_offsets > 0) {
-                closure_offsets.reserve(num_closure_offsets);
-                for (uint32_t i = 0; i < num_closure_offsets; i++) {
-                    uint64_t off;
-                    memcpy(&off, p, sizeof(off));
-                    p += sizeof(off);
-                    closure_offsets.push_back(static_cast<size_t>(off));
-                }
-                lib_relocs = read_lib_table_from_buffer(p);
-            }
-        }
-
-        region_reader reader(
-            data_section_sz, buffer + data_section_off,
-            base_addr + data_section_off,
-            std::move(dep_regions),
-            std::move(lib_relocs), std::move(closure_offsets));
-        object * mod = reader.read();
-        object * pair = alloc_cnstr(0, 2, 0);
-        cnstr_set(pair, 0, mod);
-        // The Lean region is framed by its whole mapping (`buffer`, `base_addr` = the mapped-at
-        // logical address, `size` = the file size), not the inner data section.
-        cnstr_set(pair, 1, mk_compacted_region(ofname, mod,
-            buffer, reinterpret_cast<size_t>(base_addr), size, is_mmap));
-        return io_result_mk_ok(pair);
+        return finish_region_read(ofname, header, buffer, size, is_mmap, std::move(dep_regions));
     } catch (exception & ex) {
         return io_result_mk_error((sstream() << "failed to read '" << olean_fn << "': " << ex.what()).str());
+    }
+}
+
+// Implements `Lean.CompactedRegion.readMem`: the same load as `lean_compacted_region_read`,
+// from a region already resident in memory at `ptr` (`size` bytes, header included). The buffer
+// must come from `malloc` and becomes the `CompactedRegion`'s (freed by
+// `lean_compacted_region_free`). Hosts without `mmap` — a browser worker streaming a snapshot
+// straight into the wasm heap — use this to skip the file-system staging copy of a multi-GB region.
+extern "C" LEAN_EXPORT object * lean_compacted_region_read_mem(size_t ptr, size_t size, b_obj_arg odep_regions) {
+    try {
+        std::vector<region_view> dep_regions = extract_dep_regions(odep_regions);
+        char * buffer = reinterpret_cast<char *>(ptr);
+        olean_header default_header = {};
+        olean_header header;
+        if (buffer == nullptr || size < sizeof(header))
+            return io_result_mk_error("failed to read in-memory region: too small");
+        memcpy(&header, buffer, sizeof(header));
+        if (memcmp(header.marker, default_header.marker, sizeof(header.marker)) != 0)
+            return io_result_mk_error("failed to read in-memory region: invalid header");
+        if ((header.version != 2 && header.version != 3) || header.flags != default_header.flags
+#ifdef LEAN_CHECK_OLEAN_VERSION
+            || strncmp(header.githash, LEAN_GITHASH, sizeof(header.githash)) != 0
+#endif
+        ) {
+            return io_result_mk_error("failed to read in-memory region: incompatible header");
+        }
+        object_ref name(lean_mk_string("<memory>"));
+        return finish_region_read(name.raw(), header, buffer, size, /* is_mmap */ false, std::move(dep_regions));
+    } catch (exception & ex) {
+        return io_result_mk_error((sstream() << "failed to read in-memory region: " << ex.what()).str());
     }
 }
 

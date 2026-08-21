@@ -108,4 +108,15 @@ undefined behavior on use.
 public unsafe opaque CompactedRegion.read {α : Type} (fname : @& System.FilePath)
     (depRegions : @& Array CompactedRegion) : IO (α × CompactedRegion)
 
+/--
+`CompactedRegion.read` for a region already resident in memory at `ptr` (`size` bytes, header
+included). The buffer must have been allocated with the runtime's `malloc`; it becomes the
+returned region's backing store and is released by `CompactedRegion.free`. Lets hosts without
+`mmap` (e.g. a browser worker streaming a snapshot straight into the heap) skip a file-system
+staging copy. Same type-erasure caveat as `CompactedRegion.read`.
+-/
+@[extern "lean_compacted_region_read_mem"]
+public unsafe opaque CompactedRegion.readMem {α : Type} (ptr : USize) (size : USize)
+    (depRegions : @& Array CompactedRegion) : IO (α × CompactedRegion)
+
 end Lean
