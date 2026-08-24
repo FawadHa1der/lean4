@@ -12,6 +12,7 @@ Authors: Leonardo de Moura, Gabriel Ebner, Sebastian Ullrich
 #include <string>
 #include <sstream>
 #include <fstream>
+#include <chrono>
 #include <algorithm>
 #include <sys/stat.h>
 #include <cerrno>
@@ -483,7 +484,13 @@ static object * finish_region_read(b_obj_arg ofname, olean_header const & header
         base_addr + data_section_off,
         std::move(dep_regions),
         std::move(lib_relocs), std::move(closure_offsets));
+    auto walk_start = std::chrono::steady_clock::now();
     object * mod = reader.read();
+    auto walk_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - walk_start).count();
+    if (data_section_sz > (size_t(64) << 20))
+        fprintf(stderr, "[WASM PROFILE] region relocation walk: %lld ms (%zu MB)\n",
+                (long long) walk_ms, data_section_sz >> 20);
     object * pair = alloc_cnstr(0, 2, 0);
     cnstr_set(pair, 0, mod);
     // The Lean region is framed by its whole mapping (`buffer`, `base_addr` = the mapped-at

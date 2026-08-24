@@ -249,14 +249,42 @@ staging copy, which for a multi-GB region is a second multi-GB allocation in the
 def wasmLoadSnapshotMem (ptr size : USize) : IO UInt32 := do
   try
     IO.eprintln s!"[WASM DEBUG] wasmLoadSnapshotMem: loading {size} bytes"
+    let t0 ← IO.monoMsNow
     let (cmdState, initModIdxs) ← unsafe Elab.loadHeaderSnapshotCmdStateMem ptr size
+    let t1 ← IO.monoMsNow
     let env := cmdState.env.setMainModule .anonymous
+    let t2 ← IO.monoMsNow
     unsafe enableInitializersExecution
-    withImporting do
-      unsafe runInitAttrsForModules env initModIdxs {}
+    -- Per-module timing: `runInitAttrsForModules` is a plain loop over the
+    -- indices, so singleton calls preserve order and semantics exactly. The
+    -- replay dominates whole-Mathlib loads (measured 106 s of a 107 s load,
+    -- versus 0.7 s for the 2.6 GB relocation walk), so name the offenders
+    -- whenever it is slow enough to matter.
+    let total := initModIdxs.size
+    let initTimes ← withImporting do
+      let mut slow : Array (Nat × Nat) := #[]
+      let mut i := 0
+      for modIdx in initModIdxs do
+        i := i + 1
+        -- Streamed through printErr DURING the otherwise-blocking load call, so
+        -- the host can show real per-module progress for the ~2-minute replay.
+        if h : modIdx < env.header.modules.size then
+          IO.eprintln s!"[WASM INIT] {i}/{total} {env.header.modules[modIdx].module}"
+        let s ← IO.monoMsNow
+        unsafe runInitAttrsForModules env #[modIdx] {}
+        let d := (← IO.monoMsNow) - s
+        if d > 0 then slow := slow.push (modIdx, d)
+      return slow
+    let t3 ← IO.monoMsNow
+    if t3 - t2 > 5000 then
+      for (modIdx, d) in (initTimes.qsort (·.2 > ·.2))[:10] do
+        if h : modIdx < env.header.modules.size then
+          IO.eprintln s!"[WASM PROFILE] init {env.header.modules[modIdx].module}: {d} ms"
     unsafe enableInitializersExecution
     let key := env.header.imports.map (·.module)
     wasmEnvCache.modify (·.push (key, env))
+    let t4 ← IO.monoMsNow
+    IO.eprintln s!"[WASM PROFILE] snapshot load stages: region read+materialize {t1-t0} ms · setMainModule {t2-t1} ms · init replay ({initModIdxs.size} modules) {t3-t2} ms · cache {t4-t3} ms"
     IO.eprintln s!"[WASM DEBUG] wasmLoadSnapshotMem: cached env for {key}"
     return 0
   catch e =>
