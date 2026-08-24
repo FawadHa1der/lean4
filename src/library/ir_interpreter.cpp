@@ -34,6 +34,9 @@ functions, which have a (relatively) homogeneous ABI that we can use without run
 #include <psapi.h>
 #else
 #include <dlfcn.h>
+#ifdef LEAN_EMSCRIPTEN
+#include <emscripten.h>
+#endif
 #endif
 #include "library/ir_interpreter.h"
 #include "runtime/flet.h"
@@ -338,8 +341,29 @@ void print_value(tout const & ios, value const & v, type t) {
   return print_value(const_cast<tout &>(ios), v, t);
 }
 
+#ifdef LEAN_EMSCRIPTEN
+// Fast negative gate for native-symbol probes. Under Emscripten, dlsym is a
+// JavaScript call that allocates an error string on every miss — and the
+// interpreter probes for a native implementation of EVERY symbol it touches,
+// while Mathlib-and-friends symbols never exist in the binary. Profiling a
+// whole-Mathlib snapshot load attributed 173 s of 180 s to these misses.
+// One pass over the export table builds a Set; misses then cost a hash
+// lookup instead of a dlsym round-trip.
+EM_JS(int, qed64_symbol_exists, (char const * sym), {
+    if (!Module.qed64ExportSet) {
+        Module.qed64ExportSet = new Set(Object.keys(wasmExports));
+    }
+    // wasm64: pointer parameters arrive as BigInt; UTF8ToString needs Number.
+    return Module.qed64ExportSet.has(UTF8ToString(Number(sym))) ? 1 : 0;
+});
+#endif
+
 void * lookup_symbol_in_cur_exe(char const * sym) {
-#ifdef LEAN_WINDOWS
+#ifdef LEAN_EMSCRIPTEN
+    if (!qed64_symbol_exists(sym))
+        return nullptr;
+    return dlsym(RTLD_DEFAULT, sym);
+#elif defined(LEAN_WINDOWS)
     std::vector<HMODULE> hmods(128);
     DWORD bytes_needed;
     lean_always_assert(EnumProcessModules(GetCurrentProcess(), &hmods[0], hmods.size() * sizeof(HMODULE), &bytes_needed));
