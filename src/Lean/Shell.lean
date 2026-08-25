@@ -298,6 +298,101 @@ def wasmLoadSnapshotMem (ptr size flags : USize) : IO UInt32 := do
     IO.eprintln s!"[WASM DEBUG] wasmLoadSnapshotMem failed: {e}"
     return 1
 
+/-! ### Host-pumped LSP file worker
+
+An embedder that cannot give the file worker a blocking stdin (WASM: the
+host's event loop must stay live so proxied file-system and stdout writes
+from task threads make progress) drives the worker one message at a time:
+`lean_wasm_lsp_init` performs the `initialize`/`didOpen` startup sequence of
+`initAndRunWorker`, and `lean_wasm_lsp_send` runs one `mainLoop` iteration
+for an already-read message. Server-to-client traffic still flows through
+the worker's ordinary stdout channel, which the host captures. -/
+
+private initialize wasmLspSession :
+    IO.Ref (Option (Server.FileWorker.WorkerContext × IO.Ref Server.FileWorker.WorkerState)) ←
+  IO.mkRef none
+
+/-- Run one `WorkerM` action against host-owned state, round-tripping the
+state through `stRef` so consecutive pump calls observe each other. -/
+private def runWorkerPump (ctx : Server.FileWorker.WorkerContext)
+    (stRef : IO.Ref Server.FileWorker.WorkerState)
+    (act : Server.FileWorker.WorkerM Unit) : IO Unit := do
+  let st ← stRef.get
+  let (_, st') ← (act.run ctx).run st
+  stRef.set st'
+
+@[export lean_wasm_lsp_init]
+def wasmLspInit (initParamsJson : String) (didOpenJson : String) : IO UInt32 := do
+  try
+    if (← wasmLspSession.get).isSome then
+      IO.eprintln "[WASM LSP] init called with a live session; replacing it"
+    let initParams ← IO.ofExcept <| Json.parse initParamsJson >>= fromJson? (α := Lsp.InitializeParams)
+    let didOpen ← IO.ofExcept <| Json.parse didOpenJson >>= fromJson? (α := Lsp.LeanDidOpenTextDocumentParams)
+    let tdoc := didOpen.textDocument
+    let doc : Server.DocumentMeta := {
+      uri := tdoc.uri
+      mod := ← Server.moduleFromDocumentUri tdoc.uri
+      version := tdoc.version
+      text := tdoc.text.crlfToLf.toFileMap
+      dependencyBuildMode := didOpen.dependencyBuildMode?.getD .always
+    }
+    let o ← IO.getStdout
+    let e ← IO.getStderr
+    IO.eprintln s!"[WASM LSP] initializing worker for {tdoc.uri} ({tdoc.text.length} bytes)"
+    -- Timed sleeps on dedicated pthreads never wake under this Emscripten
+    -- build (an `IO.sleep` as the reporter's first statement silenced the
+    -- whole server); a zero report delay makes `IO.sleep 0` return
+    -- immediately and costs nothing in a single-user playground.
+    let opts : Options := Server.FileWorker.server.reportDelayMs.set {} 0
+    let (ctx, st) ← Server.FileWorker.initializeWorker doc o e initParams opts
+    let stRef ← IO.mkRef st
+    wasmLspSession.set <| some (ctx, stRef)
+    return 0
+  catch err =>
+    IO.eprintln s!"[WASM LSP] init failed: {err}"
+    return 1
+
+@[export lean_wasm_lsp_send]
+def wasmLspSend (msgJson : String) : IO UInt32 := do
+  try
+    let some (ctx, stRef) ← wasmLspSession.get
+      | IO.eprintln "[WASM LSP] send without a session"; return 1
+    let msg ← IO.ofExcept <| Json.parse msgJson >>= fromJson? (α := JsonRpc.Message)
+    runWorkerPump ctx stRef do
+      -- The bookkeeping prologue of `FileWorker.mainLoop`, minus the blocking
+      -- read: reap finished request tasks and expired RPC sessions.
+      let mut st ← get
+      let pendingRequests ← st.pendingRequests.foldlM (init := st.pendingRequests)
+        fun acc id r => do
+          if ← r.requestTask.hasFinished then
+            if let Except.error e ← r.requestTask.wait then
+              throw <| IO.userError s!"Failed responding to request {id}: {e}"
+            pure <| acc.erase id
+          else
+            pure acc
+      st := { st with pendingRequests }
+      for (id, seshRef) in st.rpcSessions do
+        if (← (← seshRef.get).hasExpired) then
+          st := { st with rpcSessions := st.rpcSessions.erase id }
+      set st
+      match msg with
+      | .request id method (some params) =>
+        Server.FileWorker.handleRequest id method (toJson params)
+      | .notification "exit" none =>
+        wasmLspSession.set none
+      | .notification method (some params) =>
+        Server.FileWorker.handleNotification method (toJson params)
+      | .response id result =>
+        Server.FileWorker.handleResponse id result
+      | .responseError id code message _ =>
+        Server.FileWorker.handleResponseError id code message
+      | _ =>
+        IO.eprintln "[WASM LSP] invalid JSON-RPC message"
+    return 0
+  catch err =>
+    IO.eprintln s!"[WASM LSP] send failed: {err}"
+    return 1
+
 /-- Whether Lean was built with an address sanitizer enabled. -/
 @[extern "lean_internal_has_address_sanitizer"]
 opaque Internal.hasAddressSanitizer (_ : Unit) : Bool
