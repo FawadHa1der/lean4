@@ -522,7 +522,13 @@ section Initialization
 
           -- note that because of `server.reportDelayMs`, we cannot simply set `maxDocVersion` here
           -- as that would allow outdated messages to be reported until the delay is over
-        writeSerializedLspMessage o serialized |>.catchExceptions (fun _ => pure ())
+        (do
+          writeSerializedLspMessage o serialized
+          -- Frame bodies carry no trailing newline; without an explicit flush
+          -- a line-buffered host stream (Emscripten TTY) holds the body until
+          -- the NEXT message arrives, whose bytes a framed reader then eats
+          -- as the missing body — corrupting the stream.
+          o.flush) |>.catchExceptions (fun _ => pure ())
       return chanOut
 
     getImportClosure? (snap : Language.Lean.InitialSnapshot) : Array Name := Id.run do
