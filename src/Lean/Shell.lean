@@ -339,6 +339,21 @@ def wasmLspInit (initParamsJson : String) (didOpenJson : String) : IO UInt32 := 
     let o ← IO.getStdout
     let e ← IO.getStderr
     IO.eprintln s!"[WASM LSP] initializing worker for {tdoc.uri} ({tdoc.text.length} bytes)"
+    -- Pre-build the header environment ON THIS THREAD and register a pure
+    -- cache lookup for the elaboration task: olean reads from task pthreads
+    -- are proxied to the host thread and stall under WORKERFS, while this
+    -- thread imports them the same proven way `lean_wasm_compile` does. The
+    -- exact-ordered key also makes snapshot-seeded envs (wasmEnvCache) serve
+    -- worker sessions for free.
+    let (header, _, _) ← Parser.parseHeader (Parser.mkInputContext tdoc.text.crlfToLf tdoc.uri)
+    let imports := Elab.headerToImports header
+    unless imports.isEmpty do
+      let t0 ← IO.monoMsNow
+      discard <| getOrCreateWasmEnvFor imports
+      IO.eprintln s!"[WASM LSP] header env prebuilt in {(← IO.monoMsNow) - t0} ms"
+    -- Publish every cached env (incl. the fresh prebuild) for the worker's
+    -- header processing to find.
+    Language.Lean.setPrebuiltHeaderEnvs (← wasmEnvCache.get)
     -- Timed sleeps on dedicated pthreads never wake under this Emscripten
     -- build (an `IO.sleep` as the reporter's first statement silenced the
     -- whole server); a zero report delay makes `IO.sleep 0` return

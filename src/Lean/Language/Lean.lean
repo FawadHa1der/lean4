@@ -17,6 +17,7 @@ public import Lean.Elab.Import
 
 public section
 
+
 /-!
 # Note [Incremental Parsing]
 
@@ -233,6 +234,19 @@ set_option linter.missingDocs true
 namespace Lean.Language.Lean
 open Lean.Elab Command
 open Lean.Parser
+
+/-- Embedder-provided pre-built header environments, keyed by the exact
+ordered import list. Consulted before `Elab.processHeaderCore` imports from
+disk: WASM hosts build the environment on the host thread (file reads from
+elaboration task threads are proxied to the host and can be prohibitively
+slow) and push it here; a miss falls through to the normal import. -/
+private initialize prebuiltHeaderEnvs :
+    IO.Ref (Array (Array Name × Environment)) ← IO.mkRef #[]
+
+/-- Publish pre-built header environments (exact-ordered import keys). -/
+def setPrebuiltHeaderEnvs (envs : Array (Array Name × Environment)) : IO Unit :=
+  prebuiltHeaderEnvs.set envs
+
 
 /-- Lean-specific processing context. -/
 structure LeanProcessingContext extends ProcessingContext where
@@ -495,11 +509,20 @@ where
 
       let startTime := (← IO.monoNanosNow).toFloat / 1000000000
       let mut opts := setup.opts
+      let prebuilt ← prebuiltHeaderEnvs.get
+      let importKey := setup.imports.map (·.module)
+      let override? : Option Environment :=
+        if setup.imports.isEmpty then none
+        else prebuilt.findSome? fun (k, env) => if k == importKey then some env else none
       -- allows `headerEnv` to be leaked, which would live until the end of the process anyway
-      let (headerEnv, msgLog) ← Elab.processHeaderCore (leakEnv := true)
-        stx.startPos setup.imports setup.isModule setup.opts .empty ctx.toInputContext
-        setup.trustLevel setup.plugins setup.mainModuleName setup.package? setup.importArts
-        (headerStx? := stx) (origHeaderStx? := origStx)
+      let (headerEnv, msgLog) ← do
+        match override? with
+        | some env => pure (env.setMainModule setup.mainModuleName, MessageLog.empty)
+        | none =>
+          Elab.processHeaderCore (leakEnv := true)
+            stx.startPos setup.imports setup.isModule setup.opts .empty ctx.toInputContext
+            setup.trustLevel setup.plugins setup.mainModuleName setup.package? setup.importArts
+            (headerStx? := stx) (origHeaderStx? := origStx)
       let stopTime := (← IO.monoNanosNow).toFloat / 1000000000
       let diagnostics := (← Snapshot.Diagnostics.ofMessageLog msgLog)
       if msgLog.hasErrors then
