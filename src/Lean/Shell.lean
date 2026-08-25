@@ -348,9 +348,28 @@ def wasmLspInit (initParamsJson : String) (didOpenJson : String) : IO UInt32 := 
     let (header, _, _) ← Parser.parseHeader (Parser.mkInputContext tdoc.text.crlfToLf tdoc.uri)
     let imports := Elab.headerToImports header
     unless imports.isEmpty do
-      let t0 ← IO.monoMsNow
-      discard <| getOrCreateWasmEnvFor imports
-      IO.eprintln s!"[WASM LSP] header env prebuilt in {(← IO.monoMsNow) - t0} ms"
+      let key := imports.map (·.module)
+      let cache ← wasmEnvCache.get
+      unless cache.any (·.1 == key) do
+        -- Prefer the smallest cached environment whose import closure covers
+        -- the document (snapshot-seeded init/umbrella envs): the playground
+        -- superset semantics the batch path gets from its header rewrite,
+        -- with exact positions and no olean import. Fall back to a real
+        -- import on this thread when nothing covers.
+        let mut best : Option (Nat × Environment) := none
+        for (_, env) in cache do
+          let names := env.allImportedModuleNames
+          if imports.all (fun i => names.contains i.module) then
+            if best.all (names.size < ·.1) then
+              best := some (names.size, env)
+        match best with
+        | some (sz, env) =>
+          IO.eprintln s!"[WASM LSP] header served by a cached superset env ({sz} modules)"
+          wasmEnvCache.modify (·.push (key, env))
+        | none =>
+          let t0 ← IO.monoMsNow
+          discard <| getOrCreateWasmEnvFor imports
+          IO.eprintln s!"[WASM LSP] header env prebuilt in {(← IO.monoMsNow) - t0} ms"
     -- Publish every cached env (incl. the fresh prebuild) for the worker's
     -- header processing to find.
     Language.Lean.setPrebuiltHeaderEnvs (← wasmEnvCache.get)
