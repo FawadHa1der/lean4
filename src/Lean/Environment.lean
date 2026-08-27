@@ -1974,6 +1974,16 @@ private def ensureExtensionsArraySize (env : Environment) : IO Environment := do
   let exts ← EnvExtension.ensureExtensionsArraySize env.base.private.extensions
   return env.modifyCheckedAsync ({ · with extensions := exts })
 
+/-- WASM playground support: an environment loaded from a snapshot may predate
+environment extensions registered later in the same process (for example a
+second snapshot's `[init]` replay registering Mathlib's extensions). Its
+extension-state array is then too short, and any generic extension access
+panics with "invalid environment extension has been accessed". Growing the
+array to the current registry is exactly what `finalizePersistentExtensions`
+does after imports; expose it for the runtime's environment cache. -/
+def Environment.ensureExtensionsSizeForWasm (env : Environment) : IO Environment :=
+  ensureExtensionsArraySize env
+
 private partial def finalizePersistentExtensions (env : Environment) (mods : Array ModuleData) (opts : Options) : IO Environment := do
   loop 0 env
 where

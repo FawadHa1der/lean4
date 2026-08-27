@@ -69,6 +69,11 @@ def getOrCreateWasmEnvFor (imports : Array Import) : IO Environment := do
   for (k, env) in (← wasmEnvCache.get) do
     if k == key then
       IO.eprintln "[WASM DEBUG] getOrCreateWasmEnvFor: returning cached env"
+      -- A cached env may predate extensions registered by a later snapshot's
+      -- [init] replay; grow its extension array or generic extension access
+      -- panics ("invalid environment extension has been accessed").
+      let env ← env.ensureExtensionsSizeForWasm
+      wasmEnvCache.modify (·.map fun (k', e) => if k' == key then (k', env) else (k', e))
       return env
   IO.eprintln s!"[WASM DEBUG] getOrCreateWasmEnvFor: cache miss, importing {key}…"
   -- Mirror the frontend's header import (`processHeaderCore`, Elab/Import.lean):
@@ -348,6 +353,16 @@ def wasmLspInit (initParamsJson : String) (didOpenJson : String) : IO UInt32 := 
     -- worker sessions for free.
     let (header, _, _) ← Parser.parseHeader (Parser.mkInputContext tdoc.text.crlfToLf tdoc.uri)
     let imports := Elab.headerToImports header
+    -- Snapshot-seeded envs may predate later-registered extensions (a second
+    -- snapshot's [init] replay): grow every cached env's extension array
+    -- BEFORE serving any of them, or elaboration under an older env panics
+    -- with "invalid environment extension has been accessed".
+    do
+      let cache ← wasmEnvCache.get
+      let mut refreshed := #[]
+      for (k, env) in cache do
+        refreshed := refreshed.push (k, ← env.ensureExtensionsSizeForWasm)
+      wasmEnvCache.set refreshed
     unless imports.isEmpty do
       let key := imports.map (·.module)
       let cache ← wasmEnvCache.get
