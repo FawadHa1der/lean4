@@ -329,9 +329,6 @@ private def runWorkerPump (ctx : Server.FileWorker.WorkerContext)
 @[export lean_wasm_lsp_init]
 def wasmLspInit (initParamsJson : String) (didOpenJson : String) : IO UInt32 := do
   try
-    if let some (_, oldStRef) ← wasmLspSession.get then
-      IO.eprintln "[WASM LSP] init called with a live session; cancelling it and replacing"
-      Server.FileWorker.teardownForReplacement (← oldStRef.get)
     let initParams ← IO.ofExcept <| Json.parse initParamsJson >>= fromJson? (α := Lsp.InitializeParams)
     let didOpen ← IO.ofExcept <| Json.parse didOpenJson >>= fromJson? (α := Lsp.LeanDidOpenTextDocumentParams)
     let tdoc := didOpen.textDocument
@@ -391,8 +388,20 @@ def wasmLspInit (initParamsJson : String) (didOpenJson : String) : IO UInt32 := 
           wasmEnvCache.modify (·.push (key, env))
         | none =>
           let t0 ← IO.monoMsNow
-          discard <| getOrCreateWasmEnvFor imports
+          try
+            discard <| getOrCreateWasmEnvFor imports
+          catch err =>
+            -- The header does not resolve (typically a partially-typed
+            -- import). The LIVE session has not been touched: report
+            -- "unresolvable" so the page can keep the current checker
+            -- serving and show a calm diagnostic while the user types.
+            IO.eprintln s!"[WASM LSP] header unresolvable (session kept): {err}"
+            return 2
           IO.eprintln s!"[WASM LSP] header env prebuilt in {(← IO.monoMsNow) - t0} ms"
+    -- The header resolves — ONLY NOW replace any live session.
+    if let some (_, oldStRef) ← wasmLspSession.get then
+      IO.eprintln "[WASM LSP] init called with a live session; cancelling it and replacing"
+      Server.FileWorker.teardownForReplacement (← oldStRef.get)
     -- Publish every cached env (incl. the fresh prebuild) for the worker's
     -- header processing to find.
     Language.Lean.setPrebuiltHeaderEnvs (← wasmEnvCache.get)
