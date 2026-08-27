@@ -14,6 +14,7 @@ Authors: Leonardo de Moura, Gabriel Ebner, Sebastian Ullrich
 #include <fstream>
 #include <chrono>
 #include <algorithm>
+#include <exception>
 #include <sys/stat.h>
 #include <cerrno>
 #include <cstring>
@@ -274,8 +275,13 @@ extern "C" LEAN_EXPORT object * lean_compacted_region_save(b_obj_arg ofname, b_o
     const size_t ALIGN = 1LL<<16;
     bool allow_closures = allow_closures_u8 != 0;
 
-    option_ref<object_ref> prev(oprev);
     object_ref cs_obj;
+    char const * olean_fn_early = lean_string_cstr(ofname);
+    // Compactor CONSTRUCTION can throw ("closures cannot be compacted",
+    // bad_alloc, cyclic graphs). On wasm an exception escaping this extern-C
+    // boundary is an opaque abort; surface it as an IO error instead.
+    try {
+    option_ref<object_ref> prev(oprev);
     if (prev) {
         cs_obj = prev.get_val();
     } else {
@@ -296,6 +302,11 @@ extern "C" LEAN_EXPORT object * lean_compacted_region_save(b_obj_arg ofname, b_o
         std::vector<region_view> dep_regions = extract_dep_regions(odep_regions);
         cs_obj = object_ref(mk_compactor(reinterpret_cast<void *>(base_addr),
                                          std::move(dep_regions), allow_closures));
+    }
+    } catch (throwable const & ex) {
+        return io_result_mk_error((sstream() << "failed to save '" << olean_fn_early << "': " << ex.what()).str());
+    } catch (std::exception const & ex) {
+        return io_result_mk_error((sstream() << "failed to save '" << olean_fn_early << "': " << ex.what()).str());
     }
 
     object_compactor & compactor = *to_compactor(cs_obj.raw());
@@ -402,7 +413,10 @@ extern "C" LEAN_EXPORT object * lean_compacted_region_save(b_obj_arg ofname, b_o
             }
             out.close();
         }
-    } catch (exception & ex) {
+    } catch (throwable const & ex) {
+        std::remove(olean_tmp_fn.c_str());
+        return io_result_mk_error((sstream() << "failed to write '" << olean_fn << "': " << ex.what()).str());
+    } catch (std::exception const & ex) {
         std::remove(olean_tmp_fn.c_str());
         return io_result_mk_error((sstream() << "failed to write '" << olean_fn << "': " << ex.what()).str());
     }
@@ -536,12 +550,37 @@ extern "C" LEAN_EXPORT object * lean_compacted_region_read(b_obj_arg ofname, b_o
 
         olean_header default_header = {};
         olean_header header;
+        char * buffer = nullptr;
+        bool is_mmap = false;
+#ifdef LEAN_MMAP
         ssize_t read_size = readn(fd.get(), &header, sizeof(header));
         if (read_size < 0) {
             return io_result_mk_error((sstream() << "failed to read file '" << olean_fn << "': " << strerror(errno)).str());
         }
-        if (read_size != sizeof(header)
+        bool invalid_header_size = read_size != sizeof(header);
+#else
+        // Emscripten has no useful file-backed mmap: read the whole compacted
+        // region ONCE and validate the header from that buffer, instead of a
+        // header read + lseek(0) + full re-read (browser64 measured every
+        // olean being read twice through the proxied FS on this path).
+        if (size < sizeof(header)) {
+            return io_result_mk_error((sstream() << "failed to read file '" << olean_fn << "', invalid header").str());
+        }
+        buffer = static_cast<char *>(malloc(size));
+        if (!buffer) {
+            return io_result_mk_error((sstream() << "failed to allocate for file '" << olean_fn << "'").str());
+        }
+        ssize_t read_size = readn(fd.get(), buffer, size);
+        if (read_size < 0 || read_size != static_cast<ssize_t>(size)) {
+            free(buffer);
+            return io_result_mk_error((sstream() << "failed to read file '" << olean_fn << "': " << strerror(errno)).str());
+        }
+        memcpy(&header, buffer, sizeof(header));
+        bool invalid_header_size = false;
+#endif
+        if (invalid_header_size
             || memcmp(header.marker, default_header.marker, sizeof(header.marker)) != 0) {
+            if (buffer) free(buffer);
             return io_result_mk_error((sstream() << "failed to read file '" << olean_fn << "', invalid header").str());
         }
         if ((header.version != 2 && header.version != 3) || header.flags != default_header.flags
@@ -549,12 +588,10 @@ extern "C" LEAN_EXPORT object * lean_compacted_region_read(b_obj_arg ofname, b_o
             || strncmp(header.githash, LEAN_GITHASH, sizeof(header.githash)) != 0
 #endif
         ) {
+            if (buffer) free(buffer);
             return io_result_mk_error((sstream() << "failed to read file '" << olean_fn << "', incompatible header").str());
         }
         char * base_addr = reinterpret_cast<char *>(header.base_addr);
-
-        char * buffer = nullptr;
-        bool is_mmap = false;
 
         // Map file COW-writable. The fallback walk in `region_reader::read()` writes
         // fixed pointers back into the region's memory when any dep region didn't land at its
@@ -612,7 +649,12 @@ extern "C" LEAN_EXPORT object * lean_compacted_region_read(b_obj_arg ofname, b_o
 #endif
 
         if (!buffer) {
+            // Only reachable on LEAN_MMAP builds whose mmap fell through: the
+            // no-mmap path above already holds the whole file in `buffer`.
             buffer = static_cast<char *>(malloc(size));
+            if (!buffer) {
+                return io_result_mk_error((sstream() << "failed to allocate for file '" << olean_fn << "'").str());
+            }
             lseek(fd.get(), 0, SEEK_SET);
             ssize_t r = readn(fd.get(), buffer, size);
             if (r < 0 || r != static_cast<ssize_t>(size)) {

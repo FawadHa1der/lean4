@@ -324,8 +324,9 @@ private def runWorkerPump (ctx : Server.FileWorker.WorkerContext)
 @[export lean_wasm_lsp_init]
 def wasmLspInit (initParamsJson : String) (didOpenJson : String) : IO UInt32 := do
   try
-    if (← wasmLspSession.get).isSome then
-      IO.eprintln "[WASM LSP] init called with a live session; replacing it"
+    if let some (_, oldStRef) ← wasmLspSession.get then
+      IO.eprintln "[WASM LSP] init called with a live session; cancelling it and replacing"
+      Server.FileWorker.teardownForReplacement (← oldStRef.get)
     let initParams ← IO.ofExcept <| Json.parse initParamsJson >>= fromJson? (α := Lsp.InitializeParams)
     let didOpen ← IO.ofExcept <| Json.parse didOpenJson >>= fromJson? (α := Lsp.LeanDidOpenTextDocumentParams)
     let tdoc := didOpen.textDocument
@@ -359,7 +360,14 @@ def wasmLspInit (initParamsJson : String) (didOpenJson : String) : IO UInt32 := 
         let mut best : Option (Nat × Environment) := none
         for (_, env) in cache do
           let names := env.allImportedModuleNames
-          if imports.all (fun i => names.contains i.module) then
+          -- Aggregators and tutorial preludes absent from the curated
+          -- profile (import Mathlib / Mathlib.Tactic / Batteries /
+          -- Mathematics in Lean's MIL.Common) count as satisfied by the
+          -- umbrella environment, mirroring the batch app's alias table.
+          let isUmbrella := names.contains `QED64.Essential
+          let aliasOk (m : Name) : Bool :=
+            isUmbrella && (m == `Mathlib || m == `Mathlib.Tactic || m == `Batteries || m == `MIL.Common)
+          if imports.all (fun i => names.contains i.module || aliasOk i.module) then
             if best.all (names.size < ·.1) then
               best := some (names.size, env)
         match best with

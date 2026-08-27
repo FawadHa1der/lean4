@@ -365,6 +365,22 @@ abbrev WorkerM := ReaderT WorkerContext <| StateRefT WorkerState IO
 /-- Makes sure we load imports at most once per process as they cannot be unloaded. -/
 private builtin_initialize importsLoadedRef : IO.Ref Bool ← IO.mkRef false
 
+/-- WASM playground support: tear down a live worker session so a replacement
+can be initialized in the same process. The watchdog-restart contract
+(`IO.Process.forceExit 2` in `setupImports`) is unavailable there — the
+Emscripten runtime keepalive neuters process exit, so the guard's exit
+becomes a silent empty-error header snapshot and the session wedges. A
+replacement init instead cancels the old session's reporter and pending
+requests and re-arms the once-per-process import guard; imports are never
+unloaded, but this runtime keeps every imported environment resident and
+serves headers from its environment cache, so a re-run of `setupImports`
+is sound here. -/
+def teardownForReplacement (st : WorkerState) : IO Unit := do
+  st.reporterCancelTk.set
+  for (_, r) in st.pendingRequests do
+    r.cancelTk.cancelByCancelRequest
+  importsLoadedRef.set false
+
 open Language Lean in
 /--
 Callback from Lean language processor after parsing imports that requests necessary information from
