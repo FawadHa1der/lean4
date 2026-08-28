@@ -28,18 +28,28 @@ def HeaderSyntax.isModule (header : HeaderSyntax) : Bool :=
   !header.raw[0].isNone
 
 def HeaderSyntax.imports (stx : HeaderSyntax) (includeInit : Bool := true) : Array Import :=
+  -- Error-recovered header syntax (an unterminated comment opening the file,
+  -- a non-identifier module name, …) does not match the quotation patterns;
+  -- panicking on it turns every malformed header into "unreachable code has
+  -- been reached" followed by elaboration WITHOUT the intended imports. The
+  -- parser has already reported the real error — degrade gracefully to the
+  -- imports we can read (plus the implicit Init), skipping malformed nodes.
   match stx with
   | `(Parser.Module.header| $[module%$moduleTk]? $[prelude%$preludeTk]? $importsStx*) =>
     let imports := if preludeTk.isNone && includeInit then
         #[{ module := `Init : Import }, { module := `Init, isMeta := true : Import }]
       else #[]
-    imports ++ importsStx.map fun
+    imports ++ importsStx.filterMap fun
       | `(Parser.Module.import| $[public%$publicTk]? $[meta%$metaTk]? import $[all%$allTk]? $n) =>
-        { module := n.getId, importAll := allTk.isSome
-          isExported := publicTk.isSome || moduleTk.isNone
-          isMeta := metaTk.isSome }
-      | _ => unreachable!
-  | _ => unreachable!
+        if n.getId.isAnonymous then none else
+        some { module := n.getId, importAll := allTk.isSome
+               isExported := publicTk.isSome || moduleTk.isNone
+               isMeta := metaTk.isSome }
+      | _ => none
+  | _ =>
+    if includeInit then
+      #[{ module := `Init : Import }, { module := `Init, isMeta := true : Import }]
+    else #[]
 
 def HeaderSyntax.toModuleHeader (stx : HeaderSyntax) : ModuleHeader where
   isModule := stx.isModule
