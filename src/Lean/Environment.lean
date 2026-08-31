@@ -2139,10 +2139,23 @@ partial def importModulesCore
     ImportStateM Unit := do
   go imports (importAll := true) (isExported := isExported) (needsData := true) (needsIRTrans := false)
   if globalLevel < .private then
-    for i in imports do
-      if let some mod := (← get).moduleNameMap[i.module]?.bind (·.mainModule?) then
-        if !mod.isModule then
-          throw <| IO.userError s!"cannot import non-`module` {i.module} from `module`"
+    -- QED64 wasm runtime: game packages (lean4game's GameServer and every
+    -- published game) are legacy non-`module` packages, and their oleans are
+    -- self-contained — the base `.olean` carries ALL their data, so loading
+    -- them at `.exported` level loses nothing. The batch environment cache
+    -- doesn't rely on module-system visibility purity; gate the tolerance
+    -- behind an env var so stock behavior is untouched unless the host pump
+    -- opts in (node-runner and the game worker set it; the editor does not).
+    -- Under the wasm target the tolerance is unconditional: the browser env
+    -- cache exists to serve editors/games, never to enforce module-system
+    -- purity, and Emscripten's env plumbing is unreliable for a runtime gate.
+    let tolerateLegacy := System.Platform.target.startsWith "wasm" ||
+      (← IO.getEnv "QED64_ALLOW_LEGACY_IMPORTS").isSome
+    unless tolerateLegacy do
+      for i in imports do
+        if let some mod := (← get).moduleNameMap[i.module]?.bind (·.mainModule?) then
+          if !mod.isModule then
+            throw <| IO.userError s!"cannot import non-`module` {i.module} from `module`"
 /-
 When the module system is disabled for the root, we import all transitively referenced modules and
 ignore any module system annotations on the way.
@@ -2258,7 +2271,15 @@ where
       -- newly discovered module
       let parts ← if needsData then loadData i else pure #[]
       let irParts ← if needsIR then loadIR i else pure #[]
-      let mod := { i with importAll, isExported, irPhases, parts, irParts, needsIRTrans, hasData := needsData }
+      let mod : ImportedModule :=
+        { i with importAll, isExported, irPhases, parts, irParts, needsIRTrans, hasData := needsData }
+      -- QED64 (patch 0030 companion): a legacy non-`module` olean — reachable
+      -- under a module-system root only via the wasm legacy tolerance above —
+      -- carries complete IR in its base part. Its declarations are
+      -- phase-unrestricted, exactly as under a non-module root; without this
+      -- the meta gate refuses to evaluate its parsers and initializers.
+      let mod : ImportedModule :=
+        if mod.mainModule?.any (!·.isModule) then { mod with irPhases := .all } else mod
       goRec mod
       modify fun s => { s with
         moduleNameMap := s.moduleNameMap.insert i.module mod
