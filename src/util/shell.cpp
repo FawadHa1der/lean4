@@ -283,12 +283,23 @@ static void report_task_get_blocked_time(std::chrono::nanoseconds d) {
     }
 }
 
+#if defined(LEAN_EMSCRIPTEN)
+static bool g_wasm_shell_initialized = false;
+static bool g_wasm_shell_task_manager = false;
+// The embedder pre-initialized the runtime (and task manager) through the
+// C API before calling main — lean_main must not initialize again.
+extern "C" LEAN_EXPORT void lean_wasm_shell_mark_preinitialized() {
+    g_wasm_shell_initialized = true;
+    g_wasm_shell_task_manager = true;
+}
+#endif
+
 extern "C" LEAN_EXPORT int lean_main(int argc, char ** argv) {
 #ifdef LEAN_EMSCRIPTEN
     // Set up the virtual filesystem based on the runtime environment.
     // Node.js: Use NODEFS to access the real filesystem.
     // Browser: Use MEMFS (default) with pre-created directories.
-    EM_ASM(
+    MAIN_THREAD_EM_ASM(
         var isNode = (typeof process !== "undefined") && 
                      (process.release && process.release.name === "node");
         
@@ -349,7 +360,20 @@ extern "C" LEAN_EXPORT int lean_main(int argc, char ** argv) {
     SetConsoleOutputCP(CP_UTF8);
 #endif
     auto init_start = std::chrono::steady_clock::now();
+#if defined(LEAN_EMSCRIPTEN)
+    // Resident-embedding contract (patch 0031): the embedder may pre-
+    // initialize Lean (snapshot seeding runs before main) and re-enter main
+    // for in-process session replacement, so initialization is once per
+    // process and finalization never happens. First CLI entry initializes as
+    // before; an embedder that pre-initialized marks readiness via
+    // lean_wasm_shell_mark_preinitialized().
+    if (!g_wasm_shell_initialized) {
+        g_wasm_shell_initialized = true;
+        new lean::initializer(); // deliberately leaked: resident runtime
+    }
+#else
     lean::initializer init;
+#endif
     second_duration init_time = std::chrono::steady_clock::now() - init_start;
 
     try {
@@ -386,7 +410,16 @@ extern "C" LEAN_EXPORT int lean_main(int argc, char ** argv) {
         report_profiling_time("initialization", init_time);
     }
 
+#if defined(LEAN_EMSCRIPTEN)
+    // Once per process, never torn down (see the initializer note above); a
+    // pre-initialized embedder brought its own task manager.
+    if (!g_wasm_shell_task_manager) {
+        g_wasm_shell_task_manager = true;
+        new scoped_task_manager(get_shell_num_threads(shell_opts)); // leaked
+    }
+#else
     scoped_task_manager scope_task_man(get_shell_num_threads(shell_opts));
+#endif
 
     try {
         return run_shell_main(argc - optind, argv + optind, shell_opts);

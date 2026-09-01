@@ -22,6 +22,7 @@ public import Lean.Server.Completion.ImportCompletion
 public import Lean.Server.CodeActions.UnknownIdentifier
 
 import Init.Data.String.OrderInstances
+import Init.System.Platform
 
 public section
 
@@ -393,7 +394,13 @@ def setupImports
     (stx         : Elab.HeaderSyntax)
     : Language.ProcessingT IO (Except Language.Lean.HeaderProcessedSnapshot SetupImportsResult) := do
   let importsAlreadyLoaded ← importsLoadedRef.modifyGet ((·, true))
-  if importsAlreadyLoaded then
+  -- WASM (resident FileWorker, patch 0031): the once-per-process guard is
+  -- meaningless here — imports are never unloaded, every imported
+  -- environment stays resident, and headers are served from the environment
+  -- cache (see teardownForReplacement) — so a header change re-runs setup
+  -- in place. The native path's sleep-then-forceExit would instead block
+  -- forever on the header task (timed sleeps on task pthreads) or kill main.
+  if importsAlreadyLoaded && !System.Platform.isEmscripten then
     -- As we never unload imports in the server, we should not run the code below twice in the
     -- same process and instead ask the watchdog to restart the worker
     IO.sleep 200  -- give user time to make further edits before restart

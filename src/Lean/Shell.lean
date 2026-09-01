@@ -239,6 +239,10 @@ def wasmLoadSnapshot (path : String) : IO UInt32 := do
     unsafe enableInitializersExecution
     let key := env.header.imports.map (·.module)
     wasmEnvCache.modify (·.push (key, env))
+    -- The resident FileWorker (patch 0031) runs the REAL header-processing
+    -- path, which consults the prebuilt list — publish on every snapshot
+    -- load, not only in wasmLspInit, so resident sessions see covering envs.
+    Language.Lean.setPrebuiltHeaderEnvs (← wasmEnvCache.get)
     IO.eprintln s!"[WASM DEBUG] wasmLoadSnapshot: cached env for {key}"
     return 0
   catch e =>
@@ -295,6 +299,12 @@ def wasmLoadSnapshotMem (ptr size flags : USize) : IO UInt32 := do
     unsafe enableInitializersExecution
     let key := env.header.imports.map (·.module)
     wasmEnvCache.modify (·.push (key, env))
+    -- The RESIDENT FileWorker (patch 0031) reads `prebuiltHeaderEnvs` when it
+    -- processes a header; without this publish the list is empty, the covering
+    -- override is never found, and the header imports its whole closure on the
+    -- elaboration thread (629 Init modules ≈ 17 s per switch). The non-mem
+    -- loader already published; the browser and the spike both use THIS path.
+    Language.Lean.setPrebuiltHeaderEnvs (← wasmEnvCache.get)
     let t4 ← IO.monoMsNow
     IO.eprintln s!"[WASM PROFILE] snapshot load stages: region read+materialize {t1-t0} ms · setMainModule {t2-t1} ms · init replay ({replayModIdxs.size} modules) {t3-t2} ms · cache {t4-t3} ms"
     IO.eprintln s!"[WASM DEBUG] wasmLoadSnapshotMem: cached env for {key}"

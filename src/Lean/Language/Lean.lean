@@ -511,9 +511,40 @@ where
       let mut opts := setup.opts
       let prebuilt ← prebuiltHeaderEnvs.get
       let importKey := setup.imports.map (·.module)
-      let override? : Option Environment :=
-        if setup.imports.isEmpty then none
-        else prebuilt.findSome? fun (k, env) => if k == importKey then some env else none
+      -- Exact-ordered match first; otherwise the SMALLEST published env whose
+      -- import closure covers the header — the pump path's covering rule
+      -- (wasmLspInit), without which a resident FileWorker could only ever
+      -- serve headers whose import list matches a snapshot key verbatim.
+      -- Umbrella aliases mirror the batch app's table.
+      -- A headerless file imports the prelude implicitly: match it as `Init`
+      -- so the init snapshot's env serves it (an empty key matched nothing,
+      -- and the header then imported all of Init on the elaboration thread).
+      let matchKey := if importKey.isEmpty then #[`Init] else importKey
+      let mut override? : Option Environment :=
+        prebuilt.findSome? fun (k, env) => if k == matchKey then some env else none
+      if override?.isNone then
+        let mut best : Option (Nat × Environment) := none
+        for (_, env) in prebuilt do
+          let names := env.allImportedModuleNames
+          let isUmbrella := names.contains `QED64.Essential
+          let aliasOk (m : Name) : Bool :=
+            isUmbrella && (m == `Mathlib || m == `Mathlib.Tactic || m == `Batteries || m == `MIL.Common)
+          if matchKey.all (fun m => names.contains m || aliasOk m) then
+            if best.all (names.size < ·.1) then
+              best := some (names.size, env)
+        override? := best.map (·.2)
+      -- A published env may predate extensions registered by a later
+      -- snapshot's [init] replay; grow its extension array or generic
+      -- extension access panics (the patch-0025 epoch class).
+      -- One stderr line per header (this fork is wasm-only): HIT/MISS plus
+      -- the published keys — the difference between a 40 ms covered switch
+      -- and a 17 s on-thread import must never be invisible again.
+      unless prebuilt.isEmpty do
+        let hit := if override?.isSome then "HIT" else "MISS"
+        let published := prebuilt.map fun (p : Array Name × Environment) => (p.1, (Environment.allImportedModuleNames p.2).size)
+        IO.eprintln s!"[WASM LSP] prebuilt lookup {hit}: key={matchKey} published={published}"
+      if let some env := override? then
+        override? := some (← env.ensureExtensionsSizeForWasm)
       -- allows `headerEnv` to be leaked, which would live until the end of the process anyway
       let (headerEnv, msgLog) ← do
         match override? with

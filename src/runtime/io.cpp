@@ -17,6 +17,7 @@ Authors: Leonardo de Moura, Sebastian Ullrich
 #else
 #if defined(LEAN_EMSCRIPTEN)
 #include <emscripten.h>
+#include <emscripten/threading.h>
 #endif
 // Linux include files
 #include <unistd.h> // NOLINT
@@ -31,6 +32,9 @@ Authors: Leonardo de Moura, Sebastian Ullrich
 #endif
 #include <dirent.h>
 #include <fcntl.h>
+#include <algorithm>
+#include <climits>
+#include <cstring>
 #include <iostream>
 #include <chrono>
 #include <sstream>
@@ -158,6 +162,111 @@ extern "C" LEAN_EXPORT obj_res lean_get_set_stderr(obj_arg h) {
 static FILE * io_get_handle(lean_object * hfile) {
     return static_cast<FILE *>(lean_get_external_data(hfile));
 }
+
+#if defined(LEAN_EMSCRIPTEN)
+namespace {
+
+// The resident FileWorker runs as the application pthread (PROXY_TO_PTHREAD).
+// Its stdin cannot use Emscripten's JS FS proxy: a blocking read would occupy
+// the outer runtime Worker and prevent stdout from being proxied back through
+// that same Worker. Keep only stdin in shared wasm memory; ordinary files,
+// stdout, stderr, and WORKERFS retain Emscripten's normal path.
+// (Ported from browser64's lean4-resident-transport.patch, contract
+// org.lean-browser64.resident-transport/v1.)
+constexpr uint32_t BROWSER64_INPUT_READ = 0;
+constexpr uint32_t BROWSER64_INPUT_WRITE = 1;
+constexpr uint32_t BROWSER64_INPUT_CLOSED = 2;
+constexpr uint32_t BROWSER64_INPUT_WAKE = 3;
+constexpr uint32_t BROWSER64_INPUT_CONTROL_WORDS = 4;
+
+static uint32_t * g_browser64_input_control = nullptr;
+static uint8_t * g_browser64_input_bytes = nullptr;
+static uint32_t g_browser64_input_capacity = 0;
+
+static uint32_t browser64_input_load(uint32_t index) {
+    return __atomic_load_n(g_browser64_input_control + index, __ATOMIC_ACQUIRE);
+}
+
+static void browser64_input_store(uint32_t index, uint32_t value) {
+    __atomic_store_n(g_browser64_input_control + index, value, __ATOMIC_RELEASE);
+}
+
+static bool browser64_input_enabled(FILE * fp) {
+    return fp == stdin && g_browser64_input_control != nullptr;
+}
+
+// Lean's LSP readJson/readUTF8 performs one Stream.read for the declared
+// Content-Length and parses that result immediately. A short non-EOF read
+// would corrupt framing; fill the requested body exactly unless CLOSED is
+// observed after all published bytes have been drained.
+static size_t browser64_input_read(uint8_t * destination, size_t requested) {
+    size_t copied = 0;
+    while (copied < requested) {
+        uint32_t read = browser64_input_load(BROWSER64_INPUT_READ);
+        uint32_t write = browser64_input_load(BROWSER64_INPUT_WRITE);
+        if (read != write) {
+            uint32_t available = read < write
+                ? write - read
+                : g_browser64_input_capacity - read;
+            size_t count = std::min(
+                static_cast<size_t>(available),
+                requested - copied);
+            memcpy(destination + copied, g_browser64_input_bytes + read, count);
+            copied += count;
+            browser64_input_store(
+                BROWSER64_INPUT_READ,
+                (read + static_cast<uint32_t>(count)) % g_browser64_input_capacity);
+            // Page-side writers wait on the read cursor when the bounded ring
+            // is full. Wake them as soon as bytes become reusable.
+            emscripten_futex_wake(
+                g_browser64_input_control + BROWSER64_INPUT_READ,
+                INT_MAX);
+            continue;
+        }
+
+        if (browser64_input_load(BROWSER64_INPUT_CLOSED) != 0) {
+            return copied;
+        }
+
+        // The wake counter prevents a lost notification between observing an
+        // empty ring and sleeping; futex_wait re-checks the value as part of
+        // the wait operation.
+        uint32_t wake = browser64_input_load(BROWSER64_INPUT_WAKE);
+        if (read != browser64_input_load(BROWSER64_INPUT_WRITE) ||
+            browser64_input_load(BROWSER64_INPUT_CLOSED) != 0) {
+            continue;
+        }
+        emscripten_futex_wait(
+            g_browser64_input_control + BROWSER64_INPUT_WAKE,
+            wake,
+            INFINITY);
+    }
+    return copied;
+}
+
+}
+
+// Called by the outer runtime Worker before PROXY_TO_PTHREAD starts Lean.
+// `address` is a malloc-aligned offset into the shared WebAssembly.Memory.
+extern "C" LEAN_EXPORT uint32_t lean_browser64_configure_input_ring(
+    uint8_t * address,
+    uint32_t capacity) {
+    if (address == nullptr ||
+        (reinterpret_cast<uintptr_t>(address) % alignof(uint32_t)) != 0 ||
+        capacity < 2 || capacity > INT32_MAX) {
+        return EINVAL;
+    }
+    auto * control = reinterpret_cast<uint32_t *>(address);
+    for (uint32_t index = 0; index < BROWSER64_INPUT_CONTROL_WORDS; ++index) {
+        __atomic_store_n(control + index, 0, __ATOMIC_RELAXED);
+    }
+    g_browser64_input_control = control;
+    g_browser64_input_bytes = address + BROWSER64_INPUT_CONTROL_WORDS * sizeof(uint32_t);
+    g_browser64_input_capacity = capacity;
+    return 0;
+}
+#endif
+
 
 extern "C" LEAN_EXPORT obj_res lean_decode_io_error(int errnum, b_lean_obj_arg fname) {
     object * details = mk_string(strerror(errnum));
@@ -592,6 +701,13 @@ extern "C" LEAN_EXPORT obj_res lean_io_prim_handle_read(b_obj_arg h, usize nbyte
         // std::fread doesn't handle 0 reads well, see https://github.com/leanprover/lean4/issues/12138
         return io_result_mk_ok(res);
     }
+#if defined(LEAN_EMSCRIPTEN)
+    if (browser64_input_enabled(fp)) {
+        usize n = browser64_input_read(lean_sarray_cptr(res), nbytes);
+        lean_sarray_set_size(res, n);
+        return io_result_mk_ok(res);
+    }
+#endif
     usize n = std::fread(lean_sarray_cptr(res), 1, nbytes, fp);
     if (n > 0) {
         lean_sarray_set_size(res, n);
@@ -637,6 +753,16 @@ extern "C" LEAN_EXPORT obj_res lean_io_prim_handle_get_line(b_obj_arg h) {
     FILE * fp = io_get_handle(h);
 
     std::string result;
+#if defined(LEAN_EMSCRIPTEN)
+    if (browser64_input_enabled(fp)) {
+        uint8_t c8;
+        while (browser64_input_read(&c8, 1) == 1) {
+            result.push_back(static_cast<char>(c8));
+            if (c8 == '\n') break;
+        }
+        return io_result_mk_ok(mk_string(result));
+    }
+#endif
     int c; // Note: int, not char, required to handle EOF
     LEAN_IO_LOCK_FILE(fp);
     while ((c = LEAN_IO_GETC_UNLOCKED(fp)) != EOF) {
@@ -972,7 +1098,7 @@ extern "C" LEAN_EXPORT obj_res lean_io_getenv(b_obj_arg env_var) {
 #if defined(LEAN_EMSCRIPTEN)
     // HACK(WN): getenv doesn't seem to work in Emscripten even though it should
     // see https://emscripten.org/docs/porting/connecting_cpp_and_javascript/Interacting-with-code.html#interacting-with-code-environment-variables
-    char* val = reinterpret_cast<char*>(EM_ASM_PTR({
+    char* val = reinterpret_cast<char*>(MAIN_THREAD_EM_ASM_PTR({
         var envVar = UTF8ToString($0);
         var val = ENV[envVar];
         if (val) {
