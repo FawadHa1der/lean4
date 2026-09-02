@@ -152,6 +152,31 @@ section Elab
     let param := { version := m.version, references, decls }
     return { method, param }
 
+  /-- Patch 0032 (K2): the resident resolver's verdict for one header setup,
+  versioned like every other per-document notification on this channel. -/
+  structure Qed64HeaderStatusParams where
+    /-- Document version this header setup belongs to. -/
+    version : Int
+    /-- `"exact"`, `"covered"` or `"refused"`. -/
+    mode : String
+    /-- The normalized header key that was resolved. -/
+    key : Array String
+    /-- Size of the serving environment's import closure. -/
+    moduleCount : Nat
+    /-- Imports no registered closure contains. -/
+    missing : Array String
+    /-- Resolution time in milliseconds. -/
+    ms : Nat
+    deriving ToJson
+
+  private def mkQed64HeaderStatusNotification (m : DocumentMeta) (mode : String)
+      (key : Array Name) (moduleCount : Nat) (missing : Array Name) (ms : Nat) :
+      JsonRpc.Notification Qed64HeaderStatusParams := {
+    method := "$/qed64/headerStatus"
+    param := { version := m.version, mode, key := key.map toString, moduleCount,
+               missing := missing.map toString, ms }
+  }
+
   private def mkIleanHeaderSetupInfoNotification (m : DocumentMeta)
       (directImports : Array ImportInfo) (isSetupFailure : Bool) :
       JsonRpc.Notification Lsp.LeanILeanHeaderSetupInfoParams := {
@@ -410,6 +435,40 @@ def setupImports
     return .error { diagnostics := .empty, result? := none, metaSnap := default }
 
   let header := stx.toModuleHeader
+  -- Patch 0032 (K1): on wasm this is the ONLY header resolver. Exact key,
+  -- else the smallest covering registered environment, else REFUSED — with a
+  -- header diagnostic and zero allocation. `setupFile` (a proxied `stat` per
+  -- header) and `processHeaderCore` (an on-thread olean import that stalls
+  -- under WORKERFS) are never reached from a worker on this platform.
+  if System.Platform.isEmscripten then
+    let t0 ← IO.monoMsNow
+    let key := Language.Lean.qed64HeaderKey header.imports
+    let verdict ← Language.Lean.lookupPrebuiltEnv key
+    let ms := (← IO.monoMsNow) - t0
+    chanOut.sync.send <| .ofMsg <|
+      mkQed64HeaderStatusNotification doc verdict.mode key verdict.moduleCount verdict.missing ms
+    chanOut.sync.send <| .ofMsg <|
+      mkIleanHeaderSetupInfoNotification doc (collectImports stx) verdict.env?.isNone
+    match verdict.env? with
+    | some env =>
+      IO.eprintln s!"[WASM LSP] header {verdict.mode}: key={key} ({verdict.moduleCount} modules) in {ms} ms"
+      let opts := Elab.async.setIfNotSet cmdlineOpts true
+      let opts := Elab.inServer.set opts true
+      return .ok {
+        mainModuleName := doc.mod
+        isModule := header.isModule
+        imports := header.imports
+        opts
+        prebuiltEnv? := some env
+      }
+    | none =>
+      IO.eprintln s!"[WASM LSP] header refused: key={key} missing={verdict.missing}"
+      let msg := s!"modules {verdict.missing} are not loaded in this session — use \"Load exact imports\""
+      return .error {
+        diagnostics := (← diagnosticsOfHeaderError msg)
+        result? := none
+        metaSnap := default
+      }
   let fileSetupResult ← setupFile doc header fun stderrLine => do
     let progressDiagnostic := {
       range      := ⟨⟨0, 0⟩, ⟨1, 0⟩⟩

@@ -61,11 +61,15 @@ its own cached environment, so `import Std …` (or any imports) is slow only on
 its first compile and fast on every repeat, just like Init-only code. -/
 private initialize wasmEnvCache : IO.Ref (Array (Array Name × Environment)) ← IO.mkRef #[]
 
+/-- Patch 0032 (K1b): the environment cache IS the registry the resident
+resolver reads; registered once, at process initialization. -/
+builtin_initialize Language.Lean.registerPrebuiltEnvSource wasmEnvCache.get
+
 /-- Get or create the cached WASM environment for the given header `imports`.
 The first compile with a given import set imports it (slow); later compiles with
 the same set reuse the cached environment (fast). -/
 def getOrCreateWasmEnvFor (imports : Array Import) : IO Environment := do
-  let key := imports.map (·.module)
+  let key := Language.Lean.qed64HeaderKey imports
   for (k, env) in (← wasmEnvCache.get) do
     if k == key then
       IO.eprintln "[WASM DEBUG] getOrCreateWasmEnvFor: returning cached env"
@@ -237,12 +241,11 @@ def wasmLoadSnapshot (path : String) : IO UInt32 := do
     withImporting do
       unsafe runInitAttrsForModules env initModIdxs {}
     unsafe enableInitializersExecution
-    let key := env.header.imports.map (·.module)
+    let key := Language.Lean.qed64HeaderKey env.header.imports
     wasmEnvCache.modify (·.push (key, env))
     -- The resident FileWorker (patch 0031) runs the REAL header-processing
     -- path, which consults the prebuilt list — publish on every snapshot
     -- load, not only in wasmLspInit, so resident sessions see covering envs.
-    Language.Lean.setPrebuiltHeaderEnvs (← wasmEnvCache.get)
     IO.eprintln s!"[WASM DEBUG] wasmLoadSnapshot: cached env for {key}"
     return 0
   catch e =>
@@ -297,14 +300,13 @@ def wasmLoadSnapshotMem (ptr size flags : USize) : IO UInt32 := do
         if h : modIdx < env.header.modules.size then
           IO.eprintln s!"[WASM PROFILE] init {env.header.modules[modIdx].module}: {d} ms"
     unsafe enableInitializersExecution
-    let key := env.header.imports.map (·.module)
+    let key := Language.Lean.qed64HeaderKey env.header.imports
     wasmEnvCache.modify (·.push (key, env))
     -- The RESIDENT FileWorker (patch 0031) reads `prebuiltHeaderEnvs` when it
     -- processes a header; without this publish the list is empty, the covering
     -- override is never found, and the header imports its whole closure on the
     -- elaboration thread (629 Init modules ≈ 17 s per switch). The non-mem
     -- loader already published; the browser and the spike both use THIS path.
-    Language.Lean.setPrebuiltHeaderEnvs (← wasmEnvCache.get)
     let t4 ← IO.monoMsNow
     IO.eprintln s!"[WASM PROFILE] snapshot load stages: region read+materialize {t1-t0} ms · setMainModule {t2-t1} ms · init replay ({replayModIdxs.size} modules) {t3-t2} ms · cache {t4-t3} ms"
     IO.eprintln s!"[WASM DEBUG] wasmLoadSnapshotMem: cached env for {key}"
@@ -414,7 +416,6 @@ def wasmLspInit (initParamsJson : String) (didOpenJson : String) : IO UInt32 := 
       Server.FileWorker.teardownForReplacement (← oldStRef.get)
     -- Publish every cached env (incl. the fresh prebuild) for the worker's
     -- header processing to find.
-    Language.Lean.setPrebuiltHeaderEnvs (← wasmEnvCache.get)
     -- Timed sleeps on dedicated pthreads never wake under this Emscripten
     -- build (an `IO.sleep` as the reporter's first statement silenced the
     -- whole server); a zero report delay makes `IO.sleep 0` return

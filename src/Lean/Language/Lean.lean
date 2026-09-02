@@ -235,17 +235,78 @@ namespace Lean.Language.Lean
 open Lean.Elab Command
 open Lean.Parser
 
-/-- Embedder-provided pre-built header environments, keyed by the exact
-ordered import list. Consulted before `Elab.processHeaderCore` imports from
-disk: WASM hosts build the environment on the host thread (file reads from
-elaboration task threads are proxied to the host and can be prohibitively
-slow) and push it here; a miss falls through to the normal import. -/
-private initialize prebuiltHeaderEnvs :
-    IO.Ref (Array (Array Name × Environment)) ← IO.mkRef #[]
+/-- ONE environment registry (patch 0032, K1b). The embedder registers a
+reader of its environment cache; nothing is ever "published" a second time,
+so there is no second list to forget (the class of bug that left the browser
+importing 629 modules per header while a publish sat in the loader it did
+not call). The resident FileWorker resolves every header through
+`lookupPrebuiltEnv` below and never imports on the elaboration thread. -/
+private initialize prebuiltEnvSource :
+    IO.Ref (IO (Array (Array Name × Environment))) ←
+  IO.mkRef (pure #[] : IO (Array (Array Name × Environment)))
 
-/-- Publish pre-built header environments (exact-ordered import keys). -/
-def setPrebuiltHeaderEnvs (envs : Array (Array Name × Environment)) : IO Unit :=
-  prebuiltHeaderEnvs.set envs
+/-- Register the embedder's environment cache as the registry source. -/
+def registerPrebuiltEnvSource (get : IO (Array (Array Name × Environment))) : IO Unit :=
+  prebuiltEnvSource.set get
+
+/-- The registered environments (empty when no embedder registered one). -/
+def getPrebuiltEnvs : IO (Array (Array Name × Environment)) := do
+  (← prebuiltEnvSource.get)
+
+/-- THE header key (K1b): the ordered module list with `Init` first and
+de-duplicated; an empty header is `#[Init]`. Shared by the compile path,
+the cache pushes of every snapshot load, and the resident resolver — so a
+warm-compiled `import X` and the FileWorker's `import X` are the same key,
+and the init snapshot (`#[Init, Init]` as baked) matches a headerless file. -/
+def qed64NormalizeKey (mods : Array Name) : Array Name := Id.run do
+  let mut out : Array Name := #[`Init]
+  for m in mods do
+    unless out.contains m do out := out.push m
+  return out
+
+/-- The header key of an import list (see `qed64NormalizeKey`). -/
+def qed64HeaderKey (imports : Array Import) : Array Name :=
+  qed64NormalizeKey (imports.map (·.module))
+
+/-- The resident resolver's verdict. `mode` is "exact" | "covered" | "refused". -/
+structure PrebuiltLookup where
+  /-- The environment that serves the header, if any. -/
+  env? : Option Environment
+  /-- `"exact"`, `"covered"` or `"refused"`. -/
+  mode : String
+  /-- Size of the chosen environment's import closure (0 when refused). -/
+  moduleCount : Nat
+  /-- Imports that no registered closure contains (empty unless refused). -/
+  missing : Array Name
+
+/-- Resolve a header against the registry: exact key first, else the
+SMALLEST registered environment whose import closure covers every import
+(umbrella aliases count as covered by the umbrella), else refused with the
+imports no closure contains. Pure lookup: allocates nothing beyond the
+extension-size refresh of the chosen env (the patch-0025 epoch class). -/
+def lookupPrebuiltEnv (key : Array Name) : IO PrebuiltLookup := do
+  let key := qed64NormalizeKey key
+  let envs ← getPrebuiltEnvs
+  if let some env := envs.findSome? fun (k, env) => if qed64NormalizeKey k == key then some env else none then
+    return { env? := some (← env.ensureExtensionsSizeForWasm), mode := "exact",
+             moduleCount := env.allImportedModuleNames.size, missing := #[] }
+  let mut best : Option (Nat × Environment) := none
+  let mut covered : Array Name := #[]
+  for (_, env) in envs do
+    let names := env.allImportedModuleNames
+    let isUmbrella := names.contains `QED64.Essential
+    let aliasOk (m : Name) : Bool :=
+      isUmbrella && (m == `Mathlib || m == `Mathlib.Tactic || m == `Batteries || m == `MIL.Common)
+    for m in key do
+      if (names.contains m || aliasOk m) && !covered.contains m then covered := covered.push m
+    if key.all (fun m => names.contains m || aliasOk m) then
+      if best.all (names.size < ·.1) then
+        best := some (names.size, env)
+  match best with
+  | some (n, env) =>
+    return { env? := some (← env.ensureExtensionsSizeForWasm), mode := "covered", moduleCount := n, missing := #[] }
+  | none =>
+    return { env? := none, mode := "refused", moduleCount := 0, missing := key.filter (!covered.contains ·) }
 
 
 /-- Lean-specific processing context. -/
@@ -311,6 +372,9 @@ structure SetupImportsResult where
   trustLevel : UInt32 := 0
   /-- Pre-resolved artifacts of transitively imported modules. -/
   importArts : NameMap ImportArtifacts := {}
+  /-- Patch 0032 (K1): the environment the resident resolver chose for this
+  header; `processHeader` uses it instead of importing. -/
+  prebuiltEnv? : Option Environment := none
   /-- Lean plugins to load as part of the environment setup. -/
   plugins : Array Plugin := #[]
 
@@ -509,45 +573,9 @@ where
 
       let startTime := (← IO.monoNanosNow).toFloat / 1000000000
       let mut opts := setup.opts
-      let prebuilt ← prebuiltHeaderEnvs.get
-      let importKey := setup.imports.map (·.module)
-      -- Exact-ordered match first; otherwise the SMALLEST published env whose
-      -- import closure covers the header — the pump path's covering rule
-      -- (wasmLspInit), without which a resident FileWorker could only ever
-      -- serve headers whose import list matches a snapshot key verbatim.
-      -- Umbrella aliases mirror the batch app's table.
-      -- A headerless file imports the prelude implicitly: match it as `Init`
-      -- so the init snapshot's env serves it (an empty key matched nothing,
-      -- and the header then imported all of Init on the elaboration thread).
-      let matchKey := if importKey.isEmpty then #[`Init] else importKey
-      let mut override? : Option Environment :=
-        prebuilt.findSome? fun (k, env) => if k == matchKey then some env else none
-      if override?.isNone then
-        let mut best : Option (Nat × Environment) := none
-        for (_, env) in prebuilt do
-          let names := env.allImportedModuleNames
-          let isUmbrella := names.contains `QED64.Essential
-          let aliasOk (m : Name) : Bool :=
-            isUmbrella && (m == `Mathlib || m == `Mathlib.Tactic || m == `Batteries || m == `MIL.Common)
-          if matchKey.all (fun m => names.contains m || aliasOk m) then
-            if best.all (names.size < ·.1) then
-              best := some (names.size, env)
-        override? := best.map (·.2)
-      -- A published env may predate extensions registered by a later
-      -- snapshot's [init] replay; grow its extension array or generic
-      -- extension access panics (the patch-0025 epoch class).
-      -- One stderr line per header (this fork is wasm-only): HIT/MISS plus
-      -- the published keys — the difference between a 40 ms covered switch
-      -- and a 17 s on-thread import must never be invisible again.
-      unless prebuilt.isEmpty do
-        let hit := if override?.isSome then "HIT" else "MISS"
-        let published := prebuilt.map fun (p : Array Name × Environment) => (p.1, (Environment.allImportedModuleNames p.2).size)
-        IO.eprintln s!"[WASM LSP] prebuilt lookup {hit}: key={matchKey} published={published}"
-      if let some env := override? then
-        override? := some (← env.ensureExtensionsSizeForWasm)
       -- allows `headerEnv` to be leaked, which would live until the end of the process anyway
       let (headerEnv, msgLog) ← do
-        match override? with
+        match setup.prebuiltEnv? with
         | some env => pure (env.setMainModule setup.mainModuleName, MessageLog.empty)
         | none =>
           Elab.processHeaderCore (leakEnv := true)
