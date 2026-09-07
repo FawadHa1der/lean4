@@ -244,8 +244,8 @@ def wasmLoadSnapshot (path : String) : IO UInt32 := do
     let key := Language.Lean.qed64HeaderKey env.header.imports
     wasmEnvCache.modify (·.push (key, env))
     -- The resident FileWorker (patch 0031) runs the REAL header-processing
-    -- path, which consults the prebuilt list — publish on every snapshot
-    -- load, not only in wasmLspInit, so resident sessions see covering envs.
+    -- path, which consults this cache through the registry (patch 0032):
+    -- every snapshot load publishes here so the resolver sees covering envs.
     IO.eprintln s!"[WASM DEBUG] wasmLoadSnapshot: cached env for {key}"
     return 0
   catch e =>
@@ -302,172 +302,17 @@ def wasmLoadSnapshotMem (ptr size flags : USize) : IO UInt32 := do
     unsafe enableInitializersExecution
     let key := Language.Lean.qed64HeaderKey env.header.imports
     wasmEnvCache.modify (·.push (key, env))
-    -- The RESIDENT FileWorker (patch 0031) reads `prebuiltHeaderEnvs` when it
-    -- processes a header; without this publish the list is empty, the covering
-    -- override is never found, and the header imports its whole closure on the
-    -- elaboration thread (629 Init modules ≈ 17 s per switch). The non-mem
-    -- loader already published; the browser and the spike both use THIS path.
+    -- The RESIDENT FileWorker (patch 0031) resolves headers through the
+    -- registry that reads this cache (patch 0032); without this publish the
+    -- covering environment is never found and the header imports its whole
+    -- closure on the elaboration thread (629 Init modules ≈ 17 s per switch).
+    -- The non-mem loader already published; the browser uses THIS path.
     let t4 ← IO.monoMsNow
     IO.eprintln s!"[WASM PROFILE] snapshot load stages: region read+materialize {t1-t0} ms · setMainModule {t2-t1} ms · init replay ({replayModIdxs.size} modules) {t3-t2} ms · cache {t4-t3} ms"
     IO.eprintln s!"[WASM DEBUG] wasmLoadSnapshotMem: cached env for {key}"
     return 0
   catch e =>
     IO.eprintln s!"[WASM DEBUG] wasmLoadSnapshotMem failed: {e}"
-    return 1
-
-/-! ### Host-pumped LSP file worker
-
-An embedder that cannot give the file worker a blocking stdin (WASM: the
-host's event loop must stay live so proxied file-system and stdout writes
-from task threads make progress) drives the worker one message at a time:
-`lean_wasm_lsp_init` performs the `initialize`/`didOpen` startup sequence of
-`initAndRunWorker`, and `lean_wasm_lsp_send` runs one `mainLoop` iteration
-for an already-read message. Server-to-client traffic still flows through
-the worker's ordinary stdout channel, which the host captures. -/
-
-private initialize wasmLspSession :
-    IO.Ref (Option (Server.FileWorker.WorkerContext × IO.Ref Server.FileWorker.WorkerState)) ←
-  IO.mkRef none
-
-/-- Run one `WorkerM` action against host-owned state, round-tripping the
-state through `stRef` so consecutive pump calls observe each other. -/
-private def runWorkerPump (ctx : Server.FileWorker.WorkerContext)
-    (stRef : IO.Ref Server.FileWorker.WorkerState)
-    (act : Server.FileWorker.WorkerM Unit) : IO Unit := do
-  let st ← stRef.get
-  let (_, st') ← (act.run ctx).run st
-  stRef.set st'
-
-@[export lean_wasm_lsp_init]
-def wasmLspInit (initParamsJson : String) (didOpenJson : String) : IO UInt32 := do
-  try
-    let initParams ← IO.ofExcept <| Json.parse initParamsJson >>= fromJson? (α := Lsp.InitializeParams)
-    let didOpen ← IO.ofExcept <| Json.parse didOpenJson >>= fromJson? (α := Lsp.LeanDidOpenTextDocumentParams)
-    let tdoc := didOpen.textDocument
-    let doc : Server.DocumentMeta := {
-      uri := tdoc.uri
-      mod := ← Server.moduleFromDocumentUri tdoc.uri
-      version := tdoc.version
-      text := tdoc.text.crlfToLf.toFileMap
-      dependencyBuildMode := didOpen.dependencyBuildMode?.getD .always
-    }
-    let o ← IO.getStdout
-    let e ← IO.getStderr
-    IO.eprintln s!"[WASM LSP] initializing worker for {tdoc.uri} ({tdoc.text.length} bytes)"
-    -- Pre-build the header environment ON THIS THREAD and register a pure
-    -- cache lookup for the elaboration task: olean reads from task pthreads
-    -- are proxied to the host thread and stall under WORKERFS, while this
-    -- thread imports them the same proven way `lean_wasm_compile` does. The
-    -- exact-ordered key also makes snapshot-seeded envs (wasmEnvCache) serve
-    -- worker sessions for free.
-    let (header, _, _) ← Parser.parseHeader (Parser.mkInputContext tdoc.text.crlfToLf tdoc.uri)
-    let imports := Elab.headerToImports header
-    -- Snapshot-seeded envs may predate later-registered extensions (a second
-    -- snapshot's [init] replay): grow every cached env's extension array
-    -- BEFORE serving any of them, or elaboration under an older env panics
-    -- with "invalid environment extension has been accessed".
-    do
-      let cache ← wasmEnvCache.get
-      let mut refreshed := #[]
-      for (k, env) in cache do
-        refreshed := refreshed.push (k, ← env.ensureExtensionsSizeForWasm)
-      wasmEnvCache.set refreshed
-    unless imports.isEmpty do
-      let key := imports.map (·.module)
-      let cache ← wasmEnvCache.get
-      unless cache.any (·.1 == key) do
-        -- Prefer the smallest cached environment whose import closure covers
-        -- the document (snapshot-seeded init/umbrella envs): the playground
-        -- superset semantics the batch path gets from its header rewrite,
-        -- with exact positions and no olean import. Fall back to a real
-        -- import on this thread when nothing covers.
-        let mut best : Option (Nat × Environment) := none
-        for (_, env) in cache do
-          let names := env.allImportedModuleNames
-          -- Aggregators and tutorial preludes absent from the curated
-          -- profile (import Mathlib / Mathlib.Tactic / Batteries /
-          -- Mathematics in Lean's MIL.Common) count as satisfied by the
-          -- umbrella environment, mirroring the batch app's alias table.
-          let isUmbrella := names.contains `QED64.Essential
-          let aliasOk (m : Name) : Bool :=
-            isUmbrella && (m == `Mathlib || m == `Mathlib.Tactic || m == `Batteries || m == `MIL.Common)
-          if imports.all (fun i => names.contains i.module || aliasOk i.module) then
-            if best.all (names.size < ·.1) then
-              best := some (names.size, env)
-        match best with
-        | some (sz, env) =>
-          IO.eprintln s!"[WASM LSP] header served by a cached superset env ({sz} modules)"
-          wasmEnvCache.modify (·.push (key, env))
-        | none =>
-          let t0 ← IO.monoMsNow
-          try
-            discard <| getOrCreateWasmEnvFor imports
-          catch err =>
-            -- The header does not resolve (typically a partially-typed
-            -- import). The LIVE session has not been touched: report
-            -- "unresolvable" so the page can keep the current checker
-            -- serving and show a calm diagnostic while the user types.
-            IO.eprintln s!"[WASM LSP] header unresolvable (session kept): {err}"
-            return 2
-          IO.eprintln s!"[WASM LSP] header env prebuilt in {(← IO.monoMsNow) - t0} ms"
-    -- The header resolves — ONLY NOW replace any live session.
-    if let some (_, oldStRef) ← wasmLspSession.get then
-      IO.eprintln "[WASM LSP] init called with a live session; cancelling it and replacing"
-      Server.FileWorker.teardownForReplacement (← oldStRef.get)
-    -- Publish every cached env (incl. the fresh prebuild) for the worker's
-    -- header processing to find.
-    -- Timed sleeps on dedicated pthreads never wake under this Emscripten
-    -- build (an `IO.sleep` as the reporter's first statement silenced the
-    -- whole server); a zero report delay makes `IO.sleep 0` return
-    -- immediately and costs nothing in a single-user playground.
-    let opts : Options := Server.FileWorker.server.reportDelayMs.set {} 0
-    let (ctx, st) ← Server.FileWorker.initializeWorker doc o e initParams opts
-    let stRef ← IO.mkRef st
-    wasmLspSession.set <| some (ctx, stRef)
-    return 0
-  catch err =>
-    IO.eprintln s!"[WASM LSP] init failed: {err}"
-    return 1
-
-@[export lean_wasm_lsp_send]
-def wasmLspSend (msgJson : String) : IO UInt32 := do
-  try
-    let some (ctx, stRef) ← wasmLspSession.get
-      | IO.eprintln "[WASM LSP] send without a session"; return 1
-    let msg ← IO.ofExcept <| Json.parse msgJson >>= fromJson? (α := JsonRpc.Message)
-    runWorkerPump ctx stRef do
-      -- The bookkeeping prologue of `FileWorker.mainLoop`, minus the blocking
-      -- read: reap finished request tasks and expired RPC sessions.
-      let mut st ← get
-      let pendingRequests ← st.pendingRequests.foldlM (init := st.pendingRequests)
-        fun acc id r => do
-          if ← r.requestTask.hasFinished then
-            if let Except.error e ← r.requestTask.wait then
-              throw <| IO.userError s!"Failed responding to request {id}: {e}"
-            pure <| acc.erase id
-          else
-            pure acc
-      st := { st with pendingRequests }
-      for (id, seshRef) in st.rpcSessions do
-        if (← (← seshRef.get).hasExpired) then
-          st := { st with rpcSessions := st.rpcSessions.erase id }
-      set st
-      match msg with
-      | .request id method (some params) =>
-        Server.FileWorker.handleRequest id method (toJson params)
-      | .notification "exit" none =>
-        wasmLspSession.set none
-      | .notification method (some params) =>
-        Server.FileWorker.handleNotification method (toJson params)
-      | .response id result =>
-        Server.FileWorker.handleResponse id result
-      | .responseError id code message _ =>
-        Server.FileWorker.handleResponseError id code message
-      | _ =>
-        IO.eprintln "[WASM LSP] invalid JSON-RPC message"
-    return 0
-  catch err =>
-    IO.eprintln s!"[WASM LSP] send failed: {err}"
     return 1
 
 /-- Whether Lean was built with an address sanitizer enabled. -/
