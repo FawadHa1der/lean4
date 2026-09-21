@@ -86,95 +86,17 @@ example (a b : ℕ) : a + b = b + a := by omega
 LEAN
 [ -n "${SELECT_ONLY:-}" ] || run "lake env lean .qed64-smoke.lean"
 
-echo "=== [4/4] essential selection ==="
-python3 - "$ML" "$NATIVE/stage1/lib/lean" "$REPO/src" "$W" "$MATHLIB_ROOTS $CORE_ROOTS" "${MATHLIB_EXTRA_ROOTS:-}" <<'PY'
-import json, os, re, shutil, sys
-ml, corelib, coresrc, out = sys.argv[1:5]; roots = sys.argv[5].split(); extra_roots = sys.argv[6].split()
-FACETS = (".olean", ".olean.server", ".olean.private", ".ir", ".ir.sig")
-# (source root, olean root) per origin, in lookup order
-origins = [(ml, os.path.join(ml, ".lake/build/lib/lean"))]
-pk = os.path.join(ml, ".lake/packages")
-for d in sorted(os.listdir(pk)):
-    origins.append((os.path.join(pk, d), os.path.join(pk, d, ".lake/build/lib/lean")))
-origins += [(coresrc, corelib), (os.path.join(coresrc, "lake"), corelib)]
-def source_of(mod):
-    rel = mod.replace("«", "").replace("»", "").replace(".", "/") + ".lean"
-    for src, ol in origins:
-        p = os.path.join(src, rel)
-        if os.path.exists(p): return p, ol
-    return None, None
-def strip_comments(text):
-    # Lean block comments NEST (a module doc may quote a whole `/- … -/` header,
-    # "import statements*" included), so a flag is not enough: count depth.
-    out, i, depth, n = [], 0, 0, len(text)
-    while i < n:
-        two = text[i:i+2]
-        if two == "/-": depth += 1; i += 2
-        elif two == "-/" and depth: depth -= 1; i += 2
-        elif depth: i += 1
-        elif two == "--":
-            j = text.find("\n", i); i = n if j < 0 else j
-        else: out.append(text[i]); i += 1
-    return "".join(out)
-def header_imports(path):
-    # header grammar: [module] [prelude] ([public|private] [meta] import [all] Name)*
-    toks = strip_comments(open(path, encoding="utf-8", errors="replace").read(20000)).split()
-    mods, i, prelude = [], 0, False
-    while i < len(toks):
-        t = toks[i]
-        if t == "module": i += 1
-        elif t == "prelude": prelude = True; i += 1
-        elif t in ("public", "private", "meta"): i += 1
-        elif t == "import":
-            i += 1
-            if i < len(toks) and toks[i] == "all": i += 1
-            if i < len(toks): mods.append(toks[i]); i += 1
-        else: break
-    return mods, prelude
-def closure(start):
-    seen, todo, missing = {}, list(start) + ["Init"], []
-    while todo:
-        m = todo.pop()
-        if m in seen: continue
-        src, ol = source_of(m)
-        if src is None: missing.append(m); seen[m] = None; continue
-        seen[m] = ol
-        imps, prelude = header_imports(src)
-        if not prelude: imps.append("Init")
-        todo += imps
-    if missing: sys.exit(f"mathlib-tree: no source for {len(missing)} imported modules, e.g. {missing[:5]}")
-    return seen
-def stage(name, selected, where, roots_used):
-    tree = os.path.join(out, name + "-tree")
-    shutil.rmtree(tree, ignore_errors=True)
-    files = 0; lacking = []
-    for m in selected:
-        rel = m.replace("«", "").replace("»", "").replace(".", "/")
-        if not os.path.exists(os.path.join(where[m], rel + ".olean")): lacking.append(m); continue
-        for f in FACETS:
-            p = os.path.join(where[m], rel + f)
-            if os.path.exists(p):
-                d = os.path.join(tree, rel + f); os.makedirs(os.path.dirname(d), exist_ok=True)
-                try: os.link(p, d)
-                except OSError: shutil.copy2(p, d)
-                files += 1
-    if lacking: sys.exit(f"mathlib-tree: {len(lacking)} selected {name} modules were not built, e.g. {lacking[:5]}")
-    open(os.path.join(out, name + "-modules.txt"), "w").write("\n".join(selected) + "\n")
-    by = {}
-    for m in selected: by[m.split(".")[0]] = by.get(m.split(".")[0], 0) + 1
-    json.dump({"roots": roots_used, "modules": len(selected), "files": files, "byTopLevel": by}, open(os.path.join(out, name + "-selection.json"), "w"), indent=1)
-    print(f"{name}: {len(selected)} modules, {files} files -> {tree}")
-    print("  " + ", ".join(f"{k} {v}" for k, v in sorted(by.items(), key=lambda kv: -kv[1])[:12]))
-core = lambda m: m == "Init" or m.startswith("Init.")
-ess = closure(roots)
-essential = sorted(m for m in ess if not core(m))
-stage("essential", essential, ess, roots)
-if extra_roots:
-    # a SECOND, additive tree: what the extra roots need beyond essential. Packed
-    # separately, so consumers that do not want it (the playground) never pay for it.
-    wide = closure(roots + extra_roots)
-    extra = sorted(m for m in wide if not core(m) and m not in ess)
-    stage("extra", extra, wide, extra_roots)
-PY
+SELECT=(python3 "$REPO/wasm64-build/mathlib-select.py")
+ARGS=("$ML" "$NATIVE/stage1/lib/lean" "$REPO/src" "$W" "$MATHLIB_ROOTS $CORE_ROOTS" "${MATHLIB_EXTRA_ROOTS:-}")
+echo "=== [4a/4] deprecated-module shims ==="
+# Old module names survive a Mathlib move only as `deprecated_module` shims that
+# nothing imports, so no root pulls them in: build the ones whose target is
+# already selected (mathlib-select.py explains the rule). Incremental, minutes.
+SHIMS="$("${SELECT[@]}" shims "${ARGS[@]}" | awk '{print $2}' | tr '\n' ' ')"
+if [ -n "${SHIMS// /}" ]; then
+  run "lake build $SHIMS -q --log-level=warning" || { echo "mathlib-tree: shim build failed" >&2; exit 1; }
+fi
+echo "=== [4b/4] selection ==="
+"${SELECT[@]}" select "${ARGS[@]}"
 git -C "$ML" rev-parse HEAD > "$W/MATHLIB-COMMIT"
 echo "MATHLIB TREE COMPLETE — $W/essential-tree ($(cat "$W/MATHLIB-COMMIT" | cut -c1-10))"
