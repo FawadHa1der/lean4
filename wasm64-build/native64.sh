@@ -64,8 +64,9 @@ echo "=== [3/3] identity ==="
 run "/lean-native/stage1/bin/lean --version"
 VER="$(run "/lean-native/stage1/bin/lean --version")"
 case "$VER" in *wasm64-unknown-emscripten*) ;; *) echo "native64: lean does not report the wasm64 target: $VER" >&2; exit 1;; esac
-printf 'example : System.Platform.numBits = 64 := by decide\n#eval System.Platform.target\n' > "$OUT/abi-smoke.lean"
-run "/lean-native/stage1/bin/lean /lean-native/abi-smoke.lean"
+printf '#eval System.Platform.numBits\n#eval System.Platform.target\nexample : 2 + 2 = 4 := rfl\n' > "$OUT/abi-smoke.lean"
+SMOKE="$(run "/lean-native/stage1/bin/lean /lean-native/abi-smoke.lean")"; echo "$SMOKE"
+[ "$(echo "$SMOKE" | head -1)" = "64" ] || { echo "native64: numBits is not 64" >&2; exit 1; }
 
 # The premise of the whole lane: the core library the native compiler wrote is
 # the core library the wasm64 build wrote. Both come from the same stage0, so
