@@ -37,6 +37,12 @@ MATHLIB_REV="${MATHLIB_REV:-$TAG}"
 # in the same Lake workspace but staged as a separate additive tree.
 MATHLIB_ROOTS="${MATHLIB_ROOTS:-Mathlib.Geometry.Manifold.IsManifold.Basic Mathlib.Geometry.Manifold.Instances.Sphere Mathlib.Analysis.SpecialFunctions.Complex.Circle}"
 ROOTS="$MATHLIB_ROOTS ${MATHLIB_EXTRA_ROOTS:-}"
+# Core umbrellas selected INTO essential (nothing to build: they are the
+# kernel's own library). Until 4.33 they arrived through Mathlib's legacy
+# `import Lean`-style headers; module-system Mathlib imports core modules one by
+# one, and without these roots `import Lean` / `import Std` in a user's file
+# would stop resolving (-504 Lean.*, -276 Std.* modules at v4.34.0).
+CORE_ROOTS="${CORE_ROOTS-Lean Std}"
 THREADS="${LEAN_NUM_THREADS:-6}"      # fd exhaustion + an 8 GiB Docker VM: keep it modest
 if ! git --version >/dev/null 2>&1 && [ -d /Library/Developer/CommandLineTools ]; then
   export DEVELOPER_DIR=/Library/Developer/CommandLineTools
@@ -68,7 +74,8 @@ run() {
     "$IMG" bash -lc "export PATH=/native/stage1/bin:\$PATH; git config --global --add safe.directory '*'; $1"
 }
 echo "=== [2/4] lake build ($ROOTS) — hours ==="
-run "lean --version && lake build $ROOTS -q --log-level=info"
+# SELECT_ONLY=1 re-runs just the selection over an existing build
+[ -n "${SELECT_ONLY:-}" ] || run "lean --version && lake build $ROOTS -q --log-level=info"
 
 echo "=== [3/4] native smoke ==="
 cat > "$W/mathlib4/.qed64-smoke.lean" <<'LEAN'
@@ -77,10 +84,10 @@ import Mathlib.Analysis.SpecialFunctions.Complex.Circle
 example : (2 : ℝ) + 2 = 4 := by norm_num
 example (a b : ℕ) : a + b = b + a := by omega
 LEAN
-run "lake env lean .qed64-smoke.lean"
+[ -n "${SELECT_ONLY:-}" ] || run "lake env lean .qed64-smoke.lean"
 
 echo "=== [4/4] essential selection ==="
-python3 - "$ML" "$NATIVE/stage1/lib/lean" "$REPO/src" "$W" "$MATHLIB_ROOTS" "${MATHLIB_EXTRA_ROOTS:-}" <<'PY'
+python3 - "$ML" "$NATIVE/stage1/lib/lean" "$REPO/src" "$W" "$MATHLIB_ROOTS $CORE_ROOTS" "${MATHLIB_EXTRA_ROOTS:-}" <<'PY'
 import json, os, re, shutil, sys
 ml, corelib, coresrc, out = sys.argv[1:5]; roots = sys.argv[5].split(); extra_roots = sys.argv[6].split()
 FACETS = (".olean", ".olean.server", ".olean.private", ".ir", ".ir.sig")
@@ -90,28 +97,40 @@ pk = os.path.join(ml, ".lake/packages")
 for d in sorted(os.listdir(pk)):
     origins.append((os.path.join(pk, d), os.path.join(pk, d, ".lake/build/lib/lean")))
 origins += [(coresrc, corelib), (os.path.join(coresrc, "lake"), corelib)]
-IMPORT = re.compile(r'(?:^|\s)(?:public\s+|private\s+)?(?:meta\s+)?import\s+(?:all\s+)?([^\s]+)')
 def source_of(mod):
     rel = mod.replace("«", "").replace("»", "").replace(".", "/") + ".lean"
     for src, ol in origins:
         p = os.path.join(src, rel)
         if os.path.exists(p): return p, ol
     return None, None
+def strip_comments(text):
+    # Lean block comments NEST (a module doc may quote a whole `/- … -/` header,
+    # "import statements*" included), so a flag is not enough: count depth.
+    out, i, depth, n = [], 0, 0, len(text)
+    while i < n:
+        two = text[i:i+2]
+        if two == "/-": depth += 1; i += 2
+        elif two == "-/" and depth: depth -= 1; i += 2
+        elif depth: i += 1
+        elif two == "--":
+            j = text.find("\n", i); i = n if j < 0 else j
+        else: out.append(text[i]); i += 1
+    return "".join(out)
 def header_imports(path):
-    # the import block ends at the first line that is neither blank, comment, `module`, `prelude` nor an import
-    mods, in_block = [], False
-    for line in open(path, encoding="utf-8", errors="replace"):
-        s = line.strip()
-        if in_block:
-            if "-/" in s: in_block = False
-            continue
-        if s.startswith("/-"):
-            in_block = "-/" not in s; continue
-        if not s or s.startswith("--") or s in ("module", "prelude"): continue
-        found = IMPORT.findall(" " + s)
-        if not found or not re.match(r'(public\s+|private\s+)?(meta\s+)?import\b', s): break
-        mods += found
-    return mods
+    # header grammar: [module] [prelude] ([public|private] [meta] import [all] Name)*
+    toks = strip_comments(open(path, encoding="utf-8", errors="replace").read(20000)).split()
+    mods, i, prelude = [], 0, False
+    while i < len(toks):
+        t = toks[i]
+        if t == "module": i += 1
+        elif t == "prelude": prelude = True; i += 1
+        elif t in ("public", "private", "meta"): i += 1
+        elif t == "import":
+            i += 1
+            if i < len(toks) and toks[i] == "all": i += 1
+            if i < len(toks): mods.append(toks[i]); i += 1
+        else: break
+    return mods, prelude
 def closure(start):
     seen, todo, missing = {}, list(start) + ["Init"], []
     while todo:
@@ -120,8 +139,8 @@ def closure(start):
         src, ol = source_of(m)
         if src is None: missing.append(m); seen[m] = None; continue
         seen[m] = ol
-        imps = header_imports(src)
-        if "prelude" not in open(src, encoding="utf-8", errors="replace").read(400): imps.append("Init")
+        imps, prelude = header_imports(src)
+        if not prelude: imps.append("Init")
         todo += imps
     if missing: sys.exit(f"mathlib-tree: no source for {len(missing)} imported modules, e.g. {missing[:5]}")
     return seen
