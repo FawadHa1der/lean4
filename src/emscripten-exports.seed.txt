@@ -1,10 +1,9 @@
 # Runtime C API + glue symbols exported for dlsym/JS (patch 0032). Everything the
 # Lean compiler emits (LEAN_EXPORT l_*/initialize_*) is generated at build time by
-# pipeline/toolchain/gen-exports.py; only non-generated names live here.
+# wasm64-build/gen-exports.py; only non-generated names live here.
 _free
 _lean_browser64_configure_input_ring
 _lean_wasm_shell_mark_preinitialized
-_lean_add_alias
 _lean_add_decl
 _lean_add_decl_without_checking
 _lean_alloc_object
@@ -34,7 +33,6 @@ _lean_array_to_list
 _lean_array_to_list_impl
 _lean_assign_lmvar
 _lean_assign_mvar
-_lean_attribute_application_time
 _lean_axiom_val_is_unsafe
 _lean_big_int64_to_int
 _lean_big_int_to_int
@@ -97,7 +95,6 @@ _lean_environment_find
 _lean_environment_free_regions
 _lean_environment_mark_quot_init
 _lean_environment_quot_init
-_lean_erase_macro_scopes
 _lean_eval_check_meta
 _lean_eval_const
 _lean_eval_main
@@ -114,7 +111,6 @@ _lean_expr_has_fvar
 _lean_expr_has_level_mvar
 _lean_expr_has_level_param
 _lean_expr_has_loose_bvar
-_lean_expr_has_mvar
 _lean_expr_hash
 _lean_expr_instantiate
 _lean_expr_instantiate1
@@ -187,7 +183,6 @@ _lean_get_num_attributes
 _lean_get_option_decls_array
 _lean_get_profiler
 _lean_get_profiler_threshold
-_lean_get_reducibility_status
 _lean_get_regular_init_fn_name_for
 _lean_get_set_stderr
 _lean_get_set_stdin
@@ -208,8 +203,6 @@ _lean_grind_normalize
 _lean_grind_preprocess
 _lean_grind_process_new_facts
 _lean_has_compile_error
-_lean_has_match_pattern_attribute
-_lean_has_out_params
 _lean_idbg_client_loop
 _lean_inc_heartbeat
 _lean_inductive_val_is_rec
@@ -247,7 +240,6 @@ _lean_internal_get_believer_trust_level
 _lean_internal_get_build_type
 _lean_internal_get_default_max_heartbeat
 _lean_internal_get_default_max_memory
-_lean_internal_get_default_options
 _lean_internal_get_default_verbose
 _lean_internal_get_hardware_concurrency
 _lean_internal_has_address_sanitizer
@@ -355,14 +347,8 @@ _lean_ir_export_entries
 _lean_ir_find_env_decl
 _lean_ir_find_env_decl_boxed
 _lean_ir_format_fn_body_head
-_lean_is_attribute
-_lean_is_class
 _lean_is_expr_def_eq
-_lean_is_inaccessible_user_name
 _lean_is_level_def_eq
-_lean_is_matcher
-_lean_is_out_param
-_lean_is_private_name
 _lean_is_reserved_name
 _lean_is_trace_class_enabled
 _lean_is_unsafe_inductive_decl
@@ -492,7 +478,6 @@ _lean_mk_bool_data_value
 _lean_mk_cases_on
 _lean_mk_constructor_val
 _lean_mk_definition_val
-_lean_mk_empty_environment
 _lean_mk_empty_local_ctx
 _lean_mk_inductive_decl
 _lean_mk_inductive_val
@@ -525,8 +510,6 @@ _lean_mk_let_decl
 _lean_mk_local_decl
 _lean_mk_mangled_boxed_name
 _lean_mk_opaque_val
-_lean_mk_outparam_args_implicit
-_lean_mk_projection_info
 _lean_mk_quot_val
 _lean_mk_recursor_val
 _lean_mk_reducibility_hints_regular
@@ -534,7 +517,6 @@ _lean_mk_string
 _lean_mk_string_from_bytes
 _lean_mk_string_from_bytes_unchecked
 _lean_mk_string_unchecked
-_lean_mk_syntax_ident
 _lean_mk_theorem_val
 _lean_name_append_after
 _lean_name_append_before
@@ -577,10 +559,7 @@ _lean_panic_fn
 _lean_panic_fn_borrowed
 _lean_pretty_printer_formatter_interpret_parser_descr
 _lean_pretty_printer_parenthesizer_interpret_parser_descr
-_lean_private_prefix
-_lean_private_to_user_name
 _lean_profileit
-_lean_projection_info_from_class
 _lean_quot_val_kind
 _lean_recursor_is_unsafe
 _lean_recursor_k
@@ -600,7 +579,6 @@ _lean_sarray_eq_cold
 _lean_set_exit_on_panic
 _lean_set_initializing
 _lean_set_panic_messages
-_lean_set_reducibility_status
 _lean_setup_args
 _lean_sharecommon_eq
 _lean_sharecommon_hash
@@ -612,7 +590,6 @@ _lean_shell_options_get_run
 _lean_shell_options_mk
 _lean_shell_options_process
 _lean_simp
-_lean_simp_macro_scopes
 _lean_slice_dec_lt
 _lean_slice_hash
 _lean_smap_foreach_test
