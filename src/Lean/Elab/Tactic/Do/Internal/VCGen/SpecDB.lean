@@ -18,18 +18,13 @@ open Lean Meta Elab Tactic Sym
 Spec-theorem database used by `vcgen`. The `@[spec]` attribute already stores
 `Std.Internal.Do` specs as pattern-keyed `SpecTheorem`s (see `Lean.Elab.Tactic.Do.Attr`);
 this module adds the operations the VC generator needs on top: instantiating a spec to
-`pre ⊑ wp …` form, migrating the equational lemmas registered through the `mvcgen_simp`
-side of `@[spec]` into the same database, and looking up the specs matching a program.
+`pre ⊑ wp …` form, folding a `vcgen [...]` call's simp-style arguments into the same
+database, and looking up the specs matching a program.
 -/
 
 namespace Lean.Elab.Tactic.Do.Internal
 
-open SpecAttr
-
-/-- Returns `true` if `e` is already internalized into the current `SymM` share table, in which case
-`shareCommon e` returns `e` unchanged. -/
-public def _root_.Lean.Meta.Sym.isShared (e : Expr) : SymM Bool :=
-  return (← get).share.set.contains { expr := e }
+open Lean.Elab.Tactic.Do.Internal.SpecAttr
 
 /--
 Internalizes the pattern's expressions into the current `SymM` share table.
@@ -79,16 +74,13 @@ public def SpecAttr.SpecTheorem.global? (specThm : SpecTheorem) : Option Name :=
 namespace VCGen
 
 /--
-Extend the `@[spec]` database with the equational lemmas registered through the `mvcgen_simp`
-side of `@[spec]`:
-- simp theorem declarations registered directly as `@[spec]`,
-- unfold entries registered with `attribute [spec] foo`, using stored equation lemmas when
-  available and falling back to `Meta.getEqnsFor?`.
+Extend the spec `database` with the specs a `vcgen [...]` call's simp-style arguments contribute
+(`simpSpecTheorems` over the `simpThms` that `mkSimpContext` collected).
 
 Hoare triple and `⊑ wp` specs are already in `database`: the attribute stores them pattern-keyed
 at annotation time.
 -/
-public def extendWithSimpSpecs (database : SpecTheorems) (simpThms : SimpTheorems) :
+public def addSimpSpecs (database : SpecTheorems) (simpThms : SimpTheorems) :
     MetaM SpecTheorems := do
   let mut specs := database.specs
   -- Erased entries are still inserted into `specs` below; `findSpecs` filters them out
@@ -97,61 +89,31 @@ public def extendWithSimpSpecs (database : SpecTheorems) (simpThms : SimpTheorem
     match SpecProof.ofOrigin o with
     | some p => acc.insert p
     | none => acc
-  -- Add simp spec theorems (equational lemmas registered via `@[spec]`)
-  for simpThm in simpThms.post.values do
-    if let .decl declName .. := simpThm.origin then
-      try
-        if let some newSpec ← mkSpecTheoremFromSimpDecl? declName simpThm.priority then
-          specs := Sym.insertPattern specs newSpec.pattern newSpec
-      catch e =>
-        trace[Elab.Tactic.Do.vcgen] "Failed to add simp spec {declName}: {e.toMessageData}"
-  -- Add definitions to unfold (registered via `attribute [spec] foo`)
-  for declName in simpThms.toUnfold.toList do
-    let eqThms ← match simpThms.toUnfoldThms.find? declName with
-      | some eqThms => pure eqThms
-      | none =>
-        -- No explicit equational theorems stored; generate them via `getEqnsFor?`
-        let some eqThms ← Meta.getEqnsFor? declName | continue
-        pure eqThms
-    for eqThm in eqThms do
-      try
-        if let some newSpec ← mkSpecTheoremFromSimpDecl? eqThm (prio := eval_prio default) then
-          specs := Sym.insertPattern specs newSpec.pattern newSpec
-      catch e =>
-        trace[Elab.Tactic.Do.vcgen] "Failed to add unfold spec {declName}/{eqThm}: {e.toMessageData}"
+  -- Only post-rewrite simp lemmas become specs, so a `↓`-marked (pre-rewrite) argument is dropped.
+  for simpThm in simpThms.pre.values do
+    logWarning m!"`vcgen` uses only post-rewrite simp lemmas as specs; ignoring the pre-rewrite \
+      lemma `{simpThm.origin.key}`."
+  -- `mkSimpContext` splits a bracketed definition into its equations (in `post`) and a `toUnfold`
+  -- entry; feed both back to `simpSpecTheorems` as the `SimpEntry`s the definition would produce.
+  let entries := simpThms.post.values.map (SimpEntry.thm ·)
+    ++ simpThms.toUnfold.toList.toArray.map (SimpEntry.toUnfold ·)
+  for newSpec in ← simpSpecTheorems entries unfoldSpecPrio do
+    specs := Sym.insertPattern specs newSpec.pattern newSpec
   return { specs, erased }
 
 end VCGen
 
 /--
 Look up `SpecTheorem`s in the `@[spec]` database.
-Takes all specs that match the given program `e` and sorts by descending priority.
+Takes all specs the discrimination tree holds for the program `e` and sorts by descending priority.
 -/
 public def SpecAttr.SpecTheorems.findSpecs (database : SpecTheorems) (e : Expr) :
-    SymM (Except (Array SpecTheorem) SpecTheorem × SpecTheorems) := do
+    SymM (Array SpecTheorem) := do
   let e ← instantiateMVars e
   let e ← shareCommon e
-  let candidates := Sym.getMatch database.specs e
+  let candidates := Sym.getMatch (← getMCtx) database.specs e
   let candidates := candidates.filter fun spec => !database.erased.contains spec.proof
-  if h : candidates.size = 1 then
-    have : 0 < candidates.size := h ▸ Nat.zero_lt_one
-    return (.ok candidates[0], database)
   -- It appears that insertion sort is *much* faster than qsort here.
-  let candidates := candidates.insertionSort (·.priority > ·.priority)
-  let mut database := database
-  for spec in candidates do
-    -- Match against the internalized pattern so its instance arguments are pointer-equal to the
-    -- program's. A spec is internalized the first time it is tried and stored back in the database,
-    -- so later lookups find it already in the share table and skip the work.
-    let mut spec := spec
-    unless ← isShared spec.pattern.pattern do
-      spec := { spec with pattern := ← spec.pattern.shareCommon }
-      -- Take sole ownership of the discrimination tree before inserting so the update is in place.
-      let specs := database.specs
-      database := { database with specs := default }
-      database := { database with specs := Sym.insertPattern specs spec.pattern spec }
-    let some _res ← spec.pattern.match? e | continue
-    return (.ok spec, database)
-  return (.error candidates, database)
+  return candidates.insertionSort (·.priority > ·.priority)
 
 end Lean.Elab.Tactic.Do.Internal

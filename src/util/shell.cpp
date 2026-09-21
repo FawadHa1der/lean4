@@ -39,7 +39,6 @@ Author: Leonardo de Moura
 #include "library/print.h"
 #include "initialize/init.h"
 #include "library/ir_interpreter.h"
-#include "util/path.h"
 #ifdef _MSC_VER
 #include <io.h>
 #define STDOUT_FILENO 1
@@ -383,7 +382,11 @@ extern "C" LEAN_EXPORT int lean_main(int argc, char ** argv) {
         std::cerr << "error: " << ex.what() << std::endl;
         return 1;
     }
-    consume_io_result(lean_enable_initializer_execution());
+    lean_enable_initializer_execution();
+
+    // Default the configured thread stack size from the environment as in `lean_run_main`;
+    // `--tstack` below overrides it.
+    set_thread_stack_size_from_env();
 
     int rc;
     object_ref shell_opts;
@@ -421,16 +424,30 @@ extern "C" LEAN_EXPORT int lean_main(int argc, char ** argv) {
     scoped_task_manager scope_task_man(get_shell_num_threads(shell_opts));
 #endif
 
-    try {
-        return run_shell_main(argc - optind, argv + optind, shell_opts);
-    } catch (lean::throwable & ex) {
-        std::cerr << ex.what() << "\n";
-    } catch (std::bad_alloc & ex) {
-        std::cerr << "out of memory" << std::endl;
-    } catch (std::exception & ex) {
-        std::cerr << "exception: " << ex.what() << std::endl;
-    } catch (...) {
-        std::cerr << "unknown exception" << std::endl;
-    }
-    return 1;
+    int shell_rc = 1;
+    auto run = [&]() {
+        try {
+            shell_rc = run_shell_main(argc - optind, argv + optind, shell_opts);
+        } catch (lean::throwable & ex) {
+            std::cerr << ex.what() << "\n";
+        } catch (std::bad_alloc & ex) {
+            std::cerr << "out of memory" << std::endl;
+        } catch (std::exception & ex) {
+            std::cerr << "exception: " << ex.what() << std::endl;
+        } catch (...) {
+            std::cerr << "unknown exception" << std::endl;
+        }
+    };
+#if defined(LEAN_EMSCRIPTEN)
+    // The application thread already is a pthread with an explicit stack
+    // (PROXY_TO_PTHREAD + STACK_SIZE). Hopping to a second `lthread` would
+    // halve that stack (LEAN_DEFAULT_THREAD_STACK_SIZE is 8MB here), pin one
+    // more pool worker for the life of the resident FileWorker, and leave the
+    // application thread parked in a join it can never be woken from.
+    run();
+#else
+    // Do not rely on OS thread stack size, as for Lean executables
+    run_with_thread_stack(run);
+#endif
+    return shell_rc;
 }

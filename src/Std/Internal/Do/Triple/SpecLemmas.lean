@@ -29,6 +29,7 @@ public import Init.Data.String.Iterate
 import Init.Data.String.Lemmas.Splits
 import Init.Data.String.Termination
 import Init.Data.String.Lemmas.Iterate
+public import Std.Internal.ForIn
 
 set_option linter.missingDocs true
 
@@ -45,12 +46,16 @@ namespace Std.Internal.Do
 
 open Lean.Order
 
-universe u v
+universe u v w w'
 variable {m : Type u → Type v} {Pred : Type u} {EPred : Type u}
 
 /-! # `Monad` -/
 
 variable [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
+
+section MonadSpec
+variable {Pred : Type w} {EPred : Type w'} [Assertion Pred] [Assertion EPred]
+  [WPMonad m Pred EPred]
 
 @[spec]
 theorem Spec.pure (a : α) :
@@ -72,6 +77,8 @@ theorem Spec.map (f : α → β) (x : m α) :
 theorem Spec.seq (x : m (α → β)) (y : m α) :
     Triple (x <*> y) (wp x (fun f => wp y (fun a => post (f a)) epost) epost) post epost :=
   Triple.seq x y (Triple.intro PartialOrder.rel_refl)
+
+end MonadSpec
 
 /-! # `MonadLift` -/
 
@@ -260,6 +267,9 @@ theorem Spec.adapt_ReaderT (f : ρ → ρ') (x : ReaderT ρ' m α) (post : α �
 
 /-! # `StateT` -/
 
+section StateTSpec
+variable {Pred : Type w} {EPred : Type w'} [Assertion Pred] [Assertion EPred]
+  [WPMonad m Pred EPred] {epost : EPred}
 
 @[spec]
 theorem Spec.get_StateT (post : σ → σ → Pred) :
@@ -286,6 +296,8 @@ theorem Spec.modifyGet_StateT (f : σ → α × σ) (post : α → σ → Pred) 
   Triple.intro (by intro s; simpa [MonadStateOf.modifyGet] using!
     (WPMonad.pure_le_wp_pure (m := m) (x := f s)
       (post := fun x => post x.fst x.snd) (epost := epost)))
+
+end StateTSpec
 
 /-! # Lifting `MonadStateOf` -/
 
@@ -604,62 +616,62 @@ namespace Std.Internal.Do
 
 open Lean.Order
 
-universe u₁ u₂ v
+universe u₁ u₂ v w uₚ uₑ
 
-variable {α : Type u₁} {β : Type (max u₁ u₂)} {m : Type (max u₁ u₂) → Type v} {Pred : Type (max u₁ u₂)} {EPred : Type (max u₁ u₂)}
+variable {α : Type u₁} {β : Type u₂} {m : Type u₂ → Type v} {Pred : Type uₚ} {EPred : Type uₑ}
 variable [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
 
 /-- The type of loop invariants used by the specifications of `for ... in ...` loops.
-A loop invariant maps the iteration cursor and accumulator state to an assertion.
-The exception postcondition is specified separately as the spec's `epost` parameter. -/
+A loop invariant maps the elements consumed so far, the elements remaining, and the accumulator
+state to an assertion. -/
 @[spec_invariant_type, simp, grind =]
-def Invariant {α : Type u₁} (xs : List α) (β : Type u₂) (Pred : Type (max u₁ u₂)) :=
-  List.Cursor xs → β → Pred
+def Invariant (α : Type u₁) (β : Type u₂) (Pred : Type uₚ) :=
+  List α → List α → β → Pred
 
 /-- An invariant combinator for loops with early return, for the new `do` elaborator which
 uses `Prod` for the state tuple: `onContinue` is the invariant while iterating, `onReturn`
 holds once the loop returned early with a value. -/
-noncomputable abbrev Invariant.withEarlyReturnNewDo {α : Type u₁} {xs : List α} {β : Type u₂}
+noncomputable abbrev Invariant.withEarlyReturnNewDo {α : Type u₁} {β : Type u₂}
     {γ : Type u₂} (Pred) [Assertion Pred]
-    (onContinue : List.Cursor xs → β → Pred)
+    (onContinue : List α → List α → β → Pred)
     (onReturn : γ → β → Pred) :
-    Invariant xs (Option γ × β) Pred :=
-  fun xs ⟨x, b⟩ =>
-        (⌜x = none⌝ ⊓ onContinue xs b)
-      ⊔ (iSup fun r => ⌜x = some r ∧ xs.suffix = []⌝ ⊓ onReturn r b)
+    Invariant α (Option γ × β) Pred :=
+  fun pref suff ⟨x, b⟩ =>
+        (⌜x = none⌝ ⊓ onContinue pref suff b)
+      ⊔ (iSup fun r => ⌜x = some r ∧ suff = []⌝ ⊓ onReturn r b)
 
 @[spec]
 theorem Spec.forIn'_list
     {xs : List α} {init : β} {f : (a : α) → a ∈ xs → β → m (ForInStep β)}
-    (inv : Invariant xs β Pred)
+    (inv : Invariant α β Pred)
     {epost : EPred}
     (step : ∀ pref cur suff (h : xs = pref ++ cur :: suff) b,
       Triple
         (f cur (by simp [h]) b)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
+        (inv pref (cur::suff) b)
         (fun r => match r with
-                 | .yield b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b'
-                 | .done b' => inv ⟨xs, [], by simp⟩ b')
+                 | .yield b' => inv (pref ++ [cur]) suff b'
+                 | .done b' => inv xs [] b')
         epost) :
     Triple
       (forIn' xs init f)
-      (inv ⟨[], xs, rfl⟩ init)
-      (fun b => inv ⟨xs, [], by simp⟩ b)
+      (inv [] xs init)
+      (fun b => inv xs [] b)
       epost := by
-  suffices h : ∀ c,
+  suffices h : ∀ pref suff (hxs : xs = pref ++ suff),
       Triple
-        (forIn' (m:=m) c.suffix init (fun a ha => f a (by simp [←c.property, ha])))
-        (inv c init)
-        (fun b => inv ⟨xs, [], by simp⟩ b)
+        (forIn' (m:=m) suff init (fun a ha => f a (by simp [hxs, ha])))
+        (inv pref suff init)
+        (fun b => inv xs [] b)
         epost
-    from h ⟨[], xs, rfl⟩
-  rintro ⟨pref, suff, h⟩
+    from h [] xs rfl
+  intro pref suff hxs
   induction suff generalizing pref init
-  case nil => apply Triple.pure; simp [←h]; rfl
+  case nil => apply Triple.pure; simp [hxs]; rfl
   case cons x suff ih =>
     simp only [List.forIn'_cons]
     apply Triple.bind
-    case hx => exact step _ _ _ h.symm init
+    case hx => exact step _ _ _ hxs init
     case hf =>
       intro r
       split
@@ -667,9 +679,7 @@ theorem Spec.forIn'_list
         apply Triple.pure; rfl
       next b => -- .yield case
         simp
-        have := @ih b (pref ++ [x]) (by simp [h])
-        simp at this
-        exact this
+        exact @ih b (pref ++ [x]) (by simp [hxs])
 
 
 theorem Spec.forIn'_list_const_inv
@@ -683,7 +693,7 @@ theorem Spec.forIn'_list_const_inv
         (fun r => match r with | .yield b' => inv b' | .done b' => inv b')
         epost) :
     Triple (forIn' xs init f) (inv init) inv epost :=
-  Spec.forIn'_list (fun _ b => inv b)
+  Spec.forIn'_list (fun _ _ b => inv b)
     (fun _p c _s h b => step c (by rw [h]; exact List.mem_append_right _ (List.Mem.head _)) b)
 
 
@@ -691,25 +701,23 @@ theorem Spec.forIn'_list_const_inv
 @[spec]
 theorem Spec.forIn_list
     {xs : List α} {init : β} {f : α → β → m (ForInStep β)}
-    (inv : Invariant xs β Pred)
+    (inv : Invariant α β Pred)
     {epost : EPred}
-    (step : ∀ pref cur suff (h : xs = pref ++ cur :: suff) b,
+    (step : ∀ pref cur suff (_h : xs = pref ++ cur :: suff) b,
       Triple
         (f cur b)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
+        (inv pref (cur::suff) b)
         (fun r => match r with
-          | .yield b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b'
-          | .done b' => inv ⟨xs, [], by simp⟩ b')
+          | .yield b' => inv (pref ++ [cur]) suff b'
+          | .done b' => inv xs [] b')
         epost) :
     Triple
       (forIn xs init f)
-      (inv ⟨[], xs, rfl⟩ init)
-      (fun b => inv ⟨xs, [], by simp⟩ b)
+      (inv [] xs init)
+      (fun b => inv xs [] b)
       epost := by
   simp only [← forIn'_eq_forIn]
   exact Spec.forIn'_list inv step
-
-
 
 theorem Spec.forIn_list_const_inv
     {xs : List α} {init : β} {f : α → β → m (ForInStep β)}
@@ -722,24 +730,24 @@ theorem Spec.forIn_list_const_inv
         (fun r => match r with | .yield b' => inv b' | .done b' => inv b')
         epost) :
     Triple (forIn xs init f) (inv init) inv epost :=
-  Spec.forIn_list (fun _ b => inv b) (fun _p c _s _h b => step c b)
+  Spec.forIn_list (fun _ _ b => inv b) (fun _p c _s _h b => step c b)
 
 
 @[spec]
 theorem Spec.foldlM_list
     {xs : List α} {init : β} {f : β → α → m β}
-    (inv : Invariant xs β Pred)
+    (inv : Invariant α β Pred)
     {epost : EPred}
-    (step : ∀ pref cur suff (h : xs = pref ++ cur :: suff) b,
+    (step : ∀ pref cur suff (_h : xs = pref ++ cur :: suff) b,
       Triple
         (f b cur)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
-        (fun b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b')
+        (inv pref (cur::suff) b)
+        (fun b' => inv (pref ++ [cur]) suff b')
         epost) :
     Triple
       (List.foldlM f init xs)
-      (inv ⟨[], xs, rfl⟩ init)
-      (fun b => inv ⟨xs, [], by simp⟩ b)
+      (inv [] xs init)
+      (fun b => inv xs [] b)
       epost := by
   have : xs.foldlM f init = forIn xs init (fun a b => ForInStep.yield <$> f b a) := by
     simp [List.forIn_yield_eq_foldlM, id_map']
@@ -761,635 +769,89 @@ theorem Spec.foldlM_list_const_inv
         (fun b' => inv b')
         epost) :
     Triple (List.foldlM f init xs) (inv init) inv epost :=
-    Spec.foldlM_list (fun _ b => inv b) (fun _p c _s _h b => step c b)
+    Spec.foldlM_list (fun _ _ b => inv b) (fun _p c _s _h b => step c b)
 
 
-@[spec]
-theorem Spec.forIn'_range {β : Type u} {m : Type u → Type v} {Pred : Type u} {EPred : Type u}
-    [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
-    {xs : Std.Legacy.Range} {init : β} {f : (a : Nat) → a ∈ xs → β → m (ForInStep β)}
-    (inv : Invariant xs.toList β Pred)
+/-- Every container with a `PureForIn'` instance iterates over `ForIn.toList`, so one specification
+covers them all. -/
+@[spec low+10]
+theorem Spec.forIn'_pure {ρ : Type w} {d : Membership α ρ} [ForIn' m ρ α d] [ForIn Id ρ α]
+    [LawfulMemForInId ρ α] [PureForIn' m ρ α]
+    {xs : ρ} {init : β} {f : (a : α) → a ∈ xs → β → m (ForInStep β)}
+    (inv : Invariant α β Pred)
     {epost : EPred}
-    (step : ∀ pref cur suff (h : xs.toList = pref ++ cur :: suff) b,
-      Triple
-        (f cur (by simp [Std.Legacy.Range.mem_of_mem_range', h]) b)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
+    (step : ∀ pref cur suff (h : ForIn.toList xs = pref ++ cur :: suff) b,
+      Triple (f cur ((LawfulMemForInId.mem_toList_iff).mp (by simp [h])) b)
+        (inv pref (cur :: suff) b)
         (fun r => match r with
-          | ForInStep.yield b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b'
-          | ForInStep.done b' => inv ⟨xs.toList, [], by simp⟩ b')
+          | .yield b' => inv (pref ++ [cur]) suff b'
+          | .done b' => inv (ForIn.toList xs) [] b')
         epost) :
-    Triple
-      (forIn' xs init f)
-      (inv ⟨[], xs.toList, rfl⟩ init)
-      (fun b => inv ⟨xs.toList, [], by simp⟩ b)
-      epost := by
-  simp only [Std.Legacy.Range.forIn'_eq_forIn'_range', Std.Legacy.Range.size, Std.Legacy.Range.size.eq_1]
-  exact Spec.forIn'_list inv (fun c hcur b => step c hcur b)
+    Triple (forIn' xs init f) (inv [] (ForIn.toList xs) init)
+      (fun b => inv (ForIn.toList xs) [] b) epost := by
+  rw [PureForIn'.forIn'_eq]
+  exact Spec.forIn'_list inv step
 
-
-@[spec]
-theorem Spec.forIn_range {β : Type u} {m : Type u → Type v} {Pred : Type u} {EPred : Type u}
-    [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
-    {xs : Std.Legacy.Range} {init : β} {f : Nat → β → m (ForInStep β)}
-    (inv : Invariant xs.toList β Pred)
+/-- Every container with a `PureForIn` instance iterates over `ForIn.toList`, so one specification
+covers them all. -/
+@[spec low+10]
+theorem Spec.forIn_pure {ρ : Type w} [ForIn m ρ α] [ForIn Id ρ α] [PureForIn m ρ α]
+    {xs : ρ} {init : β} {f : α → β → m (ForInStep β)}
+    (inv : Invariant α β Pred)
     {epost : EPred}
-    (step : ∀ pref cur suff (h : xs.toList = pref ++ cur :: suff) b,
-      Triple
-        (f cur b)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
+    (step : ∀ pref cur suff (_h : ForIn.toList xs = pref ++ cur :: suff) b,
+      Triple (f cur b)
+        (inv pref (cur :: suff) b)
         (fun r => match r with
-          | ForInStep.yield b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b'
-          | ForInStep.done b' => inv ⟨xs.toList, [], by simp⟩ b')
+          | .yield b' => inv (pref ++ [cur]) suff b'
+          | .done b' => inv (ForIn.toList xs) [] b')
         epost) :
-    Triple
-      (forIn xs init f)
-      (inv ⟨[], xs.toList, rfl⟩ init)
-      (fun b => inv ⟨xs.toList, [], by simp⟩ b)
-      epost := by
-  simp only [Std.Legacy.Range.forIn_eq_forIn_range', Std.Legacy.Range.size]
+    Triple (forIn xs init f) (inv [] (ForIn.toList xs) init)
+      (fun b => inv (ForIn.toList xs) [] b) epost := by
+  rw [PureForIn.forIn_eq]
   exact Spec.forIn_list inv step
 
-open Std Std.PRange in
-
-@[spec]
-theorem Spec.forIn'_rcc {α β : Type u} {m : Type u → Type v} {Pred : Type u} {EPred : Type u}
-    [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
-    [LE α] [DecidableLE α] [UpwardEnumerable α] [Rxc.IsAlwaysFinite α]
-    [LawfulUpwardEnumerable α] [LawfulUpwardEnumerableLE α]
-    {xs : Rcc α} {init : β} {f : (a : α) → a ∈ xs → β → m (ForInStep β)}
-    (inv : Invariant xs.toList β Pred)
-    {epost : EPred}
-    (step : ∀ pref cur suff (h : xs.toList = pref ++ cur :: suff) b,
-      Triple
-        (f cur (by simp [← Rcc.mem_toList_iff_mem, h]) b)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
-        (fun r => match r with
-          | ForInStep.yield b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b'
-          | ForInStep.done b' => inv ⟨xs.toList, [], by simp⟩ b')
-        epost) :
-    Triple
-      (forIn' xs init f)
-      (inv ⟨[], xs.toList, rfl⟩ init)
-      (fun b => inv ⟨xs.toList, [], by simp⟩ b)
-      epost := by
-  simp only [Rcc.forIn'_eq_forIn'_toList]
-  exact Spec.forIn'_list inv step
-
-open Std Std.PRange in
-
-@[spec]
-theorem Spec.forIn_rcc {α β : Type u} {m : Type u → Type v} {Pred : Type u} {EPred : Type u}
-    [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
-    [LE α] [DecidableLE α] [UpwardEnumerable α] [Rxc.IsAlwaysFinite α]
-    [LawfulUpwardEnumerable α] [LawfulUpwardEnumerableLE α]
-    {xs : Rcc α} {init : β} {f : α → β → m (ForInStep β)}
-    (inv : Invariant xs.toList β Pred)
-    {epost : EPred}
-    (step : ∀ pref cur suff (h : xs.toList = pref ++ cur :: suff) b,
-      Triple
-        (f cur b)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
-        (fun r => match r with
-          | ForInStep.yield b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b'
-          | ForInStep.done b' => inv ⟨xs.toList, [], by simp⟩ b')
-        epost) :
-    Triple
-      (forIn xs init f)
-      (inv ⟨[], xs.toList, rfl⟩ init)
-      (fun b => inv ⟨xs.toList, [], by simp⟩ b)
-      epost := by
-  simp only [forIn]
-  exact Spec.forIn'_rcc inv step
-
-open Std Std.PRange in
-
-@[spec]
-theorem Spec.forIn'_rco {α β : Type u} {m : Type u → Type v} {Pred : Type u} {EPred : Type u}
-    [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
-    [LE α] [LT α] [DecidableLT α] [UpwardEnumerable α] [Rxo.IsAlwaysFinite α]
-    [LawfulUpwardEnumerable α] [LawfulUpwardEnumerableLE α] [LawfulUpwardEnumerableLT α]
-    {xs : Rco α} {init : β} {f : (a : α) → a ∈ xs → β → m (ForInStep β)}
-    (inv : Invariant xs.toList β Pred)
-    {epost : EPred}
-    (step : ∀ pref cur suff (h : xs.toList = pref ++ cur :: suff) b,
-      Triple
-        (f cur (by simp [← Rco.mem_toList_iff_mem, h]) b)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
-        (fun r => match r with
-          | ForInStep.yield b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b'
-          | ForInStep.done b' => inv ⟨xs.toList, [], by simp⟩ b')
-        epost) :
-    Triple
-      (forIn' xs init f)
-      (inv ⟨[], xs.toList, rfl⟩ init)
-      (fun b => inv ⟨xs.toList, [], by simp⟩ b)
-      epost := by
-  simp only [Rco.forIn'_eq_forIn'_toList]
-  exact Spec.forIn'_list inv step
-
-open Std Std.PRange in
-
-@[spec]
-theorem Spec.forIn_rco {α β : Type u} {m : Type u → Type v} {Pred : Type u} {EPred : Type u}
-    [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
-    [LE α] [LT α] [DecidableLT α] [UpwardEnumerable α] [Rxo.IsAlwaysFinite α]
-    [LawfulUpwardEnumerable α] [LawfulUpwardEnumerableLE α] [LawfulUpwardEnumerableLT α]
-    {xs : Rco α} {init : β} {f : α → β → m (ForInStep β)}
-    (inv : Invariant xs.toList β Pred)
-    {epost : EPred}
-    (step : ∀ pref cur suff (h : xs.toList = pref ++ cur :: suff) b,
-      Triple
-        (f cur b)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
-        (fun r => match r with
-          | ForInStep.yield b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b'
-          | ForInStep.done b' => inv ⟨xs.toList, [], by simp⟩ b')
-        epost) :
-    Triple
-      (forIn xs init f)
-      (inv ⟨[], xs.toList, rfl⟩ init)
-      (fun b => inv ⟨xs.toList, [], by simp⟩ b)
-      epost := by
-  simp only [forIn]
-  exact Spec.forIn'_rco inv step
-
-open Std Std.PRange in
-
-@[spec]
-theorem Spec.forIn'_rci {α β : Type u} {m : Type u → Type v} {Pred : Type u} {EPred : Type u}
-    [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
-    [LE α] [UpwardEnumerable α] [Rxi.IsAlwaysFinite α]
-    [LawfulUpwardEnumerable α] [LawfulUpwardEnumerableLE α]
-    {xs : Rci α} {init : β} {f : (a : α) → a ∈ xs → β → m (ForInStep β)}
-    (inv : Invariant xs.toList β Pred)
-    {epost : EPred}
-    (step : ∀ pref cur suff (h : xs.toList = pref ++ cur :: suff) b,
-      Triple
-        (f cur (by simp [← Rci.mem_toList_iff_mem, h]) b)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
-        (fun r => match r with
-          | ForInStep.yield b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b'
-          | ForInStep.done b' => inv ⟨xs.toList, [], by simp⟩ b')
-        epost) :
-    Triple
-      (forIn' xs init f)
-      (inv ⟨[], xs.toList, rfl⟩ init)
-      (fun b => inv ⟨xs.toList, [], by simp⟩ b)
-      epost := by
-  simp only [Rci.forIn'_eq_forIn'_toList]
-  exact Spec.forIn'_list inv step
-
-open Std Std.PRange in
-
-@[spec]
-theorem Spec.forIn_rci {α β : Type u} {m : Type u → Type v} {Pred : Type u} {EPred : Type u}
-    [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
-    [LE α] [UpwardEnumerable α] [Rxi.IsAlwaysFinite α]
-    [LawfulUpwardEnumerable α] [LawfulUpwardEnumerableLE α]
-    {xs : Rci α} {init : β} {f : α → β → m (ForInStep β)}
-    (inv : Invariant xs.toList β Pred)
-    {epost : EPred}
-    (step : ∀ pref cur suff (h : xs.toList = pref ++ cur :: suff) b,
-      Triple
-        (f cur b)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
-        (fun r => match r with
-          | ForInStep.yield b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b'
-          | ForInStep.done b' => inv ⟨xs.toList, [], by simp⟩ b')
-        epost) :
-    Triple
-      (forIn xs init f)
-      (inv ⟨[], xs.toList, rfl⟩ init)
-      (fun b => inv ⟨xs.toList, [], by simp⟩ b)
-      epost := by
-  simp only [forIn]
-  exact Spec.forIn'_rci inv step
-
-open Std Std.PRange in
-
-@[spec]
-theorem Spec.forIn'_roc {α β : Type u} {m : Type u → Type v} {Pred : Type u} {EPred : Type u}
-    [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
-    [LE α] [DecidableLE α] [LT α] [UpwardEnumerable α] [Rxc.IsAlwaysFinite α]
-    [LawfulUpwardEnumerable α] [LawfulUpwardEnumerableLE α] [LawfulUpwardEnumerableLT α]
-    {xs : Roc α} {init : β} {f : (a : α) → a ∈ xs → β → m (ForInStep β)}
-    (inv : Invariant xs.toList β Pred)
-    {epost : EPred}
-    (step : ∀ pref cur suff (h : xs.toList = pref ++ cur :: suff) b,
-      Triple
-        (f cur (by simp [← Roc.mem_toList_iff_mem, h]) b)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
-        (fun r => match r with
-          | ForInStep.yield b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b'
-          | ForInStep.done b' => inv ⟨xs.toList, [], by simp⟩ b')
-        epost) :
-    Triple
-      (forIn' xs init f)
-      (inv ⟨[], xs.toList, rfl⟩ init)
-      (fun b => inv ⟨xs.toList, [], by simp⟩ b)
-      epost := by
-  simp only [Roc.forIn'_eq_forIn'_toList]
-  exact Spec.forIn'_list inv step
-
-open Std Std.PRange in
-
-theorem Spec.forIn_roc {α β : Type u} {m : Type u → Type v} {Pred : Type u} {EPred : Type u}
-    [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
-    [LE α] [DecidableLE α] [LT α] [UpwardEnumerable α] [Rxc.IsAlwaysFinite α]
-    [LawfulUpwardEnumerable α] [LawfulUpwardEnumerableLE α] [LawfulUpwardEnumerableLT α]
-    {xs : Roc α} {init : β} {f : α → β → m (ForInStep β)}
-    (inv : Invariant xs.toList β Pred)
-    {epost : EPred}
-    (step : ∀ pref cur suff (h : xs.toList = pref ++ cur :: suff) b,
-      Triple
-        (f cur b)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
-        (fun r => match r with
-          | ForInStep.yield b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b'
-          | ForInStep.done b' => inv ⟨xs.toList, [], by simp⟩ b')
-        epost) :
-    Triple
-      (forIn xs init f)
-      (inv ⟨[], xs.toList, rfl⟩ init)
-      (fun b => inv ⟨xs.toList, [], by simp⟩ b)
-      epost := by
-  simp only [forIn]
-  exact Spec.forIn'_roc inv step
-
-open Std Std.PRange in
-
-@[spec]
-theorem Spec.forIn'_roo {α β : Type u} {m : Type u → Type v} {Pred : Type u} {EPred : Type u}
-    [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
-    [LT α] [DecidableLT α] [UpwardEnumerable α] [Rxo.IsAlwaysFinite α]
-    [LawfulUpwardEnumerable α] [LawfulUpwardEnumerableLT α]
-    {xs : Roo α} {init : β} {f : (a : α) → a ∈ xs → β → m (ForInStep β)}
-    (inv : Invariant xs.toList β Pred)
-    {epost : EPred}
-    (step : ∀ pref cur suff (h : xs.toList = pref ++ cur :: suff) b,
-      Triple
-        (f cur (by simp [← Roo.mem_toList_iff_mem, h]) b)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
-        (fun r => match r with
-          | ForInStep.yield b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b'
-          | ForInStep.done b' => inv ⟨xs.toList, [], by simp⟩ b')
-        epost) :
-    Triple
-      (forIn' xs init f)
-      (inv ⟨[], xs.toList, rfl⟩ init)
-      (fun b => inv ⟨xs.toList, [], by simp⟩ b)
-      epost := by
-  simp only [Roo.forIn'_eq_forIn'_toList]
-  exact Spec.forIn'_list inv step
-
-open Std Std.PRange in
-
-@[spec]
-theorem Spec.forIn_roo {α β : Type u} {m : Type u → Type v} {Pred : Type u} {EPred : Type u}
-    [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
-    [LT α] [DecidableLT α] [UpwardEnumerable α] [Rxo.IsAlwaysFinite α]
-    [LawfulUpwardEnumerable α] [LawfulUpwardEnumerableLT α]
-    {xs : Roo α} {init : β} {f : α → β → m (ForInStep β)}
-    (inv : Invariant xs.toList β Pred)
-    {epost : EPred}
-    (step : ∀ pref cur suff (h : xs.toList = pref ++ cur :: suff) b,
-      Triple
-        (f cur b)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
-        (fun r => match r with
-          | ForInStep.yield b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b'
-          | ForInStep.done b' => inv ⟨xs.toList, [], by simp⟩ b')
-        epost) :
-    Triple
-      (forIn xs init f)
-      (inv ⟨[], xs.toList, rfl⟩ init)
-      (fun b => inv ⟨xs.toList, [], by simp⟩ b)
-      epost := by
-  simp only [forIn]
-  exact Spec.forIn'_roo inv step
-
-open Std Std.PRange in
-
-@[spec]
-theorem Spec.forIn'_roi {α β : Type u} {m : Type u → Type v} {Pred : Type u} {EPred : Type u}
-    [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
-    [LT α] [DecidableLT α] [UpwardEnumerable α] [Rxi.IsAlwaysFinite α]
-    [LawfulUpwardEnumerable α] [LawfulUpwardEnumerableLT α]
-    {xs : Roi α} {init : β} {f : (a : α) → a ∈ xs → β → m (ForInStep β)}
-    (inv : Invariant xs.toList β Pred)
-    {epost : EPred}
-    (step : ∀ pref cur suff (h : xs.toList = pref ++ cur :: suff) b,
-      Triple
-        (f cur (by simp [← Roi.mem_toList_iff_mem, h]) b)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
-        (fun r => match r with
-          | ForInStep.yield b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b'
-          | ForInStep.done b' => inv ⟨xs.toList, [], by simp⟩ b')
-        epost) :
-    Triple
-      (forIn' xs init f)
-      (inv ⟨[], xs.toList, rfl⟩ init)
-      (fun b => inv ⟨xs.toList, [], by simp⟩ b)
-      epost := by
-  simp only [Roi.forIn'_eq_forIn'_toList]
-  exact Spec.forIn'_list inv step
-
-open Std Std.PRange in
-
-@[spec]
-theorem Spec.forIn_roi {α β : Type u} {m : Type u → Type v} {Pred : Type u} {EPred : Type u}
-    [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
-    [LT α] [DecidableLT α] [UpwardEnumerable α] [Rxi.IsAlwaysFinite α]
-    [LawfulUpwardEnumerable α] [LawfulUpwardEnumerableLT α]
-    {xs : Roi α} {init : β} {f : α → β → m (ForInStep β)}
-    (inv : Invariant xs.toList β Pred)
-    {epost : EPred}
-    (step : ∀ pref cur suff (h : xs.toList = pref ++ cur :: suff) b,
-      Triple
-        (f cur b)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
-        (fun r => match r with
-          | ForInStep.yield b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b'
-          | ForInStep.done b' => inv ⟨xs.toList, [], by simp⟩ b')
-        epost) :
-    Triple
-      (forIn xs init f)
-      (inv ⟨[], xs.toList, rfl⟩ init)
-      (fun b => inv ⟨xs.toList, [], by simp⟩ b)
-      epost := by
-  simp only [forIn]
-  exact Spec.forIn'_roi inv step
-
-open Std Std.PRange in
-
-@[spec]
-theorem Spec.forIn'_ric {α β : Type u} {m : Type u → Type v} {Pred : Type u} {EPred : Type u}
-    [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
-    [Least? α] [LE α] [DecidableLE α] [UpwardEnumerable α] [Rxc.IsAlwaysFinite α]
-    [LawfulUpwardEnumerable α] [LawfulUpwardEnumerableLeast? α] [LawfulUpwardEnumerableLE α]
-    {xs : Ric α} {init : β} {f : (a : α) → a ∈ xs → β → m (ForInStep β)}
-    (inv : Invariant xs.toList β Pred)
-    {epost : EPred}
-    (step : ∀ pref cur suff (h : xs.toList = pref ++ cur :: suff) b,
-      Triple
-        (f cur (by simp [← Ric.mem_toList_iff_mem, h]) b)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
-        (fun r => match r with
-          | ForInStep.yield b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b'
-          | ForInStep.done b' => inv ⟨xs.toList, [], by simp⟩ b')
-        epost) :
-    Triple
-      (forIn' xs init f)
-      (inv ⟨[], xs.toList, rfl⟩ init)
-      (fun b => inv ⟨xs.toList, [], by simp⟩ b)
-      epost := by
-  simp only [Ric.forIn'_eq_forIn'_toList]
-  exact Spec.forIn'_list inv step
-
-open Std Std.PRange in
-
-@[spec]
-theorem Spec.forIn_ric {α β : Type u} {m : Type u → Type v} {Pred : Type u} {EPred : Type u}
-    [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
-    [Least? α] [LE α] [DecidableLE α] [UpwardEnumerable α] [Rxc.IsAlwaysFinite α]
-    [LawfulUpwardEnumerable α] [LawfulUpwardEnumerableLeast? α] [LawfulUpwardEnumerableLE α]
-    {xs : Ric α} {init : β} {f : α → β → m (ForInStep β)}
-    (inv : Invariant xs.toList β Pred)
-    {epost : EPred}
-    (step : ∀ pref cur suff (h : xs.toList = pref ++ cur :: suff) b,
-      Triple
-        (f cur b)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
-        (fun r => match r with
-          | ForInStep.yield b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b'
-          | ForInStep.done b' => inv ⟨xs.toList, [], by simp⟩ b')
-        epost) :
-    Triple
-      (forIn xs init f)
-      (inv ⟨[], xs.toList, rfl⟩ init)
-      (fun b => inv ⟨xs.toList, [], by simp⟩ b)
-      epost := by
-  simp only [forIn]
-  exact Spec.forIn'_ric inv step
-
-open Std Std.PRange in
-
-@[spec]
-theorem Spec.forIn'_rio {α β : Type u} {m : Type u → Type v} {Pred : Type u} {EPred : Type u}
-    [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
-    [Least? α] [LT α] [DecidableLT α] [UpwardEnumerable α] [Rxo.IsAlwaysFinite α]
-    [LawfulUpwardEnumerable α] [LawfulUpwardEnumerableLeast? α] [LawfulUpwardEnumerableLT α]
-    {xs : Rio α} {init : β} {f : (a : α) → a ∈ xs → β → m (ForInStep β)}
-    (inv : Invariant xs.toList β Pred)
-    {epost : EPred}
-    (step : ∀ pref cur suff (h : xs.toList = pref ++ cur :: suff) b,
-      Triple
-        (f cur (by simp [← Rio.mem_toList_iff_mem, h]) b)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
-        (fun r => match r with
-          | ForInStep.yield b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b'
-          | ForInStep.done b' => inv ⟨xs.toList, [], by simp⟩ b')
-        epost) :
-    Triple
-      (forIn' xs init f)
-      (inv ⟨[], xs.toList, rfl⟩ init)
-      (fun b => inv ⟨xs.toList, [], by simp⟩ b)
-      epost := by
-  simp only [Rio.forIn'_eq_forIn'_toList]
-  exact Spec.forIn'_list inv step
-
-open Std Std.PRange in
-
-@[spec]
-theorem Spec.forIn_rio {α β : Type u} {m : Type u → Type v} {Pred : Type u} {EPred : Type u}
-    [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
-    [Least? α] [LT α] [DecidableLT α] [UpwardEnumerable α] [Rxo.IsAlwaysFinite α]
-    [LawfulUpwardEnumerable α] [LawfulUpwardEnumerableLeast? α] [LawfulUpwardEnumerableLT α]
-    {xs : Rio α} {init : β} {f : α → β → m (ForInStep β)}
-    (inv : Invariant xs.toList β Pred)
-    {epost : EPred}
-    (step : ∀ pref cur suff (h : xs.toList = pref ++ cur :: suff) b,
-      Triple
-        (f cur b)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
-        (fun r => match r with
-          | ForInStep.yield b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b'
-          | ForInStep.done b' => inv ⟨xs.toList, [], by simp⟩ b')
-        epost) :
-    Triple
-      (forIn xs init f)
-      (inv ⟨[], xs.toList, rfl⟩ init)
-      (fun b => inv ⟨xs.toList, [], by simp⟩ b)
-      epost := by
-  simp only [forIn]
-  exact Spec.forIn'_rio inv step
-
-open Std Std.PRange in
-
-@[spec]
-theorem Spec.forIn'_rii {α β : Type u} {m : Type u → Type v} {Pred : Type u} {EPred : Type u}
-    [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
-    [Least? α] [UpwardEnumerable α] [Rxi.IsAlwaysFinite α]
-    [LawfulUpwardEnumerable α] [LawfulUpwardEnumerableLeast? α]
-    {xs : Rii α} {init : β} {f : (a : α) → a ∈ xs → β → m (ForInStep β)}
-    (inv : Invariant xs.toList β Pred)
-    {epost : EPred}
-    (step : ∀ pref cur suff (h : xs.toList = pref ++ cur :: suff) b,
-      Triple
-        (f cur (by simp [Rii.mem]) b)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
-        (fun r => match r with
-          | ForInStep.yield b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b'
-          | ForInStep.done b' => inv ⟨xs.toList, [], by simp⟩ b')
-        epost) :
-    Triple
-      (forIn' xs init f)
-      (inv ⟨[], xs.toList, rfl⟩ init)
-      (fun b => inv ⟨xs.toList, [], by simp⟩ b)
-      epost := by
-  simp only [Rii.forIn'_eq_forIn'_toList]
-  exact Spec.forIn'_list inv step
-
-open Std Std.PRange in
-
-@[spec]
-theorem Spec.forIn_rii {α β : Type u} {m : Type u → Type v} {Pred : Type u} {EPred : Type u}
-    [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
-    [Least? α] [UpwardEnumerable α] [Rxi.IsAlwaysFinite α]
-    [LawfulUpwardEnumerable α] [LawfulUpwardEnumerableLeast? α]
-    {xs : Rii α} {init : β} {f : α → β → m (ForInStep β)}
-    (inv : Invariant xs.toList β Pred)
-    {epost : EPred}
-    (step : ∀ pref cur suff (h : xs.toList = pref ++ cur :: suff) b,
-      Triple
-        (f cur b)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
-        (fun r => match r with
-          | ForInStep.yield b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b'
-          | ForInStep.done b' => inv ⟨xs.toList, [], by simp⟩ b')
-        epost) :
-    Triple
-      (forIn xs init f)
-      (inv ⟨[], xs.toList, rfl⟩ init)
-      (fun b => inv ⟨xs.toList, [], by simp⟩ b)
-      epost := by
-  simp only [forIn]
-  exact Spec.forIn'_rii inv step
-
-open Std Std.Iterators in
-
-@[spec]
-theorem Spec.forIn_slice {δ : Type u} {m : Type u → Type w} {Pred : Type u} {EPred : Type u}
-    [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
-    {γ : Type u'} {α β : Type u}
-    [ToIterator (Slice γ) Id α β]
-    [Iterator α Id β]
-    [IteratorLoop α Id m]
-    [LawfulIteratorLoop α Id m]
-    [Finite α Id]
-    {init : δ} {f : β → δ → m (ForInStep δ)}
-    {xs : Slice γ}
-    (inv : Invariant xs.toList δ Pred)
-    {epost : EPred}
-    (step : ∀ pref cur suff (h : xs.toList = pref ++ cur :: suff) b,
-      Triple
-        (f cur b)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
-        (fun r => match r with
-          | .yield b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b'
-          | .done b' => inv ⟨xs.toList, [], by simp⟩ b')
-        epost) :
-    Triple (forIn xs init f) (inv ⟨[], xs.toList, rfl⟩ init)
-      (fun b => inv ⟨xs.toList, [], by simp⟩ b) epost := by
-  simp only [← Slice.forIn_toList]
-  exact Spec.forIn_list inv step
 
 section Iterators
 open Std Std.Iterators
 
 
 @[spec low]
-theorem Spec.forIn_iter {α β γ : Type u} {m : Type u → Type w} {Pred : Type u} {EPred : Type u}
-    [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
-    [Iterator α Id β] [Finite α Id] [IteratorLoop α Id m] [LawfulIteratorLoop α Id m]
-    {init : γ} {f : β → γ → m (ForInStep γ)}
-    {it : Iter (α := α) β}
-    (inv : Invariant it.toList γ Pred)
-    {epost : EPred}
-    (step : ∀ pref cur suff (h : it.toList = pref ++ cur :: suff) b,
-      Triple
-        (f cur b)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
-        (fun r => match r with
-          | .yield b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b'
-          | .done b' => inv ⟨it.toList, [], by simp⟩ b')
-        epost) :
-    Triple (forIn it init f) (inv ⟨[], it.toList, rfl⟩ init)
-      (fun b => inv ⟨it.toList, [], by simp⟩ b) epost := by
-  simp only [← Iter.forIn_toList]
-  exact Spec.forIn_list inv step
-
-
-@[spec low]
-theorem Spec.forIn_iterM_id {α β γ : Type u} {m : Type u → Type w} {Pred : Type u} {EPred : Type u}
-    [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
-    [Iterator α Id β] [Finite α Id] [IteratorLoop α Id m] [LawfulIteratorLoop α Id m]
-    {init : γ} {f : β → γ → m (ForInStep γ)}
-    {it : IterM (α := α) Id β}
-    (inv : Invariant it.toList.run γ Pred)
-    {epost : EPred}
-    (step : ∀ pref cur suff (h : it.toList.run = pref ++ cur :: suff) b,
-      Triple
-        (f cur b)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
-        (fun r => match r with
-          | .yield b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b'
-          | .done b' => inv ⟨it.toList.run, [], by simp⟩ b')
-        epost) :
-    Triple (forIn it init f) (inv ⟨[], it.toList.run, rfl⟩ init)
-      (fun b => inv ⟨it.toList.run, [], by simp⟩ b) epost := by
-  conv in forIn it init f =>
-    rw [← Iter.toIterM_toIter (it := it), ← Iter.forIn_eq_forIn_toIterM, ← Iter.forIn_toList,
-      IterM.toList_toIter]
-  exact Spec.forIn_list inv step
-
-
-@[spec low]
-theorem Spec.foldM_iter {α β γ : Type u} {m : Type u → Type w} {Pred : Type u} {EPred : Type u}
+theorem Spec.foldM_iter {α β γ : Type u} {m : Type u → Type w} {Pred : Type uₚ} {EPred : Type uₑ}
     [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
     [Iterator α Id β] [Finite α Id] [IteratorLoop α Id m] [LawfulIteratorLoop α Id m]
     {it : Iter (α := α) β}
     {init : γ} {f : γ → β → m γ}
-    (inv : Invariant it.toList γ Pred)
+    (inv : Invariant β γ Pred)
     {epost : EPred}
-    (step : ∀ pref cur suff (h : it.toList = pref ++ cur :: suff) b,
+    (step : ∀ pref cur suff (_h : it.toList = pref ++ cur :: suff) b,
       Triple
         (f b cur)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
-        (fun b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b')
+        (inv pref (cur::suff) b)
+        (fun b' => inv (pref ++ [cur]) suff b')
         epost) :
-    Triple (it.foldM f init) (inv ⟨[], it.toList, rfl⟩ init)
-      (fun b => inv ⟨it.toList, [], by simp⟩ b) epost := by
+    Triple (it.foldM f init) (inv [] it.toList init)
+      (fun b => inv it.toList [] b) epost := by
   rw [← Iter.foldlM_toList]
   exact Spec.foldlM_list inv step
 
 
 @[spec low]
-theorem Spec.foldM_iterM_id {α β γ : Type u} {m : Type u → Type w} {Pred : Type u} {EPred : Type u}
+theorem Spec.foldM_iterM_id {α β γ : Type u} {m : Type u → Type w} {Pred : Type uₚ} {EPred : Type uₑ}
     [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
     [Iterator α Id β] [Finite α Id] [IteratorLoop α Id m] [LawfulIteratorLoop α Id m]
     {it : IterM (α := α) Id β}
     {init : γ} {f : γ → β → m γ}
-    (inv : Invariant it.toList.run γ Pred)
+    (inv : Invariant β γ Pred)
     {epost : EPred}
-    (step : ∀ pref cur suff (h : it.toList.run = pref ++ cur :: suff) b,
+    (step : ∀ pref cur suff (_h : it.toList.run = pref ++ cur :: suff) b,
       Triple
         (f b cur)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
-        (fun b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b')
+        (inv pref (cur::suff) b)
+        (fun b' => inv (pref ++ [cur]) suff b')
         epost) :
-    Triple (it.foldM f init) (inv ⟨[], it.toList.run, rfl⟩ init)
-      (fun b => inv ⟨it.toList.run, [], by simp⟩ b) epost := by
+    Triple (it.foldM f init) (inv [] it.toList.run init)
+      (fun b => inv it.toList.run [] b) epost := by
   rw [← IterM.foldlM_toList]
   exact Spec.foldlM_list inv step
 
@@ -1397,7 +859,7 @@ theorem Spec.foldM_iterM_id {α β γ : Type u} {m : Type u → Type w} {Pred : 
 @[spec]
 theorem Spec.IterM.forIn_filterMapWithPostcondition {α β β₂ γ : Type w}
     {m : Type w → Type w'} {n : Type w → Type w''} {o : Type w → Type w'''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Monad m] [LawfulMonad m] [Monad n] [LawfulMonad n] [Monad o] [Assertion Pred] [Assertion EPred] [WPMonad o Pred EPred]
     [MonadLiftT m n] [LawfulMonadLiftT m n] [MonadLiftT n o] [LawfulMonadLiftT n o]
     [Iterator α m β] [Finite α m]
@@ -1417,7 +879,7 @@ theorem Spec.IterM.forIn_filterMapWithPostcondition {α β β₂ γ : Type w}
 @[spec]
 theorem Spec.IterM.forIn_filterMapM {α β β₂ γ : Type w}
     {m : Type w → Type w'} {n : Type w → Type w''} {o : Type w → Type w'''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Monad m] [LawfulMonad m] [Monad n] [LawfulMonad n] [Monad o] [Assertion Pred] [Assertion EPred] [WPMonad o Pred EPred]
     [MonadAttach n] [WeaklyLawfulMonadAttach n]
     [MonadLiftT m n] [LawfulMonadLiftT m n] [MonadLiftT n o] [LawfulMonadLiftT n o]
@@ -1438,7 +900,7 @@ theorem Spec.IterM.forIn_filterMapM {α β β₂ γ : Type w}
 @[spec]
 theorem Spec.IterM.forIn_filterMap {α β β₂ γ : Type w}
     {m : Type w → Type w'} {n : Type w → Type w''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Monad m] [LawfulMonad m] [Monad n] [Assertion Pred] [Assertion EPred] [WPMonad n Pred EPred]
     [MonadLiftT m n] [LawfulMonadLiftT m n]
     [Iterator α m β] [Finite α m]
@@ -1456,7 +918,7 @@ theorem Spec.IterM.forIn_filterMap {α β β₂ γ : Type w}
 @[spec]
 theorem Spec.IterM.forIn_mapWithPostcondition {α β β₂ γ : Type w}
     {m : Type w → Type w'} {n : Type w → Type w''} {o : Type w → Type w'''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Monad m] [LawfulMonad m] [Monad n] [LawfulMonad n] [Monad o] [Assertion Pred] [Assertion EPred] [WPMonad o Pred EPred]
     [MonadLiftT m n] [LawfulMonadLiftT m n] [MonadLiftT n o] [LawfulMonadLiftT n o]
     [Iterator α m β] [Finite α m]
@@ -1473,7 +935,7 @@ theorem Spec.IterM.forIn_mapWithPostcondition {α β β₂ γ : Type w}
 @[spec]
 theorem Spec.IterM.forIn_mapM {α β β₂ γ : Type w}
     {m : Type w → Type w'} {n : Type w → Type w''} {o : Type w → Type w'''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Monad m] [LawfulMonad m] [Monad n] [LawfulMonad n] [Monad o] [Assertion Pred] [Assertion EPred] [WPMonad o Pred EPred]
     [MonadAttach n] [WeaklyLawfulMonadAttach n]
     [MonadLiftT m n] [LawfulMonadLiftT m n] [MonadLiftT n o] [LawfulMonadLiftT n o]
@@ -1491,7 +953,7 @@ theorem Spec.IterM.forIn_mapM {α β β₂ γ : Type w}
 @[spec]
 theorem Spec.IterM.forIn_map {α β β₂ γ : Type w}
     {m : Type w → Type w'} {n : Type w → Type w''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Monad m] [LawfulMonad m] [Monad n] [Assertion Pred] [Assertion EPred] [WPMonad n Pred EPred]
     [MonadLiftT m n] [LawfulMonadLiftT m n]
     [Iterator α m β] [Finite α m] [IteratorLoop α m n] [LawfulIteratorLoop α m n]
@@ -1505,7 +967,7 @@ theorem Spec.IterM.forIn_map {α β β₂ γ : Type w}
 @[spec]
 theorem Spec.IterM.forIn_filterWithPostcondition {α β γ : Type w}
     {m : Type w → Type w'} {n : Type w → Type w''} {o : Type w → Type w'''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Monad m] [LawfulMonad m] [Monad n] [LawfulMonad n] [Monad o] [Assertion Pred] [Assertion EPred] [WPMonad o Pred EPred]
     [MonadLiftT m n] [LawfulMonadLiftT m n] [MonadLiftT n o] [LawfulMonadLiftT n o]
     [Iterator α m β] [Finite α m]
@@ -1522,7 +984,7 @@ theorem Spec.IterM.forIn_filterWithPostcondition {α β γ : Type w}
 @[spec]
 theorem Spec.IterM.forIn_filterM {α β γ : Type w}
     {m : Type w → Type w'} {n : Type w → Type w''} {o : Type w → Type w'''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Monad m] [LawfulMonad m] [Monad n] [LawfulMonad n] [Monad o] [Assertion Pred] [Assertion EPred] [WPMonad o Pred EPred]
     [MonadAttach n] [WeaklyLawfulMonadAttach n]
     [MonadLiftT m n] [LawfulMonadLiftT m n] [MonadLiftT n o] [LawfulMonadLiftT n o]
@@ -1540,7 +1002,7 @@ theorem Spec.IterM.forIn_filterM {α β γ : Type w}
 @[spec]
 theorem Spec.IterM.forIn_filter {α β γ : Type w}
     {m : Type w → Type w'} {n : Type w → Type w''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Monad m] [LawfulMonad m] [Monad n] [Assertion Pred] [Assertion EPred] [WPMonad n Pred EPred]
     [MonadLiftT m n] [LawfulMonadLiftT m n]
     [Iterator α m β] [Finite α m] [IteratorLoop α m n] [LawfulIteratorLoop α m n]
@@ -1554,7 +1016,7 @@ theorem Spec.IterM.forIn_filter {α β γ : Type w}
 @[spec]
 theorem Spec.IterM.foldM_filterMapWithPostcondition {α β γ δ : Type w}
     {m : Type w → Type w'} {n : Type w → Type w''} {o : Type w → Type w'''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α m β] [Finite α m]
     [Monad m] [Monad n] [Monad o] [LawfulMonad m] [LawfulMonad n] [Assertion Pred] [Assertion EPred] [WPMonad o Pred EPred]
     [IteratorLoop α m n] [IteratorLoop α m o]
@@ -1574,7 +1036,7 @@ theorem Spec.IterM.foldM_filterMapWithPostcondition {α β γ δ : Type w}
 @[spec]
 theorem Spec.IterM.foldM_filterMapM {α β γ δ : Type w}
     {m : Type w → Type w'} {n : Type w → Type w''} {o : Type w → Type w'''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α m β] [Finite α m]
     [Monad m] [LawfulMonad m]
     [Monad n] [MonadAttach n] [LawfulMonad n] [WeaklyLawfulMonadAttach n]
@@ -1596,7 +1058,7 @@ theorem Spec.IterM.foldM_filterMapM {α β γ δ : Type w}
 @[spec]
 theorem Spec.IterM.foldM_mapWithPostcondition {α β γ δ : Type w}
     {m : Type w → Type w'} {n : Type w → Type w''} {o : Type w → Type w'''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α m β] [Finite α m]
     [Monad m] [Monad n] [Monad o] [LawfulMonad m] [LawfulMonad n] [Assertion Pred] [Assertion EPred] [WPMonad o Pred EPred]
     [IteratorLoop α m n] [IteratorLoop α m o]
@@ -1614,7 +1076,7 @@ theorem Spec.IterM.foldM_mapWithPostcondition {α β γ δ : Type w}
 @[spec]
 theorem Spec.IterM.foldM_mapM {α β γ δ : Type w}
     {m : Type w → Type w'} {n : Type w → Type w''} {o : Type w → Type w'''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α m β] [Finite α m]
     [Monad m] [LawfulMonad m]
     [Monad n] [MonadAttach n] [LawfulMonad n] [WeaklyLawfulMonadAttach n]
@@ -1634,7 +1096,7 @@ theorem Spec.IterM.foldM_mapM {α β γ δ : Type w}
 @[spec]
 theorem Spec.IterM.foldM_filterWithPostcondition {α β δ : Type w}
     {m : Type w → Type w'} {n : Type w → Type w''} {o : Type w → Type w'''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α m β] [Finite α m]
     [Monad m] [Monad n] [Monad o] [LawfulMonad m] [LawfulMonad n] [Assertion Pred] [Assertion EPred] [WPMonad o Pred EPred]
     [IteratorLoop α m n] [IteratorLoop α m o]
@@ -1652,7 +1114,7 @@ theorem Spec.IterM.foldM_filterWithPostcondition {α β δ : Type w}
 @[spec]
 theorem Spec.IterM.foldM_filterM {α β δ : Type w}
     {m : Type w → Type w'} {n : Type w → Type w''} {o : Type w → Type w'''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α m β] [Finite α m]
     [Monad m] [LawfulMonad m]
     [Monad n] [MonadAttach n] [LawfulMonad n] [WeaklyLawfulMonadAttach n]
@@ -1672,7 +1134,7 @@ theorem Spec.IterM.foldM_filterM {α β δ : Type w}
 @[spec]
 theorem Spec.IterM.foldM_filterMap {α β γ δ : Type w}
     {m : Type w → Type w'} {n : Type w → Type w''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α m β] [Finite α m] [Monad m] [Monad n] [LawfulMonad m] [Assertion Pred] [Assertion EPred] [WPMonad n Pred EPred]
     [IteratorLoop α m n]
     [LawfulIteratorLoop α m n]
@@ -1689,7 +1151,7 @@ theorem Spec.IterM.foldM_filterMap {α β γ δ : Type w}
 @[spec]
 theorem Spec.IterM.foldM_map {α β γ δ : Type w}
     {m : Type w → Type w'} {n : Type w → Type w''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α m β] [Finite α m] [Monad m] [Monad n] [LawfulMonad m] [Assertion Pred] [Assertion EPred] [WPMonad n Pred EPred]
     [IteratorLoop α m n] [LawfulIteratorLoop α m n]
     [MonadLiftT m n] [LawfulMonadLiftT m n]
@@ -1703,7 +1165,7 @@ theorem Spec.IterM.foldM_map {α β γ δ : Type w}
 @[spec]
 theorem Spec.IterM.foldM_filter {α β δ : Type w}
     {m : Type w → Type w'} {n : Type w → Type w''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α m β] [Finite α m] [Monad m] [Monad n] [LawfulMonad m] [Assertion Pred] [Assertion EPred] [WPMonad n Pred EPred]
     [IteratorLoop α m n]
     [LawfulIteratorLoop α m n]
@@ -1718,7 +1180,7 @@ theorem Spec.IterM.foldM_filter {α β δ : Type w}
 @[spec]
 theorem Spec.IterM.fold_filterMapWithPostcondition {α β γ δ : Type w}
     {m : Type w → Type w'} {n : Type w → Type w''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α m β] [Finite α m]
     [Monad m] [LawfulMonad m]
     [Monad n] [Assertion Pred] [Assertion EPred] [WPMonad n Pred EPred]
@@ -1736,7 +1198,7 @@ theorem Spec.IterM.fold_filterMapWithPostcondition {α β γ δ : Type w}
 @[spec]
 theorem Spec.IterM.fold_filterMapM {α β γ δ : Type w}
     {m : Type w → Type w'} {n : Type w → Type w''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α m β] [Finite α m]
     [Monad m] [LawfulMonad m]
     [Monad n] [MonadAttach n] [WeaklyLawfulMonadAttach n] [Assertion Pred] [Assertion EPred] [WPMonad n Pred EPred]
@@ -1754,7 +1216,7 @@ theorem Spec.IterM.fold_filterMapM {α β γ δ : Type w}
 @[spec]
 theorem Spec.IterM.fold_mapWithPostcondition {α β γ δ : Type w}
     {m : Type w → Type w'} {n : Type w → Type w''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α m β] [Finite α m]
     [Monad m] [LawfulMonad m]
     [Monad n] [Assertion Pred] [Assertion EPred] [WPMonad n Pred EPred]
@@ -1770,7 +1232,7 @@ theorem Spec.IterM.fold_mapWithPostcondition {α β γ δ : Type w}
 @[spec]
 theorem Spec.IterM.fold_mapM {α β γ δ : Type w}
     {m : Type w → Type w'} {n : Type w → Type w''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α m β] [Finite α m]
     [Monad m] [LawfulMonad m]
     [Monad n] [MonadAttach n] [WeaklyLawfulMonadAttach n] [Assertion Pred] [Assertion EPred] [WPMonad n Pred EPred]
@@ -1786,7 +1248,7 @@ theorem Spec.IterM.fold_mapM {α β γ δ : Type w}
 @[spec]
 theorem Spec.IterM.fold_filterWithPostcondition {α β δ : Type w}
     {m : Type w → Type w'} {n : Type w → Type w''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α m β] [Finite α m]
     [Monad m] [LawfulMonad m]
     [Monad n] [Assertion Pred] [Assertion EPred] [WPMonad n Pred EPred]
@@ -1802,7 +1264,7 @@ theorem Spec.IterM.fold_filterWithPostcondition {α β δ : Type w}
 @[spec]
 theorem Spec.IterM.fold_filterM {α β δ : Type w}
     {m : Type w → Type w'} {n : Type w → Type w''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α m β] [Finite α m]
     [Monad m] [LawfulMonad m]
     [Monad n] [MonadAttach n] [WeaklyLawfulMonadAttach n] [Assertion Pred] [Assertion EPred] [WPMonad n Pred EPred]
@@ -1818,7 +1280,7 @@ theorem Spec.IterM.fold_filterM {α β δ : Type w}
 @[spec]
 theorem Spec.IterM.fold_filterMap {α β γ δ : Type w}
     {m : Type w → Type w'}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α m β] [Finite α m] [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
     [IteratorLoop α m m] [LawfulIteratorLoop α m m]
     {f : β → Option γ} {g : δ → γ → δ} {init : δ} {it : IterM (α := α) m β}
@@ -1834,7 +1296,7 @@ theorem Spec.IterM.fold_filterMap {α β γ δ : Type w}
 @[spec]
 theorem Spec.IterM.fold_map {α β γ δ : Type w}
     {m : Type w → Type w'}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α m β] [Finite α m] [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
     [IteratorLoop α m m] [LawfulIteratorLoop α m m]
     {f : β → γ} {g : δ → γ → δ} {init : δ} {it : IterM (α := α) m β}
@@ -1847,7 +1309,7 @@ theorem Spec.IterM.fold_map {α β γ δ : Type w}
 @[spec]
 theorem Spec.IterM.fold_filter {α β δ : Type w}
     {m : Type w → Type w'}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α m β] [Finite α m] [Monad m] [Assertion Pred] [Assertion EPred] [WPMonad m Pred EPred]
     [IteratorLoop α m m] [LawfulIteratorLoop α m m]
     {f : β → Bool} {g : δ → β → δ} {init : δ} {it : IterM (α := α) m β}
@@ -1860,7 +1322,7 @@ theorem Spec.IterM.fold_filter {α β δ : Type w}
 @[spec]
 theorem Spec.Iter.forIn_filterMapWithPostcondition {α β β₂ γ : Type w}
     {n : Type w → Type w'} {o : Type w → Type w''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α Id β]
     [Monad n] [LawfulMonad n] [Monad o] [Assertion Pred] [Assertion EPred] [WPMonad o Pred EPred]
     [MonadLiftT n o] [LawfulMonadLiftT n o] [Finite α Id]
@@ -1878,7 +1340,7 @@ theorem Spec.Iter.forIn_filterMapWithPostcondition {α β β₂ γ : Type w}
 @[spec]
 theorem Spec.Iter.forIn_filterMapM {α β β₂ γ : Type w}
     {n : Type w → Type w'} {o : Type w → Type w''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α Id β]
     [Monad n] [LawfulMonad n] [Monad o] [Assertion Pred] [Assertion EPred] [WPMonad o Pred EPred]
     [MonadAttach n] [WeaklyLawfulMonadAttach n]
@@ -1897,7 +1359,7 @@ theorem Spec.Iter.forIn_filterMapM {α β β₂ γ : Type w}
 @[spec]
 theorem Spec.Iter.forIn_filterMap {α β β₂ γ : Type w}
     {n : Type w → Type w'}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α Id β]
     [Monad n] [Assertion Pred] [Assertion EPred] [WPMonad n Pred EPred] [Finite α Id]
     [IteratorLoop α Id n] [LawfulIteratorLoop α Id n]
@@ -1914,7 +1376,7 @@ theorem Spec.Iter.forIn_filterMap {α β β₂ γ : Type w}
 @[spec]
 theorem Spec.Iter.forIn_mapWithPostcondition {α β β₂ γ : Type w}
     {n : Type w → Type w'} {o : Type w → Type w''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α Id β]
     [Monad n] [LawfulMonad n] [Monad o] [Assertion Pred] [Assertion EPred] [WPMonad o Pred EPred]
     [MonadLiftT n o] [LawfulMonadLiftT n o] [Finite α Id]
@@ -1929,7 +1391,7 @@ theorem Spec.Iter.forIn_mapWithPostcondition {α β β₂ γ : Type w}
 @[spec]
 theorem Spec.Iter.forIn_mapM {α β β₂ γ : Type w}
     {n : Type w → Type w'} {o : Type w → Type w''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α Id β]
     [Monad n] [LawfulMonad n] [Monad o] [Assertion Pred] [Assertion EPred] [WPMonad o Pred EPred]
     [MonadAttach n] [WeaklyLawfulMonadAttach n]
@@ -1946,7 +1408,7 @@ theorem Spec.Iter.forIn_mapM {α β β₂ γ : Type w}
 @[spec]
 theorem Spec.Iter.forIn_map {α β β₂ γ : Type w}
     {n : Type w → Type w'}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α Id β]
     [Monad n] [Assertion Pred] [Assertion EPred] [WPMonad n Pred EPred]
     [Finite α Id] [IteratorLoop α Id n] [LawfulIteratorLoop α Id n]
@@ -1960,7 +1422,7 @@ theorem Spec.Iter.forIn_map {α β β₂ γ : Type w}
 @[spec]
 theorem Spec.Iter.forIn_filterWithPostcondition {α β γ : Type w}
     {n : Type w → Type w'} {o : Type w → Type w''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α Id β]
     [Monad n] [LawfulMonad n] [Monad o] [Assertion Pred] [Assertion EPred] [WPMonad o Pred EPred]
     [MonadLiftT n o] [LawfulMonadLiftT n o]
@@ -1975,7 +1437,7 @@ theorem Spec.Iter.forIn_filterWithPostcondition {α β γ : Type w}
 @[spec]
 theorem Spec.Iter.forIn_filterM {α β γ : Type w}
     {n : Type w → Type w'} {o : Type w → Type w''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α Id β]
     [Monad n] [LawfulMonad n] [Monad o] [Assertion Pred] [Assertion EPred] [WPMonad o Pred EPred]
     [MonadAttach n] [WeaklyLawfulMonadAttach n]
@@ -1991,7 +1453,7 @@ theorem Spec.Iter.forIn_filterM {α β γ : Type w}
 @[spec]
 theorem Spec.Iter.forIn_filter {α β γ : Type w}
     {n : Type w → Type w'}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α Id β]
     [Monad n] [Assertion Pred] [Assertion EPred] [WPMonad n Pred EPred]
     [Finite α Id] [IteratorLoop α Id n] [LawfulIteratorLoop α Id n]
@@ -2005,7 +1467,7 @@ theorem Spec.Iter.forIn_filter {α β γ : Type w}
 @[spec]
 theorem Spec.Iter.foldM_filterMapWithPostcondition {α β γ δ : Type w}
     {n : Type w → Type w'} {o : Type w → Type w''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α Id β] [Finite α Id]
     [Monad n] [Monad o] [LawfulMonad n] [Assertion Pred] [Assertion EPred] [WPMonad o Pred EPred]
     [IteratorLoop α Id n] [IteratorLoop α Id o]
@@ -2023,7 +1485,7 @@ theorem Spec.Iter.foldM_filterMapWithPostcondition {α β γ δ : Type w}
 @[spec]
 theorem Spec.Iter.foldM_filterMapM {α β γ δ : Type w}
     {n : Type w → Type w'} {o : Type w → Type w''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α Id β] [Finite α Id]
     [Monad n] [MonadAttach n] [LawfulMonad n] [WeaklyLawfulMonadAttach n]
     [Monad o] [Assertion Pred] [Assertion EPred] [WPMonad o Pred EPred]
@@ -2042,7 +1504,7 @@ theorem Spec.Iter.foldM_filterMapM {α β γ δ : Type w}
 @[spec]
 theorem Spec.Iter.foldM_mapWithPostcondition {α β γ δ : Type w}
     {m : Type w → Type w'''} {n : Type w → Type w'} {o : Type w → Type w''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α Id β] [Finite α Id]
     [Monad m] [Monad n] [Monad o] [LawfulMonad m] [LawfulMonad n] [Assertion Pred] [Assertion EPred] [WPMonad o Pred EPred]
     [IteratorLoop α Id n] [IteratorLoop α Id o]
@@ -2058,7 +1520,7 @@ theorem Spec.Iter.foldM_mapWithPostcondition {α β γ δ : Type w}
 @[spec]
 theorem Spec.Iter.foldM_mapM {α β γ δ : Type w}
     {n : Type w → Type w'} {o : Type w → Type w''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α Id β] [Finite α Id]
     [Monad n] [MonadAttach n] [LawfulMonad n] [WeaklyLawfulMonadAttach n]
     [Monad o] [Assertion Pred] [Assertion EPred] [WPMonad o Pred EPred]
@@ -2075,7 +1537,7 @@ theorem Spec.Iter.foldM_mapM {α β γ δ : Type w}
 @[spec]
 theorem Spec.Iter.foldM_filterWithPostcondition {α β δ : Type w}
     {n : Type w → Type w'} {o : Type w → Type w''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α Id β] [Finite α Id]
     [Monad n] [Monad o] [LawfulMonad n] [Assertion Pred] [Assertion EPred] [WPMonad o Pred EPred]
     [IteratorLoop α Id n] [IteratorLoop α Id o]
@@ -2091,7 +1553,7 @@ theorem Spec.Iter.foldM_filterWithPostcondition {α β δ : Type w}
 @[spec]
 theorem Spec.Iter.foldM_filterM {α β δ : Type w}
     {n : Type w → Type w'} {o : Type w → Type w''}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α Id β] [Finite α Id]
     [Monad n] [MonadAttach n] [LawfulMonad n] [WeaklyLawfulMonadAttach n]
     [Monad o] [Assertion Pred] [Assertion EPred] [WPMonad o Pred EPred]
@@ -2108,7 +1570,7 @@ theorem Spec.Iter.foldM_filterM {α β δ : Type w}
 @[spec]
 theorem Spec.Iter.foldM_filterMap {α β γ δ : Type w}
     {n : Type w → Type w'}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α Id β] [Finite α Id] [Monad n] [Assertion Pred] [Assertion EPred] [WPMonad n Pred EPred]
     [IteratorLoop α Id n]
     [LawfulIteratorLoop α Id n]
@@ -2124,7 +1586,7 @@ theorem Spec.Iter.foldM_filterMap {α β γ δ : Type w}
 @[spec]
 theorem Spec.Iter.foldM_map {α β γ δ : Type w}
     {n : Type w → Type w'}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α Id β] [Finite α Id] [Monad n] [Assertion Pred] [Assertion EPred] [WPMonad n Pred EPred]
     [IteratorLoop α Id n] [LawfulIteratorLoop α Id n]
     {f : β → γ} {g : δ → γ → n δ} {init : δ} {it : Iter (α := α) β}
@@ -2137,7 +1599,7 @@ theorem Spec.Iter.foldM_map {α β γ δ : Type w}
 @[spec]
 theorem Spec.Iter.foldM_filter {α β δ : Type w}
     {n : Type w → Type w'}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α Id β] [Finite α Id] [Monad n] [Assertion Pred] [Assertion EPred] [WPMonad n Pred EPred]
     [IteratorLoop α Id n] [LawfulIteratorLoop α Id n]
     {f : β → Bool} {g : δ → β → n δ} {init : δ} {it : Iter (α := α) β}
@@ -2150,7 +1612,7 @@ theorem Spec.Iter.foldM_filter {α β δ : Type w}
 @[spec]
 theorem Spec.Iter.fold_filterMapWithPostcondition {α β γ δ : Type w}
     {n : Type w → Type w'}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α Id β] [Finite α Id]
     [Monad n] [Assertion Pred] [Assertion EPred] [WPMonad n Pred EPred]
     [IteratorLoop α Id n] [LawfulIteratorLoop α Id n]
@@ -2166,7 +1628,7 @@ theorem Spec.Iter.fold_filterMapWithPostcondition {α β γ δ : Type w}
 @[spec]
 theorem Spec.Iter.fold_filterMapM {α β γ δ : Type w}
     {n : Type w → Type w'}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α Id β] [Finite α Id]
     [Monad n] [MonadAttach n] [WeaklyLawfulMonadAttach n] [Assertion Pred] [Assertion EPred] [WPMonad n Pred EPred]
     [IteratorLoop α Id n] [LawfulIteratorLoop α Id n]
@@ -2182,7 +1644,7 @@ theorem Spec.Iter.fold_filterMapM {α β γ δ : Type w}
 @[spec]
 theorem Spec.Iter.fold_mapWithPostcondition {α β γ δ : Type w}
     {n : Type w → Type w'}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α Id β] [Finite α Id]
     [Monad n] [Assertion Pred] [Assertion EPred] [WPMonad n Pred EPred]
     [IteratorLoop α Id n] [LawfulIteratorLoop α Id n]
@@ -2196,7 +1658,7 @@ theorem Spec.Iter.fold_mapWithPostcondition {α β γ δ : Type w}
 @[spec]
 theorem Spec.Iter.fold_mapM {α β γ δ : Type w}
     {n : Type w → Type w'}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α Id β] [Finite α Id]
     [Monad n] [MonadAttach n] [WeaklyLawfulMonadAttach n] [Assertion Pred] [Assertion EPred] [WPMonad n Pred EPred]
     [IteratorLoop α Id n] [LawfulIteratorLoop α Id n]
@@ -2210,7 +1672,7 @@ theorem Spec.Iter.fold_mapM {α β γ δ : Type w}
 @[spec]
 theorem Spec.Iter.fold_filterWithPostcondition {α β δ : Type w}
     {n : Type w → Type w'}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α Id β] [Finite α Id]
     [Monad n] [Assertion Pred] [Assertion EPred] [WPMonad n Pred EPred]
     [IteratorLoop α Id n] [LawfulIteratorLoop α Id n]
@@ -2224,7 +1686,7 @@ theorem Spec.Iter.fold_filterWithPostcondition {α β δ : Type w}
 @[spec]
 theorem Spec.Iter.fold_filterM {α β δ : Type w}
     {n : Type w → Type w'}
-    {Pred : Type w} {EPred : Type w}
+    {Pred : Type uₚ} {EPred : Type uₑ}
     [Iterator α Id β] [Finite α Id]
     [Monad n] [MonadAttach n] [WeaklyLawfulMonadAttach n] [Assertion Pred] [Assertion EPred] [WPMonad n Pred EPred]
     [IteratorLoop α Id n] [LawfulIteratorLoop α Id n]
@@ -2239,60 +1701,20 @@ end Iterators
 
 
 @[spec]
-theorem Spec.forIn'_array {xs : Array α} {init : β} {f : (a : α) → a ∈ xs → β → m (ForInStep β)}
-    (inv : Invariant xs.toList β Pred)
-    {epost : EPred}
-    (step : ∀ pref cur suff (h : xs.toList = pref ++ cur :: suff) b,
-      Triple
-        (f cur (by simp [←Array.mem_toList_iff, h]) b)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
-        (fun r => match r with
-          | .yield b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b'
-          | .done b' => inv ⟨xs.toList, [], by simp⟩ b')
-        epost) :
-    Triple
-      (forIn' xs init f)
-      (inv ⟨[], xs.toList, rfl⟩ init)
-      (fun b => inv ⟨xs.toList, [], by simp⟩ b)
-      epost := by
-  cases xs; simp; apply Spec.forIn'_list inv step
-
-
-@[spec]
-theorem Spec.forIn_array {xs : Array α} {init : β} {f : α → β → m (ForInStep β)}
-    (inv : Invariant xs.toList β Pred)
-    {epost : EPred}
-    (step : ∀ pref cur suff (h : xs.toList = pref ++ cur :: suff) b,
-      Triple
-        (f cur b)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
-        (fun r => match r with
-          | .yield b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b'
-          | .done b' => inv ⟨xs.toList, [], by simp⟩ b')
-        epost) :
-    Triple
-      (forIn xs init f)
-      (inv ⟨[], xs.toList, rfl⟩ init)
-      (fun b => inv ⟨xs.toList, [], by simp⟩ b)
-      epost := by
-  cases xs; simp; apply Spec.forIn_list inv step
-
-
-@[spec]
 theorem Spec.foldlM_array
     {xs : Array α} {init : β} {f : β → α → m β}
-    (inv : Invariant xs.toList β Pred)
+    (inv : Invariant α β Pred)
     {epost : EPred}
-    (step : ∀ pref cur suff (h : xs.toList = pref ++ cur :: suff) b,
+    (step : ∀ pref cur suff (_h : xs.toList = pref ++ cur :: suff) b,
       Triple
         (f b cur)
-        (inv ⟨pref, cur::suff, h.symm⟩ b)
-        (fun b' => inv ⟨pref ++ [cur], suff, by simp [h]⟩ b')
+        (inv pref (cur::suff) b)
+        (fun b' => inv (pref ++ [cur]) suff b')
         epost) :
     Triple
       (Array.foldlM f init xs)
-      (inv ⟨[], xs.toList, rfl⟩ init)
-      (fun b => inv ⟨xs.toList, [], by simp⟩ b)
+      (inv [] xs.toList init)
+      (fun b => inv xs.toList [] b)
       epost := by
   cases xs; simp; apply Spec.foldlM_list inv step
 
@@ -2301,14 +1723,14 @@ The type of loop invariants used by the specifications of `for ... in ...` loops
 A loop invariant is a function mapping the current position and state to a lattice element.
 -/
 @[spec_invariant_type, simp, grind =]
-def StringInvariant (s : String) (β : Type u) (Pred : Type u) :=
+def StringInvariant (s : String) (β : Type u) (Pred : Type uₚ) :=
   s.Pos → β → Pred
 
 /-- An invariant combinator for `String` loops with early return, for the new `do` elaborator
 which uses `Prod` for the state tuple: `onContinue` is the invariant while iterating, `onReturn`
 holds once the loop returned early with a value. -/
 noncomputable abbrev StringInvariant.withEarlyReturnNewDo {s : String} {β : Type u} {γ : Type u}
-    (Pred : Type u) [Assertion Pred]
+    (Pred : Type uₚ) [Assertion Pred]
     (onContinue : s.Pos → β → Pred)
     (onReturn : γ → β → Pred) :
     StringInvariant s (Option γ × β) Pred :=
@@ -2358,14 +1780,14 @@ The type of loop invariants used by the specifications of `for ... in ...` loops
 A loop invariant is a function mapping the current position and state to a lattice element.
 -/
 @[spec_invariant_type, simp, grind =]
-def StringSliceInvariant (s : String.Slice) (β : Type u) (Pred : Type u) :=
+def StringSliceInvariant (s : String.Slice) (β : Type u) (Pred : Type uₚ) :=
   s.Pos → β → Pred
 
 /-- An invariant combinator for `String.Slice` loops with early return, for the new `do`
 elaborator which uses `Prod` for the state tuple: `onContinue` is the invariant while iterating,
 `onReturn` holds once the loop returned early with a value. -/
 noncomputable abbrev StringSliceInvariant.withEarlyReturnNewDo {s : String.Slice} {β : Type u}
-    {γ : Type u} (Pred : Type u) [Assertion Pred]
+    {γ : Type u} (Pred : Type uₚ) [Assertion Pred]
     (onContinue : s.Pos → β → Pred)
     (onReturn : γ → β → Pred) :
     StringSliceInvariant s (Option γ × β) Pred :=
@@ -2412,42 +1834,182 @@ theorem Spec.forIn_stringSlice
 
 section While
 
-universe u
+universe uα uγ v' s
 
-variable {α β : Type u} {m : Type u → Type v} {Pred : Type u} {EPred : Type u}
+variable {α β : Type u} {m : Type u → Type v} {Pred : Type uₚ} {EPred : Type uₑ}
 variable [Monad m] [Lean.Order.MonadTail m] [Assertion Pred] [Assertion EPred]
   [WPMonad m Pred EPred]
+
+open Assertion
 
 /--
 An invariant for a `repeatM` loop, given as a predicate over the `α ⊕ β` cursor:
 `.inl a` is the `continue` case at `a`; `.inr b` is the `break` case with result `b`.
 -/
 @[spec_invariant_type, simp, grind =]
-def RepeatInvariant (α β : Type u) (Pred : Type u) :=
+def RepeatInvariant (α β : Type u) (Pred : Type uₚ) :=
   α ⊕ β → Pred
 
-/-- A termination measure for a `repeatM` loop. -/
+/--
+A termination measure for a `repeatM` loop: a type `γ` of measure values equipped with a
+well-founded relation, and a lattice-embedded evaluation of the measure at each cursor.
+Build one from a measure function with `RepeatVariant.ofMeasure`.
+-/
 @[spec_invariant_type]
-def RepeatVariant (α : Type u) :=
-  α → Nat
+structure RepeatVariant (α : Type uα) (Pred : Type u) [Assertion Pred] :
+    Type (max uα (uγ + 1) u) where
+  /-- The type of measure values. -/
+  {γ : Type uγ}
+  /-- The well-founded relation that measure values decrease along. -/
+  [wfRel : WellFoundedRelation γ]
+  /-- Relates the measure at cursor `a` to a value `n` inside the assertion lattice. -/
+  EvalsTo : α → γ → Pred
+  /-- The measure evaluates to some value. -/
+  total : ∀ a, (⨆ n, EvalsTo a n) = ⊤
+
+namespace RepeatVariant
+
+variable {α : Type uα}
+
+/-- The relation that measure values decrease along. -/
+def rel (v : RepeatVariant α Pred) : v.γ → v.γ → Prop :=
+  v.wfRel.rel
+
+theorem wf (v : RepeatVariant α Pred) : WellFounded v.rel :=
+  v.wfRel.wf
+
+/-- Eliminate the covering join of `EvalsTo` from the left of an entailment. -/
+theorem le_of_total_le (v : RepeatVariant α Pred) (a : α) {P Q : Pred}
+    [PreservesSup (meet P)]
+    (h : (⨆ n, v.EvalsTo a n ⊓ P) ⊑ Q) : P ⊑ Q := by
+  have h1 : P ⊑ (⨆ n, v.EvalsTo a n) ⊓ P := by
+    rw [v.total a, CompleteLattice.top_meet]
+  have h2 : (⨆ n, v.EvalsTo a n) ⊓ P ⊑ ⨆ n, v.EvalsTo a n ⊓ P :=
+    iSup_meet_le fun n => le_iSup (fun n => v.EvalsTo a n ⊓ P) n
+  exact PartialOrder.rel_trans h1 (PartialOrder.rel_trans h2 h)
 
 /--
+Build a `RepeatVariant` from a measure function `f`. The measure's value type `γ` (its codomain
+through any `NondetFun` state layers) provides the well-founded relation, e.g. `<` for `Nat` and
+the lexicographic order for products.
+-/
+@[instance_reducible] def ofMeasure {γ : Type uγ} {Fun : Type v'} [NondetFun Pred Fun γ]
+    [WellFoundedRelation γ] (f : α → Fun) : RepeatVariant α Pred where
+  γ := γ
+  EvalsTo a n := NondetFun.EvalsTo (f a) n
+  total a := NondetFun.total (f a)
+
+@[simp, grind =] theorem γ_ofMeasure {γ : Type uγ} {Fun : Type v'} [NondetFun Pred Fun γ]
+    [WellFoundedRelation γ] (f : α → Fun) :
+    (ofMeasure (Pred := Pred) f).γ = γ := rfl
+
+@[simp, grind =] theorem evalsTo_ofMeasure {γ : Type uγ} {Fun : Type v'} [NondetFun Pred Fun γ]
+    [WellFoundedRelation γ] (f : α → Fun) (a : α) (n : γ) :
+    (ofMeasure (Pred := Pred) f).EvalsTo a n = NondetFun.EvalsTo (f a) n := rfl
+
+/-- Decrease along `ofMeasure` is decrease of measure values along the well-founded relation of
+`γ`. Rewriting with this lemma brings a decrease proof obligation into the shape produced by
+`termination_by`, so that `decreasing_tactic` applies. -/
+theorem rel_ofMeasure {γ : Type uγ} {Fun : Type v'} [NondetFun Pred Fun γ]
+    [WellFoundedRelation γ] (f : α → Fun) (n' n : γ) :
+    (ofMeasure (Pred := Pred) f).rel n' n ↔ WellFoundedRelation.rel n' n := Iff.rfl
+
+@[simp, grind =] theorem rel_ofMeasure_nat {α : Type} {Pred : Type} [Assertion Pred]
+    {Fun : Type} [NondetFun Pred Fun Nat] (f : α → Fun) (n' n : Nat) :
+    (ofMeasure (Pred := Pred) f).rel n' n ↔ n' < n := Iff.rfl
+
+/-- The measure at cursor `a'` evaluates to a value strictly below `ma`. -/
+noncomputable def EvalsBelow (v : RepeatVariant α Pred) (a' : α) (ma : v.γ) : Pred :=
+  ⨆ ma', v.EvalsTo a' ma' ⊓ ⌜v.rel ma' ma⌝
+
+open Std.Internal.Do.CompleteLattice in
+/-- For a state-independent measure the pinned value is the measure itself, so the join
+collapses to a decrease along the well-founded relation of `γ`. The proof obligation has the
+shape produced by `termination_by`, so that `decreasing_tactic` applies. -/
+theorem evalsBelow_ofMeasure {γ : Type uγ} [WellFoundedRelation γ]
+    (f : α → γ) (a' : α) (ma : γ) :
+    (ofMeasure (Pred := Pred) f).EvalsBelow a' ma = ⌜WellFoundedRelation.rel (f a') ma⌝ := by
+  refine PartialOrder.rel_antisymm (iSup_le _ _ fun ma' => ?_) (le_iSup_of_le (f a') ?_)
+  · refine ofProp_meet_le_left fun h => ?_
+    subst h
+    exact PartialOrder.rel_refl
+  · refine le_meet _ _ _ ?_ PartialOrder.rel_refl
+    simp only [evalsTo_ofMeasure, NondetFun.evalsTo_pure]
+    rw [ofProp_eq_top trivial]
+    exact le_top _
+
+open Std.Internal.Do.CompleteLattice in
+@[simp, grind =] theorem evalsBelow_ofMeasure_nat {α : Type} {Pred : Type} [Assertion Pred]
+    (f : α → Nat) (a' : α) (ma : Nat) :
+    (ofMeasure (Pred := Pred) f).EvalsBelow a' ma = ⌜f a' < ma⌝ :=
+  evalsBelow_ofMeasure f a' ma
+
+/-- Pointwise characterization of `EvalsBelow` on a function lattice, for `ofMeasure`
+measures. -/
+@[simp] theorem evalsBelow_ofMeasure_apply {σ : Type s} {Pred : Type u} [Assertion Pred]
+    {γ : Type uγ} {Fun : Type v'} [NondetFun Pred Fun γ] [WellFoundedRelation γ]
+    (f : α → σ → Fun) (a' : α) (ma : γ) (s : σ) :
+    (ofMeasure (Pred := σ → Pred) f).EvalsBelow a' ma s
+      = (ofMeasure (Pred := Pred) (f · s)).EvalsBelow a' ma := by
+  simp only [EvalsBelow, iSup_apply, meet_apply, CompleteLattice.ofProp_apply]
+  rfl
+
+/-! Fixed-arity specializations of `evalsBelow_ofMeasure_apply` for `Nat`-valued measures at a
+lattice tower ending in `Prop`, in the manner of `CompleteLattice.ofProp_apply_1` and its
+siblings: the ground instances leave every parameter recoverable from the trigger, so these are
+usable `@[grind =]` lemmas where the general `evalsBelow_ofMeasure_apply` is not. -/
+
+@[grind =] theorem evalsBelow_ofMeasure_apply_1 {α : Type} {σ₁ : Type}
+    (f : α → σ₁ → Nat) (a' : α) (ma : Nat) (s₁ : σ₁) :
+    (ofMeasure (Pred := σ₁ → Prop) f).EvalsBelow a' ma s₁ = (f a' s₁ < ma) := by
+  simp
+
+@[grind =] theorem evalsBelow_ofMeasure_apply_2 {α : Type} {σ₁ σ₂ : Type}
+    (f : α → σ₁ → σ₂ → Nat) (a' : α) (ma : Nat) (s₁ : σ₁) (s₂ : σ₂) :
+    (ofMeasure (Pred := σ₁ → σ₂ → Prop) f).EvalsBelow a' ma s₁ s₂ = (f a' s₁ s₂ < ma) := by
+  simp
+
+@[grind =] theorem evalsBelow_ofMeasure_apply_3 {α : Type} {σ₁ σ₂ σ₃ : Type}
+    (f : α → σ₁ → σ₂ → σ₃ → Nat) (a' : α) (ma : Nat) (s₁ : σ₁) (s₂ : σ₂) (s₃ : σ₃) :
+    (ofMeasure (Pred := σ₁ → σ₂ → σ₃ → Prop) f).EvalsBelow a' ma s₁ s₂ s₃
+      = (f a' s₁ s₂ s₃ < ma) := by
+  simp
+
+@[grind =] theorem evalsBelow_ofMeasure_apply_4 {α : Type} {σ₁ σ₂ σ₃ σ₄ : Type}
+    (f : α → σ₁ → σ₂ → σ₃ → σ₄ → Nat) (a' : α) (ma : Nat) (s₁ : σ₁) (s₂ : σ₂) (s₃ : σ₃)
+    (s₄ : σ₄) :
+    (ofMeasure (Pred := σ₁ → σ₂ → σ₃ → σ₄ → Prop) f).EvalsBelow a' ma s₁ s₂ s₃ s₄
+      = (f a' s₁ s₂ s₃ s₄ < ma) := by
+  simp
+
+@[grind =] theorem evalsBelow_ofMeasure_apply_5 {α : Type} {σ₁ σ₂ σ₃ σ₄ σ₅ : Type}
+    (f : α → σ₁ → σ₂ → σ₃ → σ₄ → σ₅ → Nat) (a' : α) (ma : Nat) (s₁ : σ₁) (s₂ : σ₂)
+    (s₃ : σ₃) (s₄ : σ₄) (s₅ : σ₅) :
+    (ofMeasure (Pred := σ₁ → σ₂ → σ₃ → σ₄ → σ₅ → Prop) f).EvalsBelow a' ma s₁ s₂ s₃ s₄ s₅
+      = (f a' s₁ s₂ s₃ s₄ s₅ < ma) := by
+  simp
+
+end RepeatVariant
+
+open Std.Internal.Do.CompleteLattice in
+/--
 Specification for `repeatM`. The user supplies a termination `measure`, an invariant, and a step
-`Triple` whose post either continues with a strictly smaller measure or finishes with the `.inr`
-invariant.
+`Triple` whose pre asserts the measure evaluates to `ma` and the in-progress invariant holds, and
+whose post either continues with a measure value below `ma` (the invariant still holding) or
+finishes with the `.inr` invariant.
 -/
 @[spec]
 theorem Spec.repeatM
-    {init : α} {f : α → m (α ⊕ β)} [Nonempty β]
-    (measure : RepeatVariant α)
+    {init : α} {f : α → m (α ⊕ β)} [Nonempty β] [∀ P : Pred, PreservesSup (meet P)]
+    (measure : RepeatVariant α Pred)
     (inv : RepeatInvariant α β Pred)
     (einv : EPred)
-    (step : ∀ a,
+    (step : ∀ a (ma : measure.γ),
       Triple
         (f a)
-        (inv (.inl a))
+        (measure.EvalsTo a ma ⊓ inv (.inl a))
         (fun r => match r with
-          | .inl a' => ⌜measure a' < measure a⌝ ⊓ inv (.inl a')
+          | .inl a' => measure.EvalsBelow a' ma ⊓ inv (.inl a')
           | .inr b => inv (.inr b))
         einv) :
     Triple
@@ -2455,30 +2017,32 @@ theorem Spec.repeatM
       (inv (.inl init))
       (fun b => inv (.inr b))
       einv := by
-  suffices key : ∀ (n : Nat) (a : α), measure a ≤ n →
+  refine Triple.intro <| measure.le_of_total_le init ?_
+  refine iSup_le _ _ fun minit => ?_
+  suffices key : ∀ (n : measure.γ), Acc measure.rel n → ∀ (a : α),
       Triple
         (_root_.repeatM f a)
-        (inv (.inl a))
+        (measure.EvalsTo a n ⊓ inv (.inl a))
         (fun b => inv (.inr b))
         einv
-    from key (measure init) init (Nat.le_refl _)
-  intro n
-  induction n using Nat.strongRecOn with
-  | _ n ih =>
-    intro a hle
-    rw [repeatM_eq_of_monadTail (f := f) a]
+    from (key minit (measure.wf.apply minit) init).le_wp
+  intro n hacc
+  induction hacc with
+  | intro n _ ih =>
+    intro a
+    rw [_root_.repeatM.Internal.eq_of_monadTail (f := f) a]
     refine Triple.bind (f := fun x => match x with
       | .inl a' => _root_.repeatM f a'
       | .inr b => Pure.pure b)
       (f a) (fun r => match r with
-        | .inl a' => ⌜measure a' < measure a⌝ ⊓ inv (.inl a')
+        | .inl a' => measure.EvalsBelow a' n ⊓ inv (.inl a')
         | .inr b => inv (.inr b))
-      (step a) ?_
+      (step a n) ?_
     rintro (a' | b)
     · refine Triple.intro ?_
-      refine CompleteLattice.ofProp_meet_le_left ?_
-      intro hlt
-      exact (ih (measure a') (Nat.lt_of_lt_of_le hlt hle) a' (Nat.le_refl _)).le_wp
+      refine iSup_meet_le fun ma' => ?_
+      rw [meet_comm (P := measure.EvalsTo a' ma'), meet_assoc]
+      exact ofProp_meet_le_left fun hlt => (ih ma' hlt a').le_wp
     · exact Triple.pure b Lean.Order.PartialOrder.rel_refl
 
 /--
@@ -2502,15 +2066,16 @@ Specification for `forIn` over a `Lean.Loop`. The cursor is `β ⊕ β`: `.inl b
 @[spec]
 theorem Spec.forIn_loop
     {l : Lean.Loop} {init : β} {f : Unit → β → m (ForInStep β)}
-    (measure : RepeatVariant β)
+    [∀ P : Pred, PreservesSup (meet P)]
+    (measure : RepeatVariant β Pred)
     (inv : RepeatInvariant β β Pred)
     (einv : EPred)
-    (step : ∀ b,
+    (step : ∀ b (mb : measure.γ),
       Triple
         (f () b)
-        (inv (.inl b))
+        (measure.EvalsTo b mb ⊓ inv (.inl b))
         (fun r => match r with
-          | .yield b' => ⌜measure b' < measure b⌝ ⊓ inv (.inl b')
+          | .yield b' => measure.EvalsBelow b' mb ⊓ inv (.inl b')
           | .done b' => inv (.inr b'))
         einv) :
     Triple
@@ -2523,9 +2088,9 @@ theorem Spec.forIn_loop
     (fun b => inv (.inr b)) einv
   simp only [_root_.Lean.Loop.forIn]
   apply Spec.repeatM (measure := measure) (inv := inv) (einv := einv)
-  intro b
+  intro b mb
   apply Triple.bind
-  · exact step b
+  · exact step b mb
   · intro r
     cases r with
     | yield b' => exact Triple.pure (Sum.inl b') Lean.Order.PartialOrder.rel_refl
