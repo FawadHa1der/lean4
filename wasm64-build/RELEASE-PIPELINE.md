@@ -136,6 +136,9 @@ scripts/upload-artifacts.sh && scripts/deploy-app.sh && git push      # + gh rel
 `import-release.sh watch` is cheap (three `git ls-remote`s) and has distinct exit
 codes, so any scheduler can poll it. The heavy stages need this machine
 (Docker, ~40 GB disk, hours of CPU; a hosted CI runner cannot fit the Mathlib
-build) and the judgment points need a reviewer, so the intended driver is a
-weekly scheduled agent session that runs `watch`, and on exit code 10 works
-through this file until the ship gate, then reports.
+build) and the judgment points need a reviewer. The driver in use is a weekly
+scheduled agent session (`lean-release-watch`, Mondays 09:00): it runs
+`watch`; on exit code 10 it performs the trial `import`, reports conflicts and
+the drift list, leaves a conflicted checkout exactly as it found it, and stops
+— the hours-long stages (which also need an otherwise idle Docker VM) start
+only when the owner says go, and end at the ship gate above.
