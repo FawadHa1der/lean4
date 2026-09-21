@@ -42,8 +42,12 @@ run() {
     -e LEAN_CC=/usr/bin/gcc \
     -e PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     -v "$SRC":/lean-src -v "$OUT":/lean-native -v "$BD/ccache-native":/root/.ccache \
-    "$IMG" bash -lc "$1"
+    "$IMG" bash -c "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; $1"
 }
+# PATH is reset INSIDE the container: the image's entrypoint prepends
+# /emsdk/upstream/emscripten (overriding -e PATH), where `cmake` is a DIRECTORY,
+# and GNU make 4.3 then fails the native-only copy-leantar/copy-cadical steps
+# with "cmake: Permission denied".
 echo "=== [1/3] configure ==="
 run "cmake -S /lean-src -B /lean-native -G 'Unix Makefiles' \
   -DCMAKE_BUILD_TYPE=Release \

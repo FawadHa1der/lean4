@@ -371,11 +371,13 @@ jobs:
           # binary so the glue's internal wasm reference and the workers'
           # hardcoded lean.js stay valid; deployments select the variant by
           # path prefix, not by filename.
-          # emscripten-exports-slim.txt is NOT "main minus all ___boxed": the
+          # The slim list is NOT "main minus all ___boxed": the
           # extern/@[export] boxed stems must stay (body-less externs have no
           # IR to fall back on) — only the wholesale boxed-wrapper set goes.
+          # Generated from this build's C (wasm64-build/gen-exports.py --slim):
+          # a committed list goes stale with every upstream import.
           export NODE_OPTIONS="--max-old-space-size=8192"
-          cp src/emscripten-exports-slim.txt linkkit/emscripten-exports.txt
+          python3 wasm64-build/gen-exports.py build/$TARGET_STAGE/lib/temp src --check --slim linkkit/emscripten-exports.txt
           bash docker-wasm/relink-local.sh linkkit /tmp/slim-out -O3
           dir=$(echo lean-*-*)
           mkdir -p "$dir/bin-slim"

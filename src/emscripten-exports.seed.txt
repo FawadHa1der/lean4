@@ -3,6 +3,12 @@
 # wasm64-build/gen-exports.py; only non-generated names live here.
 _free
 _lean_browser64_configure_input_ring
+_lean_compacted_region_read_mem
+_lean_inc_ref_huge_n
+_lean_internal_get_option_overrides
+_lean_nat_size_in_bytes
+_lean_string_utf8_extract_fast
+_lean_system_platform_linux
 _lean_wasm_shell_mark_preinitialized
 _lean_add_decl
 _lean_add_decl_without_checking

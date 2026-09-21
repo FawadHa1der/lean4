@@ -16,6 +16,8 @@
 #   mathlib4/            the checkout + .lake build
 #   essential-tree/      flat tree: <Module/Path>.olean[.server|.private] + .ir[.sig]
 #   essential-modules.txt, essential-selection.json
+#   extra-tree/, extra-modules.txt, extra-selection.json   (only with MATHLIB_EXTRA_ROOTS: the
+#                        closure of those roots MINUS essential — a second, additive pack)
 # Pack it with the consumer's packer, e.g. qed64:
 #   node pipeline/artifacts/pack.mjs --lib <essential-tree> --id mathlib-essential --out <dir> \
 #        --lean-version <x.y.z> --revision <kernel commit> --roots <MATHLIB_ROOTS, comma separated>
@@ -31,7 +33,8 @@ IMG=qed64-toolchain:emsdk-6.0.5
 MATHLIB_URL="${MATHLIB_URL:-https://github.com/leanprover-community/mathlib4}"
 MATHLIB_REV="${MATHLIB_REV:-$TAG}"
 # Three roots whose closure is the served profile. Extra roots (space
-# separated) widen it, e.g. MATHLIB_EXTRA_ROOTS="Mathlib.Tactic" for the games.
+# separated, e.g. MATHLIB_EXTRA_ROOTS="Mathlib.Tactic" for the games) are built
+# in the same Lake workspace but staged as a separate additive tree.
 MATHLIB_ROOTS="${MATHLIB_ROOTS:-Mathlib.Geometry.Manifold.IsManifold.Basic Mathlib.Geometry.Manifold.Instances.Sphere Mathlib.Analysis.SpecialFunctions.Complex.Circle}"
 ROOTS="$MATHLIB_ROOTS ${MATHLIB_EXTRA_ROOTS:-}"
 THREADS="${LEAN_NUM_THREADS:-6}"      # fd exhaustion + an 8 GiB Docker VM: keep it modest
@@ -77,9 +80,9 @@ LEAN
 run "lake env lean .qed64-smoke.lean"
 
 echo "=== [4/4] essential selection ==="
-python3 - "$ML" "$NATIVE/stage1/lib/lean" "$REPO/src" "$W" $ROOTS <<'PY'
+python3 - "$ML" "$NATIVE/stage1/lib/lean" "$REPO/src" "$W" "$MATHLIB_ROOTS" "${MATHLIB_EXTRA_ROOTS:-}" <<'PY'
 import json, os, re, shutil, sys
-ml, corelib, coresrc, out = sys.argv[1:5]; roots = sys.argv[5:]
+ml, corelib, coresrc, out = sys.argv[1:5]; roots = sys.argv[5].split(); extra_roots = sys.argv[6].split()
 FACETS = (".olean", ".olean.server", ".olean.private", ".ir", ".ir.sig")
 # (source root, olean root) per origin, in lookup order
 origins = [(ml, os.path.join(ml, ".lake/build/lib/lean"))]
@@ -109,38 +112,50 @@ def header_imports(path):
         if not found or not re.match(r'(public\s+|private\s+)?(meta\s+)?import\b', s): break
         mods += found
     return mods
-seen, todo, missing = {}, list(roots) + ["Init"], []
-while todo:
-    m = todo.pop()
-    if m in seen: continue
-    src, ol = source_of(m)
-    if src is None: missing.append(m); seen[m] = None; continue
-    seen[m] = ol
-    imps = header_imports(src)
-    if "prelude" not in open(src, encoding="utf-8", errors="replace").read(400): imps.append("Init")
-    todo += imps
-if missing: sys.exit(f"mathlib-tree: no source for {len(missing)} imported modules, e.g. {missing[:5]}")
-selected = sorted(m for m in seen if m != "Init" and not m.startswith("Init."))
-tree = os.path.join(out, "essential-tree")
-shutil.rmtree(tree, ignore_errors=True)
-files = 0; lacking = []
-for m in selected:
-    rel = m.replace("«", "").replace("»", "").replace(".", "/")
-    if not os.path.exists(os.path.join(seen[m], rel + ".olean")): lacking.append(m); continue
-    for f in FACETS:
-        p = os.path.join(seen[m], rel + f)
-        if os.path.exists(p):
-            d = os.path.join(tree, rel + f); os.makedirs(os.path.dirname(d), exist_ok=True)
-            try: os.link(p, d)
-            except OSError: shutil.copy2(p, d)
-            files += 1
-if lacking: sys.exit(f"mathlib-tree: {len(lacking)} selected modules were not built, e.g. {lacking[:5]}")
-open(os.path.join(out, "essential-modules.txt"), "w").write("\n".join(selected) + "\n")
-by = {}
-for m in selected: by[m.split(".")[0]] = by.get(m.split(".")[0], 0) + 1
-json.dump({"roots": roots, "modules": len(selected), "files": files, "byTopLevel": by}, open(os.path.join(out, "essential-selection.json"), "w"), indent=1)
-print(f"essential: {len(selected)} modules, {files} files -> {tree}")
-print("  " + ", ".join(f"{k} {v}" for k, v in sorted(by.items(), key=lambda kv: -kv[1])[:12]))
+def closure(start):
+    seen, todo, missing = {}, list(start) + ["Init"], []
+    while todo:
+        m = todo.pop()
+        if m in seen: continue
+        src, ol = source_of(m)
+        if src is None: missing.append(m); seen[m] = None; continue
+        seen[m] = ol
+        imps = header_imports(src)
+        if "prelude" not in open(src, encoding="utf-8", errors="replace").read(400): imps.append("Init")
+        todo += imps
+    if missing: sys.exit(f"mathlib-tree: no source for {len(missing)} imported modules, e.g. {missing[:5]}")
+    return seen
+def stage(name, selected, where, roots_used):
+    tree = os.path.join(out, name + "-tree")
+    shutil.rmtree(tree, ignore_errors=True)
+    files = 0; lacking = []
+    for m in selected:
+        rel = m.replace("«", "").replace("»", "").replace(".", "/")
+        if not os.path.exists(os.path.join(where[m], rel + ".olean")): lacking.append(m); continue
+        for f in FACETS:
+            p = os.path.join(where[m], rel + f)
+            if os.path.exists(p):
+                d = os.path.join(tree, rel + f); os.makedirs(os.path.dirname(d), exist_ok=True)
+                try: os.link(p, d)
+                except OSError: shutil.copy2(p, d)
+                files += 1
+    if lacking: sys.exit(f"mathlib-tree: {len(lacking)} selected {name} modules were not built, e.g. {lacking[:5]}")
+    open(os.path.join(out, name + "-modules.txt"), "w").write("\n".join(selected) + "\n")
+    by = {}
+    for m in selected: by[m.split(".")[0]] = by.get(m.split(".")[0], 0) + 1
+    json.dump({"roots": roots_used, "modules": len(selected), "files": files, "byTopLevel": by}, open(os.path.join(out, name + "-selection.json"), "w"), indent=1)
+    print(f"{name}: {len(selected)} modules, {files} files -> {tree}")
+    print("  " + ", ".join(f"{k} {v}" for k, v in sorted(by.items(), key=lambda kv: -kv[1])[:12]))
+core = lambda m: m == "Init" or m.startswith("Init.")
+ess = closure(roots)
+essential = sorted(m for m in ess if not core(m))
+stage("essential", essential, ess, roots)
+if extra_roots:
+    # a SECOND, additive tree: what the extra roots need beyond essential. Packed
+    # separately, so consumers that do not want it (the playground) never pay for it.
+    wide = closure(roots + extra_roots)
+    extra = sorted(m for m in wide if not core(m) and m not in ess)
+    stage("extra", extra, wide, extra_roots)
 PY
 git -C "$ML" rev-parse HEAD > "$W/MATHLIB-COMMIT"
 echo "MATHLIB TREE COMPLETE — $W/essential-tree ($(cat "$W/MATHLIB-COMMIT" | cut -c1-10))"

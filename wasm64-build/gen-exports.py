@@ -30,13 +30,22 @@ attempt. Check that nothing outside the tree (JS glue, workers) called it.
 
 History: through Lean 4.33 this script filtered a committed list
 (`emscripten-exports.wanted.txt`, final = seed + wanted & defined). That list
-was exactly boxed + init + cell of the 4.33 tree, and "can only shrink" was
-wrong for a version import: v4.34.0 added 5,812 boxed wrappers, 168 module
-initializers and 213 cells that the filter would never have exported.
+held only boxed + init + cell names, and "can only shrink" was wrong twice: it
+never picked up 70 names our own patches introduced, and v4.34.0 added 5,812
+boxed wrappers, 168 module initializers and 213 cells it would never have
+exported.
 
-Usage: gen-exports.py <stage1/lib/temp> <lean4/src> [--check]
+Usage: gen-exports.py <stage1/lib/temp> <lean4/src> [--check] [--slim <file>]
   --check: do not write; print the category counts and the delta against the
            list currently on disk.
+  --slim <file>: ALSO write the slim (iPhone WebKit) list: seed + init + cell +
+           only the boxed wrappers that have no unboxed body in the C — the
+           body-less @[extern] decls and @[export] stems, which have no IR to
+           fall back on. (This rule reproduces the formerly committed
+           emscripten-exports-slim.txt: 1,034 of its 1,043 wrappers, the other
+           nine being decls whose @[export] upstream removed.) The slim binary
+           gives up native dispatch for everything else and with it resident
+           imports of external packages.
 """
 import os
 import re
@@ -44,6 +53,7 @@ import sys
 
 temp, src = sys.argv[1], sys.argv[2]
 check = "--check" in sys.argv
+slim_out = sys.argv[sys.argv.index("--slim") + 1] if "--slim" in sys.argv else None
 ROOTS = ("Init", "Std", "Lean")
 PAT = re.compile(
     r'^LEAN_EXPORT\s+[A-Za-z_][A-Za-z0-9_ \*]*?\b'
@@ -102,6 +112,25 @@ seed_all = read_list("emscripten-exports.seed.txt")
 seed = [s for s in seed_all if s in SYSROOT or s.startswith("_emscripten") or s.startswith("__") or s[1:] in words]
 vanished = [s for s in seed_all if s not in seed]
 
+# The other direction: a runtime C entry point upstream ADDED. Nothing fails
+# without it (the interpreter reaches body-less externs through their boxed
+# wrapper), but the seed's invariant is "every lean_* C symbol", which is what a
+# dynlib or a JS caller resolves against. Report, do not guess: some
+# definitions are not part of this configuration (LLVM, GMP, libuv-only).
+NOT_BUILT = ("library/llvm.cpp", "runtime/uv/", "lean_gmp")
+NOT_BUILT_NAMES = {"_lean_alloc_mpz", "_lean_extract_mpz_value"}  # #ifdef LEAN_USE_GMP
+API = re.compile(r'^extern\s+"C"\s+LEAN_EXPORT\s+[A-Za-z_][A-Za-z0-9_ \*:<>]*?\b(lean_[a-z0-9_]+)\s*\(', re.M)
+api = {}
+for r, dirs, files in os.walk(src):
+    dirs[:] = [d for d in dirs if d not in ("tests", ".lake")]
+    for f in files:
+        path = os.path.join(r, f)
+        if f.endswith(".cpp") and not any(x in path for x in NOT_BUILT):
+            with open(path, errors="ignore") as fh:
+                for m in API.finditer(fh.read()):
+                    api.setdefault("_" + m.group(1), os.path.relpath(path, src))
+unseeded = sorted(n for n in api if n not in set(seed_all) and n not in NOT_BUILT_NAMES)
+
 generated = sorted(n for n, k in kind.items() if k != "fn")
 seedset = set(seed)
 final = seed + [n for n in generated if n not in seedset]
@@ -115,11 +144,22 @@ if vanished:
     print("  -> upstream removed them (usually an @[export]); confirm no JS/worker caller used them,")
     print("     then delete them from src/emscripten-exports.seed.txt.")
 
+if unseeded:
+    print(f"RUNTIME API DEFINED BUT NOT IN THE SEED ({len(unseeded)}) — new upstream entry points? add them to the seed:")
+    for u in unseeded:
+        print(f"  {u}   ({api[u]})")
+
 target = os.path.join(src, "emscripten-exports.txt")
 if os.path.exists(target):
     old = set(read_list("emscripten-exports.txt"))
     new = set(final)
     print(f"vs the list on disk: +{len(new - old)} -{len(old - new)}")
+if slim_out:
+    slim = seed + [n for n in generated if n not in seedset and
+                   (kind[n] != "boxed" or n[:-len("___boxed")] not in kind)]
+    with open(slim_out, "w") as out:
+        out.write("\n".join(slim) + "\n")
+    print(f"wrote {slim_out} (slim: {len(slim)} names)")
 if check:
     sys.exit(0)
 with open(target, "w") as out:
