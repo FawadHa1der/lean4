@@ -265,3 +265,18 @@ changed in the series itself:
   constants of the pinned libuv 1.48.0. Every real finding was in the export
   lists. Snapshot layouts changed (`Command.State.prevLinterStates`,
   `DynamicSnapshot`): every `.snap` must be rebaked with the new binary.
+- **Known limitation (found by the QED64 session on the staged pairing): a FAT
+  umbrella bake of the 4.34 essential tree (with `*.olean.private`, 5,004
+  modules) fails in the compactor** — "object compactor: out of memory growing
+  the object table to 268435456 slots". The flat table (0012) grows by
+  doubling at 70% load; a slot is 16 bytes on wasm64, so 2²⁷ → 2²⁸ slots is a
+  4 GiB fresh table coexisting with the 2 GiB old one during the rehash, next
+  to the 4 GiB `LEAN_COMPACTOR_RESERVE` region buffer and the live fat
+  environment: more than the 16 GiB address space. The 4.33 fat bake (2,755 MB
+  raw) stayed just under 0.7 × 2²⁷ ≈ 94 M objects; 4.34's crossed it. The slim
+  bake (what ships: 1,127 MB raw) is unaffected. If a fat pairing is ever
+  wanted, the kernel needs a knob — presize the table from the environment
+  (`LEAN_COMPACTOR_TABLE_SLOTS`, removes the 2 GiB transient only), or a
+  12-byte slot (a `uint32` offset; fat regions can exceed 4 GiB, so it must
+  be guarded). Deliberately NOT changed in this import: a runtime change would
+  re-pair every snapshot the staged 4.34 pairing was tested with.
