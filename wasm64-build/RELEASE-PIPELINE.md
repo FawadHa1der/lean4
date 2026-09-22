@@ -66,8 +66,10 @@ check whether upstream absorbed the gates, then refresh it with
    upstream removes an `@[export lean_*]`, the generator drops the name loudly
    instead of failing the link — confirm no JS/worker caller used it, then
    delete it from `src/emscripten-exports.seed.txt` (v4.34.0 removed 23).
-5. **Library ports** — game patches and `wasm/compat` sources in lean4game were
-   validated against one Mathlib commit; expect a re-port pass per bump.
+5. **Library ports** — game patches in lean4game were validated against one
+   Mathlib commit; expect a re-port pass per bump. Moved modules are the usual
+   churn: rewrite imports to the new names rather than rely on shims (the
+   deprecation warning renders to players).
 
 ## Kernel side
 
@@ -76,9 +78,24 @@ wasm64-build/import-release.sh watch            # 0 up to date · 10 ready · 11
 wasm64-build/import-release.sh run v4.34.0      # import → build → gate, stops at the first judgment point
 wasm64-build/import-release.sh drift v4.34.0
 wasm64-build/native64.sh v4.34.0                # after build: the compiler that writes every shipped olean
-wasm64-build/mathlib-tree.sh v4.34.0            # Mathlib@v4.34.0 → <build dir>/mathlib/essential-tree
+MATHLIB_EXTRA_ROOTS="Mathlib.Tactic …" \
+wasm64-build/mathlib-tree.sh v4.34.0            # Mathlib@v4.34.0 → <build dir>/mathlib/{essential,extra}-tree
 wasm64-build/import-release.sh accept v4.34.0   # LOCAL fast-forward of qed64-wasm64; prints the push command
 ```
+
+`mathlib-tree.sh` builds one Lake workspace and stages two trees:
+`essential-tree` = import closure of the three profile roots + `CORE_ROOTS`
+(`Lean Std` — module-system Mathlib no longer pulls the core umbrellas in, and
+`import Lean` must keep resolving) minus `Init.*`; `extra-tree` = closure of
+`MATHLIB_EXTRA_ROOTS` minus essential, an additive pack only the games mount
+(`mathlib-game-extra`). Both get the `deprecated_module` shims whose target is
+already inside them (`mathlib-select.py`): Mathlib moves modules and leaves
+the old name as a shim nothing imports, so a closure never contains one, and
+without them every file written against a pre-move name is refused where
+stock Lean only warns (v4.34.0: 80 + 4 shims added, 72 skipped, listed in
+`shims-skipped.txt`; `*-selection.json` carries `deprecatedShims`). Names
+whose shim upstream already deleted stay gone. `SELECT_ONLY=1` re-runs the
+selection over an existing build in seconds.
 
 Build directory: `../wasm64-lean-kernel-build-<tag>` (override `QED64_BUILD_DIR`).
 It is never an app's build tree — a stage1 rebuild unpairs every snapshot baked
@@ -92,22 +109,21 @@ equality is what makes natively compiled Mathlib loadable in the browser.
 ## QED64 (`wasm64-lean-fable/qed64`) — see its docs/REBUILD.md § 3b
 
 ```sh
-K=<build dir>; ART=$K/build/stage1; V=4.34.0; REV=$(cat $K/BUILT-COMMIT)
-# packs (5 facets) from the two olean trees
-node pipeline/artifacts/pack.mjs --lib $ART/lib/lean/Init* …          # lean-core: Init closure, roots Init
-node pipeline/artifacts/pack.mjs --lib $K/mathlib/essential-tree --id mathlib-essential \
-     --out <staging>/profiles --lean-version $V --revision $REV --roots <the three roots>
-# tree + umbrella: unpack both packs → lib tree; QED64/Essential.lean = one import per manifest module,
-# compiled BY THE NEW RUNTIME (node-runner.mjs --artifact $ART --lib <tree> -- -o /work/Essential.olean …)
-QED64_ARTIFACT=$ART QED64_LIB_TREE=<tree> QED64_SLIM=<scratch> QED64_SNAP_WORK=<scratch> \
-QED64_LEAN_VERSION=$V pipeline/release/bump-chain.sh stage-artifact
-# pyramid on the staged pairing (one gate at a time), KERNEL-PIN, then
-pipeline/release/bump-chain.sh promote
+pipeline/release/import-packs.sh <build dir> --lean-version 4.34.0   # --dry-run validates the contract; --from <step> resumes
 ```
 
-Packs, runtime and snapshots are promoted together: the page boots from
-`public/profiles`, and a runtime served with the previous version's packs is a
-broken site.
+The lane reads the contract above (`build/stage1`, `BUILT-COMMIT`,
+`mathlib/{essential-tree,essential-modules.txt,MATHLIB-COMMIT}`, optional
+`mathlib/extra-tree`): packs lean-core + mathlib-essential (+ mathlib-game-extra
+into `work/staging/<buildId>/extra/`, never promoted), checks the two packs form
+one import-closed library, unpacks into a fresh tree, regenerates and compiles
+the `QED64.Essential` umbrella with the new runtime, then
+`bump-chain.sh stage-artifact` (gate → chunk → slim trees → both bakes). The
+pyramid runs on the staged pairing with `?profiles=` so it sees the staged
+packs, then KERNEL-PIN (the `BUILT-COMMIT`, which must already be on
+`origin/qed64-wasm64`) and `bump-chain.sh promote`, which moves packs,
+manifests, runtime and snapshots in one step. The promote commit is the
+qed64 commit lean4game syncs to.
 
 ## lean4game (`wasm64-lean4game`) — see its wasm/KERNEL.md
 
