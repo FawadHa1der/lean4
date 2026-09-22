@@ -1,0 +1,12 @@
+# Roots of the additive `mathlib-game-extra` tree (mathlib-tree.sh; env
+# MATHLIB_EXTRA_ROOTS overrides this file). One module per line, with who
+# needs it — a root nobody needs any more should be removed, not kept.
+Mathlib.Tactic                          # the real tactic umbrella: NumberTheoryGame, lean4game-logic, LinearAlgebraGame import it
+Mathlib.Tactic.Have                     # formerly vendored in lean4game wasm/compat
+Mathlib.Tactic.Cases                    # formerly vendored in lean4game wasm/compat
+Mathlib.Tactic.Generalize               # formerly vendored in lean4game wasm/compat
+Mathlib.Algebra.Order.Ring.Star         # formerly vendored in lean4game wasm/compat
+Mathlib.Data.Int.Star                   # formerly vendored in lean4game wasm/compat
+Mathlib.Data.Rat.Star                   # formerly vendored in lean4game wasm/compat
+Mathlib.Analysis.SpecialFunctions.Log.Base   # RealAnalysisGame (pulls Mathlib.Data.Int.Log)
+Mathlib.Tactic.NormNum.Prime            # LinearAlgebraGame Game/MyTactic.lean: norm_num decides primality (added 2026-09-22, first built at the next pack build)

@@ -32,10 +32,15 @@ BD="${QED64_BUILD_DIR:-$REPO/../wasm64-lean-kernel-build-$TAG}"
 IMG=qed64-toolchain:emsdk-6.0.5
 MATHLIB_URL="${MATHLIB_URL:-https://github.com/leanprover-community/mathlib4}"
 MATHLIB_REV="${MATHLIB_REV:-$TAG}"
-# Three roots whose closure is the served profile. Extra roots (space
-# separated, e.g. MATHLIB_EXTRA_ROOTS="Mathlib.Tactic" for the games) are built
-# in the same Lake workspace but staged as a separate additive tree.
+# Three roots whose closure is the served profile. Extra roots (the games';
+# mathlib-extra-roots.txt, or env MATHLIB_EXTRA_ROOTS, space separated) are
+# built in the same Lake workspace but staged as a separate additive tree.
 MATHLIB_ROOTS="${MATHLIB_ROOTS:-Mathlib.Geometry.Manifold.IsManifold.Basic Mathlib.Geometry.Manifold.Instances.Sphere Mathlib.Analysis.SpecialFunctions.Complex.Circle}"
+# The extra roots are committed (mathlib-extra-roots.txt) so a version import
+# carries the games' needs without anyone remembering them; the env overrides.
+if [ -z "${MATHLIB_EXTRA_ROOTS+x}" ]; then
+  MATHLIB_EXTRA_ROOTS="$(sed -e 's/#.*//' "$REPO/wasm64-build/mathlib-extra-roots.txt" | tr -s '[:space:]' ' ' | sed -e 's/^ //' -e 's/ $//')"
+fi
 ROOTS="$MATHLIB_ROOTS ${MATHLIB_EXTRA_ROOTS:-}"
 # Core umbrellas selected INTO essential (nothing to build: they are the
 # kernel's own library). Until 4.33 they arrived through Mathlib's legacy

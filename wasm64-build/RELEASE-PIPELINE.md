@@ -78,7 +78,6 @@ wasm64-build/import-release.sh watch            # 0 up to date · 10 ready · 11
 wasm64-build/import-release.sh run v4.34.0      # import → build → gate, stops at the first judgment point
 wasm64-build/import-release.sh drift v4.34.0
 wasm64-build/native64.sh v4.34.0                # after build: the compiler that writes every shipped olean
-MATHLIB_EXTRA_ROOTS="Mathlib.Tactic …" \
 wasm64-build/mathlib-tree.sh v4.34.0            # Mathlib@v4.34.0 → <build dir>/mathlib/{essential,extra}-tree
 wasm64-build/import-release.sh accept v4.34.0   # LOCAL fast-forward of qed64-wasm64; prints the push command
 ```
@@ -87,8 +86,9 @@ wasm64-build/import-release.sh accept v4.34.0   # LOCAL fast-forward of qed64-wa
 `essential-tree` = import closure of the three profile roots + `CORE_ROOTS`
 (`Lean Std` — module-system Mathlib no longer pulls the core umbrellas in, and
 `import Lean` must keep resolving) minus `Init.*`; `extra-tree` = closure of
-`MATHLIB_EXTRA_ROOTS` minus essential, an additive pack only the games mount
-(`mathlib-game-extra`). Both get the `deprecated_module` shims whose target is
+the games' roots (`mathlib-extra-roots.txt`, committed with who needs each;
+env `MATHLIB_EXTRA_ROOTS` overrides) minus essential, an additive pack only
+the games mount (`mathlib-game-extra`). Both get the `deprecated_module` shims whose target is
 already inside them (`mathlib-select.py`): Mathlib moves modules and leaves
 the old name as a shim nothing imports, so a closure never contains one, and
 without them every file written against a pre-move name is refused where
