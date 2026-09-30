@@ -166,9 +166,14 @@ def processHeaderCore
     if Elab.inServer.get opts then .server else .exported
   else
     .private
+  -- The level is a DATA choice (which olean facets exist); whether the file itself takes part in
+  -- the module system is its header's business. `importModules` would otherwise derive the flag
+  -- from the level (`isModule := level != .private`), which on Emscripten made every legacy file
+  -- a module: private-by-default declarations, `@[server_rpc_method]`/`attribute [tactic …]`
+  -- rejected as "must be marked as `meta`" (qed64 HARDENING #51).
   let (env, messages) ← try
     let env ←
-      importModules (leakEnv := leakEnv) (loadExts := true) (level := level)
+      importModules (leakEnv := leakEnv) (loadExts := true) (level := level) (isModule := isModule)
         imports opts trustLevel plugins arts
     pure (env, messages)
   catch e =>

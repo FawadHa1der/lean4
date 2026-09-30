@@ -578,7 +578,11 @@ where
       -- allows `headerEnv` to be leaked, which would live until the end of the process anyway
       let (headerEnv, msgLog) ← do
         match setup.prebuiltEnv? with
-        | some env => pure (env.setMainModule setup.mainModuleName, MessageLog.empty)
+        -- A registry environment is shared between buffers: it carries the module flag of the
+        -- file it was imported (or baked) for, so set THIS buffer's — a legacy file served from
+        -- any snapshot elaborates as legacy, a `module` file as a module.
+        | some env =>
+          pure (env.setMainModule setup.mainModuleName |>.setIsModule setup.isModule, MessageLog.empty)
         | none =>
           Elab.processHeaderCore (leakEnv := true)
             stx.startPos setup.imports setup.isModule setup.opts .empty ctx.toInputContext

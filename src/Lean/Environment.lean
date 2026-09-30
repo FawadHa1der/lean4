@@ -628,7 +628,8 @@ private def VisibilityMap.const (a : α) : VisibilityMap α :=
 namespace Environment
 
 def header (env : Environment) : EnvironmentHeader :=
-  -- can be assumed to be in sync with `env.checked`; see `setMainModule`, the only modifier of the header
+  -- can be assumed to be in sync with `env.checked`; see `setMainModule` and `setIsModule`, the
+  -- only modifiers of the header
   env.base.private.header
 
 def imports (env : Environment) : Array Import :=
@@ -1192,6 +1193,27 @@ def setMainModule (env : Environment) (m : Name) : Environment := Id.run do
 
 def mainModule (env : Environment) : Name :=
   env.header.mainModule
+
+/--
+Sets `env.header.isModule`, the flag that selects module-system semantics for the file being
+elaborated (private-by-default declarations, `meta` requirements on attributes, `isExporting`).
+`importModules` bakes it in from the importing file's header, but an environment served from a
+registry or snapshot (`Language.Lean.lookupPrebuiltEnv`) is shared between files, so the served
+copy must carry the flag of the file it is handed to, not the one it was imported for. Clears
+`isExporting` when leaving the module system (`setExporting` is a no-op outside it).
+-/
+def setIsModule (env : Environment) (isModule : Bool) : Environment := Id.run do
+  if env.header.isModule == isModule then
+    return env
+  let env := env.modifyCheckedAsync ({ · with
+    header.isModule := isModule
+  })
+  { env with
+    isExporting := isModule && env.isExporting
+    importRealizationCtx? := env.importRealizationCtx?.map ({ · with
+      -- safety: `RealizationContext` is private
+      env := unsafe unsafeCast env
+    }) }
 
 def getModuleIdxFor? (env : Environment) (declName : Name) : Option ModuleIdx :=
   -- async constants are always from the current module
@@ -2501,6 +2523,7 @@ as if no `module` annotations were present in the imports.
 def importModules (imports : Array Import) (opts : Options) (trustLevel : UInt32 := 0)
     (plugins : Array Plugin := #[]) (leakEnv := false) (loadExts := false)
     (level := OLeanLevel.private) (arts : NameMap ImportArtifacts := {})
+    (isModule := level != .private)
     : IO Environment := profileitIO "import" opts do
   for imp in imports do
     if imp.module matches .anonymous then
@@ -2509,7 +2532,7 @@ def importModules (imports : Array Import) (opts : Options) (trustLevel : UInt32
     plugins.forM fun {path, initFn?} => Lean.loadPlugin path initFn?
     let (_, s) ← importModulesCore (globalLevel := level) imports arts |>.run
     finalizeImport (leakEnv := leakEnv) (loadExts := loadExts) (level := level)
-      s imports opts trustLevel
+      (isModule := isModule) s imports opts trustLevel
 
 /--
 Creates environment object from imports and frees compacted regions after calling `act`. No live

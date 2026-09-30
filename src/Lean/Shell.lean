@@ -94,9 +94,12 @@ def getOrCreateWasmEnvFor (imports : Array Import) : IO Environment := do
   -- flag when it returns, and a `loadExts := true` import refuses to run
   -- without it — so every cache-miss import after the first would throw.
   -- Re-enable it each time, as `runFrontend` does after `--incr-load`.
+  --  * `isModule := false`: the flag is the compiled FILE's, not the level's (the
+  --    default `level != .private` would make every file a module); `wasmCompile`
+  --    sets the real one per file with `setIsModule`.
   unsafe enableInitializersExecution
   let env ← importModules imports {} 0
-    (level := .exported) (loadExts := true) (leakEnv := true)
+    (level := .exported) (loadExts := true) (leakEnv := true) (isModule := false)
   IO.eprintln "[WASM DEBUG] getOrCreateWasmEnvFor: importModules completed"
   wasmEnvCache.modify (·.push (key, env))
   return env
@@ -125,6 +128,8 @@ def wasmCompile (code : String) (fileName : String := "<input>") : IO UInt32 := 
   let (header, parserState, headerMessages) ← Parser.parseHeader inputCtx
   IO.eprintln "[WASM DEBUG] Getting or creating environment for header imports..."
   let env ← getOrCreateWasmEnvFor (Elab.headerToImports header)
+  -- the cached environment is shared between files; this file's header decides its semantics
+  let env := env.setIsModule (Elab.HeaderSyntax.isModule header)
   IO.eprintln "[WASM DEBUG] Environment ready"
 
   let opts : Options := {}

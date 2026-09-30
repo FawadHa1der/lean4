@@ -78,6 +78,31 @@ try {
 }
 gate(probeStatus === 0 && probeOut.includes("PERSISTENT PROBE PASS"), "persistent path: init, resident reuse, error reporting, survival");
 const parseFixed = probeOut.includes("runtime defect is FIXED");
+
+// MODULE-SEMANTICS GATES (qed64 HARDENING #51): the environment's own facts for a
+// user file, not its messages. On Emscripten every import happens at
+// `OLeanLevel.exported`; if the file's header flag is not threaded through,
+// `importModules` derives `isModule` from the level and a legacy file elaborates
+// as a module (private-by-default defs, `@[server_rpc_method]` rejected). The
+// three legacy probes run as ONE file (they all `import Lean`); the `module`
+// file runs alone. Probe sources: wasm64-build/probes/*.lean (from qed64
+// tests/adversarial/kernel-probes).
+const probes = path.join(root, "probes");
+const readProbe = (name) => fs.readFileSync(path.join(probes, name), "utf8");
+const stripDebug = (s) => s.replace(/\[(DEBUG:PROGRESS|WASM (DEBUG|LSP|PROFILE|INIT))\][^\n]*\n/g, "");
+const legacySrc = "import Lean\n" + ["is-module.lean", "private-default.lean", "rpc-attr.lean"]
+  .map((f) => readProbe(f).replace(/^import Lean\n/m, "")).join("\n");
+const legacy = runLean(legacySrc);
+const legacyOut = stripDebug(legacy.stdout);
+gate(/isModule=false/.test(legacyOut) && !/isModule=true/.test(legacyOut), "legacy file: env.header.isModule = false",
+  legacy.timedOut ? "CLI kept alive (expected)" : `exit ${legacy.status}`);
+gate(/plainDef/.test(legacyOut) && !/_private/.test(legacyOut), "legacy file: plain `def` is not private by default");
+gate(!/error/i.test(legacyOut), "legacy file: @[server_rpc_method] / attribute [tactic] / @[app_unexpander] on plain defs accepted",
+  /error/i.test(legacyOut) ? legacyOut.split("\n").find((l) => /error/i.test(l))?.slice(0, 160) : "");
+const moduleFile = runLean(readProbe("module-file.lean"));
+const moduleOut = stripDebug(moduleFile.stdout);
+gate(/isModule=true/.test(moduleOut) && !/error/i.test(moduleOut), "`module` file: env.header.isModule = true",
+  moduleFile.timedOut ? "CLI kept alive (expected)" : `exit ${moduleFile.status}`);
 gate(parseFixed, "THE PARSE GATE: lean_wasm_compile reports parser diagnostics",
   parseFixed ? "" : "persistent shell still swallows parse errors");
 
