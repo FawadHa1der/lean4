@@ -137,6 +137,20 @@ KERNEL_DIR=<kernel checkout> BUILD_DIR=<build dir> MATHLIB_PACK_DIR=<new pack di
 module list; `wasm/catalog.json` `expectedRaw` values are re-recorded (the
 bake prints them); `LEAN_VERSION` in `build-from-source.sh` is bumped.
 
+## A kernel-only fix after an import
+
+A fix that touches the runtime but not what the packs contain (v4.34.0:
+patch 0034) is built in its own dir (`QED64_BUILD_DIR=<K'> wasm64-build/build.sh`,
+warm ccache; a change to `Environment.lean` re-elaborates the whole stdlib,
+~1 h), gated (`gate.mjs --artifact <K'>/build/stage1` — it now also asks the
+environment for its own facts: `isModule`, default privacy, meta attributes),
+and handed to QED64 as a KERNEL-ONLY bump: `bump-chain.sh stage-artifact`
+with `QED64_ARTIFACT=<K'>/build/stage1` and the existing lib tree (no
+`import-packs.sh`: oleans and umbrella are reused), rebake, pyramid,
+promote (~500 MB upload: runtime chunks + two snapshots). lean4game
+re-pairs its game snapshots the same way. The packs' oleans of the changed
+modules lag the compiled code until the next full import.
+
 ## Ship gate (repository owner)
 
 ```sh

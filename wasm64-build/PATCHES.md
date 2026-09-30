@@ -280,3 +280,25 @@ changed in the series itself:
   12-byte slot (a `uint32` offset; fat regions can exceed 4 GiB, so it must
   be guarded). Deliberately NOT changed in this import: a runtime change would
   re-pair every snapshot the staged 4.34 pairing was tested with.
+
+## 0034 — wasm: a file's module flag is its header's, not the import level's (df1362243c)
+
+Found by the QED64 session on the served 4.34 pairing while testing the
+first user widget (HARDENING #51): every LEGACY user file elaborated with
+module-system semantics — plain `def`s private by default, `@[server_rpc_method]`,
+`attribute [tactic …]`, `@[app_unexpander]` rejected ("must be marked as
+`meta`"). Cause: on Emscripten every import happens at `OLeanLevel.exported`
+(the only facets the wasm build ships), and `importModules` derived
+`header.isModule` from the level (`isModule := level != .private`). Latent
+since the `.exported` patch; 4.34 hangs the module system off the flag, and
+no test asked the environment for its own facts (the e2e/battery corpora
+exercise messages, not semantics). Fix: `importModules` takes `isModule`
+explicitly and `processHeaderCore` passes the header's; new
+`Environment.setIsModule` (mirror of `setMainModule`) lets a shared
+registry/snapshot environment take the buffer's flag — the resident
+prebuilt-env branch sets `setup.isModule`, `wasmCompile` its parsed header's.
+Gate: four module-semantics probes (`wasm64-build/probes/`). A post-import
+kernel-only fix: the apps re-pair (rebake) against the new runtime with their
+packs unchanged; the pack's oleans of the four modules lag the compiled code
+until the next full import (harmless: native dispatch wins). Upstream-worthy
+as the explicit-`isModule` parameter; the wasm `.exported` policy is ours.
