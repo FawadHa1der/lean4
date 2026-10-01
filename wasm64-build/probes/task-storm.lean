@@ -103,3 +103,16 @@ def stormSizes : Nat × Nat × Nat × Nat × Nat × Nat := (800, 120, 24, 12, 24
     IO.println s!"STORM OK dedicated={dedicated} checksum={got} [pthreads?]"
   else
     IO.println s!"STORM FAIL checksum={got} expected={want}"
+
+/-- Thread-reuse fidelity: one dedicated task leaks a stderr redirection (never restores
+it); later dedicated tasks print to stderr. Native Lean runs each on a fresh thread, so
+nothing reaches the leaked buffer; a reused (parked) thread must behave the same. -/
+#eval show IO Unit from do
+  let buf ← IO.mkRef ({} : IO.FS.Stream.Buffer)
+  let t1 ← IO.asTask (prio := .dedicated) do
+    discard <| IO.setStderr (IO.FS.Stream.ofBuffer buf)
+  discard <| IO.wait t1
+  for _ in [0:20] do
+    let t ← IO.asTask (prio := .dedicated) (IO.eprintln "storm-stderr-probe")
+    discard <| IO.wait t
+  IO.println s!"LEAKED-STDERR bytes={(← buf.get).data.size}"

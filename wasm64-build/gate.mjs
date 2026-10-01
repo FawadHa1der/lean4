@@ -122,6 +122,11 @@ const created = /\[pthreads\] created=(\d+)/.exec(stormOut);
 gate(!!stormOk && !!created && Number(created[1]) * 4 <= Number(stormOk[1]),
   "task-manager storm: dedicated tasks reuse parked threads (at most 1 pthread created per 4 dedicated tasks)",
   created ? `${created[1]} pthreads created for ${stormOk ? stormOk[1] : "?"} dedicated tasks` : "pthread count unavailable");
+// A reused thread must look fresh: a stderr redirection one dedicated task leaves
+// installed must not capture a later task's output (native Lean: a fresh thread).
+const leaked = /LEAKED-STDERR bytes=(\d+)/.exec(stormOut);
+gate(!!leaked && leaked[1] === "0", "thread reuse: a later dedicated task does not inherit a leaked stream redirection",
+  leaked ? `${leaked[1]} bytes reached the leaked buffer` : "no result");
 gate(parseFixed, "THE PARSE GATE: lean_wasm_compile reports parser diagnostics",
   parseFixed ? "" : "persistent shell still swallows parse errors");
 
