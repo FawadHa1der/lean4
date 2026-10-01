@@ -85,7 +85,21 @@ process.chdir("/");
 // layout so Lean derives /lib/lean as its sysroot.
 process.argv[1] = "/bin/lean";
 
+// Opt-in (QED64_COUNT_PTHREADS=1): count the pthreads the runtime creates. Every
+// pthread_create of this build reaches the glue's `spawnThread` on the main
+// runtime thread (pthreads proxy creation there). A printed line containing the
+// marker `[pthreads?]` is answered with `[pthreads] created=<n>`, so a probe can
+// report the count at a point of its choosing (the CLI never exits).
+const countPthreads = !!process.env.QED64_COUNT_PTHREADS;
+let pthreadsCreated = 0;
+
 globalThis.Module = {
+  ...(countPthreads ? {
+    print: (line) => {
+      console.log(line);
+      if (line.includes("[pthreads?]")) console.log(`[pthreads] created=${pthreadsCreated}`);
+    },
+  } : {}),
   arguments: args.leanArgs,
   locateFile: (file) => path.join(path.dirname(leanJs), file),
   mainScriptUrlOrBlob: leanJs,
@@ -145,3 +159,12 @@ globalThis.__filename = "/bin/lean.js";
 globalThis.__dirname = "/bin";
 
 vm.runInThisContext(fs.readFileSync(leanJs, "utf8"), { filename: leanJs });
+
+if (countPthreads) {
+  if (typeof globalThis.spawnThread !== "function") {
+    console.error("QED64_COUNT_PTHREADS: the glue exposes no global spawnThread; counting disabled");
+  } else {
+    const spawnThread = globalThis.spawnThread;
+    globalThis.spawnThread = (params) => { pthreadsCreated++; return spawnThread(params); };
+  }
+}

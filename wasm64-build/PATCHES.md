@@ -302,3 +302,38 @@ kernel-only fix: the apps re-pair (rebake) against the new runtime with their
 packs unchanged; the pack's oleans of the four modules lag the compiled code
 until the next full import (harmless: native dispatch wins). Upstream-worthy
 as the explicit-`isModule` parameter; the wasm `.exported` policy is ours.
+
+## 0035 — wasm: no thread creation under the task manager's lock; dedicated tasks reuse parked threads (6b3a491f76)
+
+The served 4.34 pairing froze for good about once per 4,400 edits: every Lean
+pthread stopped at once, the worker's JS thread alive (qed64 HARDENING #52; root
+cause by the widgets lane). Under Emscripten `pthread_create` from a pthread is
+a synchronous round trip to the main JS thread, and the task manager made it
+while holding `m_mutex` — for every `.dedicated` task, i.e. every LSP output
+message, request and request continuation (~153 per edit cycle). One round trip
+that never completes then stops every thread at its next task-manager call.
+
+Wasm only; the native branch (and so the native64 compiler) is unchanged:
+threads are created with the lock released; a dedicated task goes to a parked
+dedicated thread when one exists (≤ 8 parked — a parked thread keeps its
+Emscripten Worker, and 8 keeps app + std pool + parked within the 24
+preallocated Workers); a reused thread gets the heartbeat limit and std streams
+a fresh one would; waiters on a finished task are woken before its dependents
+are handed off; nothing proxies to the main thread under `m_mutex` (the
+`wait_for` panic included); `lean_wasm_task_manager_parked_threads` reports the
+parked count lock-free for host gauges of live pthreads.
+
+Drafted by the QED64 session; five-lens adversarial review (hand-off protocol
+proved; every lock-drop caller; thread-locals; Emscripten proxies; design). New
+gates: `probes/task-storm.lean` (forAsync chain, fan-out, a ladder of 24
+dedicated tasks blocking on each other — beyond the cap — pool waits, waitAny;
+must complete) and thread reuse (≤ 1 pthread per 4 dedicated tasks, counted by
+`node-runner.mjs` with `QED64_COUNT_PTHREADS=1`). The same storm creates 2,956
+pthreads on the served 0034 runtime.
+
+Not a cure for a lost main-thread mailbox wakeup: every LSP frame is still a
+synchronous `fd_write` proxy, and a notification stuck PENDING is not re-sent by
+later proxies. The host-side periodic `checkMailbox` and a request-level
+liveness probe stay the primary defence; an stdout ring (mirroring 0031's stdin
+ring) would remove the per-frame proxy. Pool-change liveness heuristics are
+invalid after 0035: a healthy runtime no longer creates a thread per frame.

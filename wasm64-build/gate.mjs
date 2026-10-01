@@ -30,12 +30,12 @@ if (!fs.existsSync(path.join(artifact, "bin/lean.js"))) {
 }
 const runner = path.join(root, "node-runner.mjs");
 
-function runLean(source, label) {
+function runLean(source, label, env = {}) {
   const work = fs.mkdtempSync(path.join(os.tmpdir(), "qed64-gate-"));
   fs.writeFileSync(path.join(work, "input.lean"), source);
   try {
     const stdout = execFileSync("node", [runner, "--artifact", artifact, "--work", work, "--", "/work/input.lean"],
-      { timeout: 240_000, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+      { timeout: 240_000, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, env: { ...process.env, ...env } });
     return { stdout, status: 0, timedOut: false };
   } catch (error) {
     // Since the keepalive guard (patch 0020) and the resident transport
@@ -103,6 +103,25 @@ const moduleFile = runLean(readProbe("module-file.lean"));
 const moduleOut = stripDebug(moduleFile.stdout);
 gate(/isModule=true/.test(moduleOut) && !/error/i.test(moduleOut), "`module` file: env.header.isModule = true",
   moduleFile.timedOut ? "CLI kept alive (expected)" : `exit ${moduleFile.status}`);
+
+// TASK-MANAGER STORM (patch 0035). Every shape of task traffic the language
+// server produces, at volume (wasm64-build/probes/task-storm.lean): a forAsync
+// chain of dedicated continuations, a fan-out released by one promise, a ladder
+// of dedicated tasks that each block on the next (more live at once than the
+// parked-thread cap; deadlocks if a dedicated task ever waits behind another),
+// pool tasks blocked on dedicated ones, waitAny. Under Emscripten every
+// pthread_create is a synchronous round trip to the main JS thread; the patch
+// hands dedicated tasks to parked threads, so the storm must also show reuse.
+const storm = runLean(readProbe("task-storm.lean"), "storm", { QED64_COUNT_PTHREADS: "1" });
+const stormOut = stripDebug(storm.stdout);
+const stormOk = /STORM OK dedicated=(\d+) checksum=(\d+)/.exec(stormOut);
+gate(!!stormOk, "task-manager storm completes (chain, fan-out, ladder beyond the park cap, pool waits, waitAny)",
+  stormOk ? `${stormOk[1]} dedicated tasks, checksum ${stormOk[2]}`
+          : (/STORM FAIL[^\n]*/.exec(stormOut)?.[0] ?? (storm.timedOut ? "no result before the timeout — deadlock?" : `exit ${storm.status}`)));
+const created = /\[pthreads\] created=(\d+)/.exec(stormOut);
+gate(!!stormOk && !!created && Number(created[1]) * 4 <= Number(stormOk[1]),
+  "task-manager storm: dedicated tasks reuse parked threads (at most 1 pthread created per 4 dedicated tasks)",
+  created ? `${created[1]} pthreads created for ${stormOk ? stormOk[1] : "?"} dedicated tasks` : "pthread count unavailable");
 gate(parseFixed, "THE PARSE GATE: lean_wasm_compile reports parser diagnostics",
   parseFixed ? "" : "persistent shell still swallows parse errors");
 
