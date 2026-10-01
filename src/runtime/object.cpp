@@ -768,6 +768,45 @@ class task_manager {
     condition_variable                            m_task_finished_cv;
     condition_variable                            m_dedicated_finished_cv;
     bool                                          m_shutting_down{false};
+#if defined(LEAN_EMSCRIPTEN)
+    /* Wasm (patch 0035, qed64 docs/HARDENING.md #52). Under Emscripten,
+       `pthread_create` from a pthread is a SYNCHRONOUS round trip to the
+       runtime's main JS thread, and the language server spawns a dedicated
+       task for every output message, request and request continuation —
+       hundreds of thread creations per edit, each made while holding
+       `m_mutex`. One round trip that never completes then froze every Lean
+       thread at its next task-manager call. Two changes, wasm only:
+       * no thread is ever created while `m_mutex` is held (the lock is
+         dropped around `lthread` construction; every caller of `enqueue_core`
+         already tolerates that, since a sync-priority task runs unlocked
+         inside it);
+       * a dedicated task is handed to a PARKED dedicated thread when one
+         exists, so steady-state churn creates no threads at all. Each parked
+         thread waits on its own slot and receives exactly one task at a time:
+         a dedicated task never waits behind another (they may block on each
+         other), exactly as with one fresh thread per task. A reused thread
+         looks fresh to its next task: the heartbeat limit a new thread would
+         inherit travels with the task, and the thread-local std streams are
+         reset to the process defaults (a task may leave a redirection
+         installed; a fresh thread would never see it).
+       At most `LEAN_MAX_PARKED_DEDICATED` threads stay parked; beyond that a
+       finished thread exits as before. A parked thread keeps its Emscripten
+       Worker, which std workers cannot use: 8 keeps the application thread,
+       a full std pool (hardware_concurrency, 14 on the reference machine) and
+       the parked threads within the 24 preallocated Workers, so parking never
+       forces a fresh Worker (a 49 MB glue load). Bursts beyond 8 concurrent
+       dedicated tasks still create threads (outside the lock), which then exit. */
+    struct dedicated_slot {
+        lean_task_object * m_task{nullptr};
+        size_t             m_max_heartbeat{0};
+        condition_variable m_cv;
+    };
+    static constexpr size_t                       LEAN_MAX_PARKED_DEDICATED = 8;
+    std::vector<dedicated_slot *>                 m_parked_dedicated;
+    // mirrors m_parked_dedicated.size() for lean_wasm_task_manager_parked_threads,
+    // which the host's main JS thread reads without taking m_mutex
+    std::atomic<unsigned>                         m_num_parked{0};
+#endif
 
     lean_task_object * dequeue() {
         lean_assert(m_queues_size != 0);
@@ -795,7 +834,7 @@ class task_manager {
             return;
         }
         if (prio > LEAN_MAX_PRIO) {
-            spawn_dedicated_worker(t);
+            spawn_dedicated_worker(lock, t);
             return;
         }
         if (prio > m_max_prio)
@@ -803,7 +842,7 @@ class task_manager {
         m_queues[prio].push_back(t);
         m_queues_size++;
         if (!m_idle_std_workers && m_std_workers.size() < m_max_std_workers)
-            spawn_worker();
+            spawn_worker(lock);
         else
             m_queue_cv.notify_one();
     }
@@ -828,49 +867,134 @@ class task_manager {
         lock.lock();
     }
 
-    void spawn_worker() {
+    void std_worker_main() {
+        save_stack_info(false);
+        unique_lock<mutex> lock(m_mutex);
+        m_idle_std_workers++;
+        while (true) {
+            if (m_queues_size == 0) {
+                if (m_shutting_down) {
+                    // We're done
+                    break;
+                }
+                // Wait for new tasks
+                m_queue_cv.wait(lock);
+                continue;
+            }
+
+            // There's work to be done.
+            // If we have reached the maximum number of standard workers (because the
+            // maximum was decreased by `task_get`), wait for someone else to become
+            // idle before picking up new work.
+            // But during shutdown, we skip this throttling:
+            // because the finalizer might have called m_queue_cv.notify_all() for the last
+            // time, we don't want to get stuck behind the wait().
+            if (!m_shutting_down &&
+                m_std_workers.size() - m_idle_std_workers >= m_max_std_workers) {
+                m_queue_cv.wait(lock);
+                continue;
+            }
+
+            lean_task_object * t = dequeue();
+            m_idle_std_workers--;
+            run_task(lock, t);
+            m_idle_std_workers++;
+            reset_heartbeat();
+        }
+        m_idle_std_workers--;
+    }
+
+#if defined(LEAN_EMSCRIPTEN)
+    void spawn_worker(unique_lock<mutex> & lock) {
+        if (m_shutting_down)
+            return;
+        // Reserve the worker's slot BEFORE dropping the lock: `m_std_workers.size()`
+        // must count it for every decision taken while it is being created
+        // (including its own throttle check, which may run before we relock).
+        size_t idx = m_std_workers.size();
+        m_std_workers.emplace_back(nullptr);
+        lock.unlock();
+        std::unique_ptr<lthread> w;
+        try {
+            w.reset(new lthread([this]() { std_worker_main(); }));
+        } catch (...) {
+            // The empty slot stays: erasing it would shift the slots of workers
+            // other threads are creating right now. A thread that could not be
+            // created is a fatal condition anyway (the exception propagates).
+            lock.lock();
+            throw;
+        }
+        lock.lock();
+        m_std_workers[idx] = std::move(w);
+    }
+
+    void spawn_dedicated_worker(unique_lock<mutex> & lock, lean_task_object * t) {
+        m_num_dedicated_workers++;
+        size_t max_heartbeat = get_max_heartbeat(); // what a fresh thread would inherit (mk_thread_proc)
+        if (!m_parked_dedicated.empty()) {
+            dedicated_slot * slot = m_parked_dedicated.back();
+            m_parked_dedicated.pop_back();
+            m_num_parked.store(m_parked_dedicated.size(), std::memory_order_relaxed);
+            slot->m_task          = t;
+            slot->m_max_heartbeat = max_heartbeat;
+            slot->m_cv.notify_one();
+            return;
+        }
+        lock.unlock();
+        try {
+            lthread([this, t]() { dedicated_worker_main(t); });
+            // `lthread` will be implicitly freed, which frees up its control resources but does not terminate the thread
+        } catch (...) {
+            lock.lock();
+            m_num_dedicated_workers--;
+            throw;
+        }
+        lock.lock();
+    }
+
+    void dedicated_worker_main(lean_task_object * first) {
+        save_stack_info(false);
+        unique_lock<mutex> lock(m_mutex);
+        lean_task_object * t = first;
+        while (true) {
+            run_task(lock, t);
+            m_num_dedicated_workers--;
+            m_dedicated_finished_cv.notify_all();
+            if (m_shutting_down || m_parked_dedicated.size() >= LEAN_MAX_PARKED_DEDICATED)
+                return;
+            dedicated_slot slot;
+            m_parked_dedicated.push_back(&slot);
+            m_num_parked.store(m_parked_dedicated.size(), std::memory_order_relaxed);
+            while (slot.m_task == nullptr && !m_shutting_down)
+                slot.m_cv.wait(lock);
+            if (slot.m_task == nullptr) {
+                // Shutdown while parked: unpark (a task, if handed over, is run first).
+                auto it = std::find(m_parked_dedicated.begin(), m_parked_dedicated.end(), &slot);
+                if (it != m_parked_dedicated.end())
+                    m_parked_dedicated.erase(it);
+                m_num_parked.store(m_parked_dedicated.size(), std::memory_order_relaxed);
+                return;
+            }
+            t = slot.m_task;
+            set_max_heartbeat(slot.m_max_heartbeat);
+            // The slot is already off the list, so nothing else refers to it while
+            // the lock is down. Releasing a stream the previous task left installed
+            // can run arbitrary code (finalizers that reach the task manager), so
+            // never with m_mutex held.
+            lock.unlock();
+            reset_thread_streams();
+            lock.lock();
+        }
+    }
+#else
+    void spawn_worker(unique_lock<mutex> &) {
         if (m_shutting_down)
             return;
 
-        m_std_workers.emplace_back(new lthread([this]() {
-            save_stack_info(false);
-            unique_lock<mutex> lock(m_mutex);
-            m_idle_std_workers++;
-            while (true) {
-                if (m_queues_size == 0) {
-                    if (m_shutting_down) {
-                        // We're done
-                        break;
-                    }
-                    // Wait for new tasks
-                    m_queue_cv.wait(lock);
-                    continue;
-                }
-
-                // There's work to be done.
-                // If we have reached the maximum number of standard workers (because the
-                // maximum was decreased by `task_get`), wait for someone else to become
-                // idle before picking up new work.
-                // But during shutdown, we skip this throttling:
-                // because the finalizer might have called m_queue_cv.notify_all() for the last
-                // time, we don't want to get stuck behind the wait().
-                if (!m_shutting_down &&
-                    m_std_workers.size() - m_idle_std_workers >= m_max_std_workers) {
-                    m_queue_cv.wait(lock);
-                    continue;
-                }
-
-                lean_task_object * t = dequeue();
-                m_idle_std_workers--;
-                run_task(lock, t);
-                m_idle_std_workers++;
-                reset_heartbeat();
-            }
-            m_idle_std_workers--;
-        }));
+        m_std_workers.emplace_back(new lthread([this]() { std_worker_main(); }));
     }
 
-    void spawn_dedicated_worker(lean_task_object * t) {
+    void spawn_dedicated_worker(unique_lock<mutex> &, lean_task_object * t) {
         m_num_dedicated_workers++;
         lthread([this, t]() {
             save_stack_info(false);
@@ -881,6 +1005,7 @@ class task_manager {
         });
         // `lthread` will be implicitly freed, which frees up its control resources but does not terminate the thread
     }
+#endif
 
     void run_task(unique_lock<mutex> & lock, lean_task_object * t) {
         lean_task_imp* imp = t->m_imp.load(std::memory_order_relaxed);
@@ -928,11 +1053,22 @@ class task_manager {
         mark_mt(v);
         t->m_value = v;
         lean_task_imp * imp = t->m_imp.exchange(nullptr, std::memory_order_relaxed);
+#if defined(LEAN_EMSCRIPTEN)
+        /* `handle_finished` may drop the lock to create threads (patch 0035), each a
+           synchronous round trip to the main JS thread: wake the threads already
+           waiting on `t` first, so they never wait on a dependent's thread
+           creation. Every wait on this condition variable re-checks `m_value`
+           under the lock, and nothing below reads `t`. */
+        m_task_finished_cv.notify_all();
+        handle_finished(lock, t, imp);
+        free_task_imp(imp);
+#else
         handle_finished(lock, t, imp);
         /* After the task has been finished and we propagated
            dependencies, we can release `imp` and keep just the value */
         free_task_imp(imp);
         m_task_finished_cv.notify_all();
+#endif
     }
 
     void handle_finished(unique_lock<mutex> & lock, lean_task_object * t, lean_task_imp * imp) {
@@ -974,6 +1110,10 @@ public:
             unique_lock<mutex> lock(m_mutex);
             m_shutting_down = true;
             // we can assume that `m_std_workers` will not be changed after this line
+#if defined(LEAN_EMSCRIPTEN)
+            for (dedicated_slot * slot : m_parked_dedicated)
+                slot->m_cv.notify_one();
+#endif
         }
         m_queue_cv.notify_all();
 #ifndef LEAN_EMSCRIPTEN
@@ -1031,12 +1171,21 @@ public:
         // see `Task.get`
         bool in_pool = g_current_task_object && g_current_task_object->m_imp.load(std::memory_order_relaxed)->m_prio <= LEAN_MAX_PRIO;
         if (g_current_task_object && g_current_task_object->m_imp.load(std::memory_order_relaxed)->m_prio == LEAN_SYNC_PRIO) {
+#if defined(LEAN_EMSCRIPTEN)
+            // printing is a synchronous proxy to the main JS thread: not under m_mutex (patch 0035)
+            lock.unlock();
             lean_panic("`Task.get` called from a `(sync := true)` task");
+            lock.lock();
+            if (t->m_value)
+                return;
+#else
+            lean_panic("`Task.get` called from a `(sync := true)` task");
+#endif
         }
         if (in_pool) {
             m_max_std_workers++;
             if (m_idle_std_workers == 0)
-                spawn_worker();
+                spawn_worker(lock);
             else
                 m_queue_cv.notify_one();
         }
@@ -1082,6 +1231,12 @@ public:
         return m_shutting_down;
     }
 
+#if defined(LEAN_EMSCRIPTEN)
+    unsigned parked_threads() const {
+        return m_num_parked.load(std::memory_order_relaxed);
+    }
+#endif
+
     uint8_t get_task_state(lean_task_object * t) {
         unique_lock<mutex> lock(m_mutex);
         lean_task_imp* imp = t->m_imp.load(std::memory_order_relaxed);
@@ -1098,6 +1253,17 @@ public:
 };
 
 static task_manager * g_task_manager = nullptr;
+
+#if defined(LEAN_EMSCRIPTEN)
+/* Dedicated threads parked in the task manager (patch 0035). They are live
+   pthreads holding an Emscripten Worker each, so a host gauge of live pthreads
+   (`Object.keys(PThread.pthreads).length`) counts them; subtract this to read
+   load. Lock-free: the host's main JS thread may call it while Lean threads
+   hold the task manager's lock. */
+extern "C" LEAN_EXPORT unsigned lean_wasm_task_manager_parked_threads() {
+    return g_task_manager ? g_task_manager->parked_threads() : 0;
+}
+#endif
 
 extern "C" LEAN_EXPORT void lean_init_task_manager_using(unsigned num_workers) {
     lean_assert(g_task_manager == nullptr);

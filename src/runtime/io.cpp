@@ -120,6 +120,18 @@ MK_THREAD_LOCAL_GET(object_ref, get_stream_current_stdin,  g_stream_stdin);
 MK_THREAD_LOCAL_GET(object_ref, get_stream_current_stdout, g_stream_stdout);
 MK_THREAD_LOCAL_GET(object_ref, get_stream_current_stderr, g_stream_stderr);
 
+/* A thread the task manager reuses for another task (wasm: parked dedicated
+   threads, patch 0035) must start that task with the streams a fresh thread
+   gets: the process defaults, not a redirection the previous task left
+   installed (`IO.setStdout` without restoring). Only streams this thread has
+   already materialized are touched. Releasing the previous stream may run
+   arbitrary code: callers must not hold the task manager's lock. */
+void reset_thread_streams() {
+    if (get_stream_current_stdin_tlocal)  *get_stream_current_stdin_tlocal  = object_ref(g_stream_stdin);
+    if (get_stream_current_stdout_tlocal) *get_stream_current_stdout_tlocal = object_ref(g_stream_stdout);
+    if (get_stream_current_stderr_tlocal) *get_stream_current_stderr_tlocal = object_ref(g_stream_stderr);
+}
+
 /* getStdin : BaseIO FS.Stream */
 extern "C" LEAN_EXPORT obj_res lean_get_stdin() {
     return get_stream_current_stdin().to_obj_arg();

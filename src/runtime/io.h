@@ -20,4 +20,6 @@ LEAN_EXPORT lean_obj_res mk_embedded_nul_error(b_lean_obj_arg str);
 LEAN_EXPORT lean_obj_res io_wrap_handle(FILE * hfile);
 void initialize_io();
 void finalize_io();
+/* Reset this thread's std streams to the process defaults (see io.cpp). */
+void reset_thread_streams();
 }
