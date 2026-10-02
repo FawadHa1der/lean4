@@ -138,6 +138,11 @@ globalThis.Module = {
       if (process.env.LEAN_COMPACTOR_RESERVE) {
         globalThis.Module.ENV.LEAN_COMPACTOR_RESERVE = process.env.LEAN_COMPACTOR_RESERVE;
       }
+      // Patch 0035: dedicated-thread parking is off by default (qed64 L9);
+      // the gate opts in to exercise the parking path.
+      if (process.env.LEAN_WASM_PARKED_DEDICATED) {
+        globalThis.Module.ENV.LEAN_WASM_PARKED_DEDICATED = process.env.LEAN_WASM_PARKED_DEDICATED;
+      }
       if (process.env.QED64_PROFILE_INIT) {
         globalThis.Module.ENV.QED64_PROFILE_INIT = process.env.QED64_PROFILE_INIT;
       }

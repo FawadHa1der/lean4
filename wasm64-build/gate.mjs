@@ -107,26 +107,30 @@ gate(/isModule=true/.test(moduleOut) && !/error/i.test(moduleOut), "`module` fil
 // TASK-MANAGER STORM (patch 0035). Every shape of task traffic the language
 // server produces, at volume (wasm64-build/probes/task-storm.lean): a forAsync
 // chain of dedicated continuations, a fan-out released by one promise, a ladder
-// of dedicated tasks that each block on the next (more live at once than the
-// parked-thread cap; deadlocks if a dedicated task ever waits behind another),
-// pool tasks blocked on dedicated ones, waitAny. Under Emscripten every
-// pthread_create is a synchronous round trip to the main JS thread; the patch
-// hands dedicated tasks to parked threads, so the storm must also show reuse.
-const storm = runLean(readProbe("task-storm.lean"), "storm", { QED64_COUNT_PTHREADS: "1" });
-const stormOut = stripDebug(storm.stdout);
-const stormOk = /STORM OK dedicated=(\d+) checksum=(\d+)/.exec(stormOut);
-gate(!!stormOk, "task-manager storm completes (chain, fan-out, ladder beyond the park cap, pool waits, waitAny)",
-  stormOk ? `${stormOk[1]} dedicated tasks, checksum ${stormOk[2]}`
-          : (/STORM FAIL[^\n]*/.exec(stormOut)?.[0] ?? (storm.timedOut ? "no result before the timeout — deadlock?" : `exit ${storm.status}`)));
-const created = /\[pthreads\] created=(\d+)/.exec(stormOut);
-gate(!!stormOk && !!created && Number(created[1]) * 4 <= Number(stormOk[1]),
-  "task-manager storm: dedicated tasks reuse parked threads (at most 1 pthread created per 4 dedicated tasks)",
-  created ? `${created[1]} pthreads created for ${stormOk ? stormOk[1] : "?"} dedicated tasks` : "pthread count unavailable");
-// A reused thread must look fresh: a stderr redirection one dedicated task leaves
-// installed must not capture a later task's output (native Lean: a fresh thread).
-const leaked = /LEAKED-STDERR bytes=(\d+)/.exec(stormOut);
-gate(!!leaked && leaked[1] === "0", "thread reuse: a later dedicated task does not inherit a leaked stream redirection",
-  leaked ? `${leaked[1]} bytes reached the leaked buffer` : "no result");
+// of dedicated tasks that each block on the next (deadlocks if a dedicated task
+// ever waits behind another), pool tasks blocked on dedicated ones, waitAny.
+// Threads are created with the task-manager lock released (under Emscripten
+// every pthread_create is a synchronous round trip to the main JS thread).
+// Run twice: the DEFAULT (no parking — qed64 L9) as served, and with parking
+// enabled (LEAN_WASM_PARKED_DEDICATED=8) so the opt-in path stays verified.
+const stormRun = (env, tag) => {
+  const r = runLean(readProbe("task-storm.lean"), "storm", { QED64_COUNT_PTHREADS: "1", ...env });
+  const out = stripDebug(r.stdout);
+  const ok = /STORM OK dedicated=(\d+) checksum=(\d+)/.exec(out);
+  const created = /\[pthreads\] created=(\d+)/.exec(out);
+  const leaked = /LEAKED-STDERR bytes=(\d+)/.exec(out);
+  gate(!!ok, `task-manager storm completes [${tag}] (chain, fan-out, ladder, pool waits, waitAny)`,
+    ok ? `${ok[1]} dedicated tasks, checksum ${ok[2]}${created ? `, ${created[1]} pthreads created` : ""}`
+       : (/STORM FAIL[^\n]*/.exec(out)?.[0] ?? (r.timedOut ? "no result before the timeout — deadlock?" : `exit ${r.status}`)));
+  gate(!!leaked && leaked[1] === "0", `[${tag}] a later dedicated task does not inherit a leaked stream redirection`,
+    leaked ? `${leaked[1]} bytes reached the leaked buffer` : "no result");
+  return { ok, created };
+};
+stormRun({}, "default: no parking");
+const parked = stormRun({ LEAN_WASM_PARKED_DEDICATED: "8" }, "parking 8");
+gate(!!parked.ok && !!parked.created && Number(parked.created[1]) * 4 <= Number(parked.ok[1]),
+  "[parking 8] dedicated tasks reuse parked threads (at most 1 pthread created per 4 dedicated tasks)",
+  parked.created ? `${parked.created[1]} pthreads created for ${parked.ok ? parked.ok[1] : "?"} dedicated tasks` : "pthread count unavailable");
 gate(parseFixed, "THE PARSE GATE: lean_wasm_compile reports parser diagnostics",
   parseFixed ? "" : "persistent shell still swallows parse errors");
 

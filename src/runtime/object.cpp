@@ -5,6 +5,7 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Author: Leonardo de Moura
 */
 #include <atomic>
+#include <cstdlib>
 #include <string>
 #include <algorithm>
 #include <vector>
@@ -789,19 +790,25 @@ class task_manager {
          inherit travels with the task, and the thread-local std streams are
          reset to the process defaults (a task may leave a redirection
          installed; a fresh thread would never see it).
-       At most `LEAN_MAX_PARKED_DEDICATED` threads stay parked; beyond that a
-       finished thread exits as before. A parked thread keeps its Emscripten
-       Worker, which std workers cannot use: 8 keeps the application thread,
-       a full std pool (hardware_concurrency, 14 on the reference machine) and
-       the parked threads within the 24 preallocated Workers, so parking never
-       forces a fresh Worker (a 49 MB glue load). Bursts beyond 8 concurrent
-       dedicated tasks still create threads (outside the lock), which then exit. */
+       At most `m_max_parked_dedicated` threads stay parked; beyond that a
+       finished thread exits as before. DEFAULT 0 = no parking: every finished
+       dedicated thread exits and its Worker returns to the pool idle, exactly
+       as before this patch. A parked thread is a Worker blocked in a futex
+       wait inside wasm; on a page reload Blink tears such a Worker down only
+       after a ~2 s forcible-termination grace, so its isolate overlaps the
+       next page's boot, and 8 parked threads were enough to exhaust the
+       renderer's shared pointer-compression cage ("V8 javascript OOM",
+       qed64 L9; 0 of 5 reloads crash without parking). The host may opt in
+       with the environment variable `LEAN_WASM_PARKED_DEDICATED=<n>` (read
+       once when the task manager is created, clamped to 64) after measuring
+       its reload behaviour; the lock-free thread creation does not depend on
+       it. */
     struct dedicated_slot {
         lean_task_object * m_task{nullptr};
         size_t             m_max_heartbeat{0};
         condition_variable m_cv;
     };
-    static constexpr size_t                       LEAN_MAX_PARKED_DEDICATED = 8;
+    size_t                                        m_max_parked_dedicated{0};
     std::vector<dedicated_slot *>                 m_parked_dedicated;
     // mirrors m_parked_dedicated.size() for lean_wasm_task_manager_parked_threads,
     // which the host's main JS thread reads without taking m_mutex
@@ -960,7 +967,7 @@ class task_manager {
             run_task(lock, t);
             m_num_dedicated_workers--;
             m_dedicated_finished_cv.notify_all();
-            if (m_shutting_down || m_parked_dedicated.size() >= LEAN_MAX_PARKED_DEDICATED)
+            if (m_shutting_down || m_parked_dedicated.size() >= m_max_parked_dedicated)
                 return;
             dedicated_slot slot;
             m_parked_dedicated.push_back(&slot);
@@ -1103,6 +1110,12 @@ class task_manager {
 public:
     task_manager(unsigned max_std_workers):
         m_max_std_workers(max_std_workers) {
+#if defined(LEAN_EMSCRIPTEN)
+        if (char const * env = getenv("LEAN_WASM_PARKED_DEDICATED")) {
+            unsigned long n = strtoul(env, nullptr, 10);
+            m_max_parked_dedicated = n > 64 ? 64 : static_cast<size_t>(n);
+        }
+#endif
     }
 
     ~task_manager() {
