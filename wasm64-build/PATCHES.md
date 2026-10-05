@@ -337,3 +337,25 @@ later proxies. The host-side periodic `checkMailbox` and a request-level
 liveness probe stay the primary defence; an stdout ring (mirroring 0031's stdin
 ring) would remove the per-frame proxy. Pool-change liveness heuristics are
 invalid after 0035: a healthy runtime no longer creates a thread per frame.
+
+## 0035b — wasm: dedicated-thread parking off by default (a8817d01f9)
+
+The promoted 0035 runtime crashed the renderer on page reload (qed64
+HARDENING #53, "L9": "V8 javascript OOM (Scavenger: semi-space copy)" in a
+DedicatedWorker ~2.2 s after the reload; 0035 crashed 4 of 6 trials, 0034 0 of
+5). A parked dedicated thread is a Worker blocked in a futex wait inside wasm;
+Blink tears such a Worker down only after a ~2 s forcible-termination grace,
+so 8 parked threads kept their isolates alive into the next page's boot
+(pool at ready: running 19 vs 11) and exhausted the renderer's shared
+pointer-compression cage.
+
+The park cap is `m_max_parked_dedicated`, DEFAULT 0: a finished dedicated
+thread exits and its Worker returns to the pool idle, as in 0034. Everything
+else of 0035 stays (thread creation outside `m_mutex`, notify before hand-off,
+the unlocked panic print, fresh streams and heartbeat on reuse, the parked
+export, which reads 0). Opt-in: environment variable
+`LEAN_WASM_PARKED_DEDICATED=<n>`, read once at task-manager creation, clamped
+to 64 — tunable without a new runtime or a snapshot rebake, but only after a
+reload-storm measurement. The gate runs the storm at the default (2,961
+pthreads: parking off) and at 8 (163: reuse works). Served as runtime
+`wasm64-3ab1c6a9da03bc29`; live reload storm 0 of 3 crashed (2026-10-02).
