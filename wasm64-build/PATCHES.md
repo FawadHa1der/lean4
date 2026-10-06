@@ -199,7 +199,7 @@ Gate the rebuild on: garbage input → ≥1 error diagnostic; the defect test in
     refresh forced by 0028's filterMap reshape. Runtime
     wasm64-dca2763359db27e7.
 
-## 0030 — wasm: tolerate legacy (non-`module`) oleans in the exported-level env cache
+## 0030 — wasm: tolerate legacy (non-`module`) oleans in the exported-level env cache (2d75ec14cf)
 
 The lean4game ecosystem (GameServer + every published game) is legacy-mode
 Lean; its oleans are self-contained. Under the wasm target (or
@@ -209,6 +209,29 @@ their parsers/initializers/tactics evaluate (the meta gate otherwise refuses).
 Both branches are unreachable in stock configurations. Enables the whole
 wasm64-lean4game port: game envs bake into snapshots and Runner-checked
 levels run in the browser.
+
+## 0031 — wasm: resident stdin ring + PROXY_TO_PTHREAD (browser64 transport port) (8407585c65)
+
+Runs the real `lean --worker` loop on the application pthread; stdin becomes a
+futex ring in shared memory (`lean_browser64_configure_input_ring`), stdout
+keeps the normal proxied path. `MAIN_THREAD_EM_ASM` for `lean_main`'s FS setup
+and the getenv shim; a once-guard (`lean_wasm_shell_mark_preinitialized`) so an
+embedder that pre-initialized the runtime can re-enter `main`, with the
+initializer and the task manager never finalized on wasm. EMBED-RUNTIME.md §4.
+
+## 0032 — wasm: resident header resolver, one environment registry, generated exports (992dc94b2d)
+
+`FileWorker.setupImports` is the only header resolver on wasm: the exact import
+set, else the smallest registered environment whose closure covers the header,
+else refused with one header diagnostic; snapshot loads publish into that one
+registry. `$/qed64/headerStatus` reports each resolution. Exports are generated
+from the build's own C (`gen-exports.py`). QED64's `minKernelPatch` floor.
+
+## 0033 — wasm: retire the host-pumped LSP entry points (37c3fc3adf)
+
+Deletes `lean_wasm_lsp_init` / `lean_wasm_lsp_send` and the pump session code
+(the code of 0018, 0023, 0027 and parts of 0021/0025): the resident transport
+(0031/0032) is the only transport.
 
 ## Upstream import: Lean v4.34.0 (branch `import/v4.34.0`)
 
