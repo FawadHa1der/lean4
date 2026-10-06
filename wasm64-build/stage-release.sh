@@ -351,7 +351,7 @@ Next (RELEASE.md): commit the record, tag it, then the owner publishes —
   (cd $REL && find . -type f | sed 's|^\./||' | xargs -n 25 gh release upload $ID --repo FawadHa1der/lean4)   # flat, by basename
   gh release edit $ID --repo FawadHa1der/lean4 --draft=false
   # R2 (served layout; objects, then manifests, then release.json — js/formats/HOSTING.md):
-  rclone copy $REL qed64-r2:qed64-artifacts/lean4-wasm64/$ID/ --immutable --checksum --filter '- *.json' --filter '- SHA256SUMS' --header-upload "Content-Type: application/octet-stream" --transfers 4 --s3-chunk-size 64M
-  rclone copy $REL qed64-r2:qed64-artifacts/lean4-wasm64/$ID/ --immutable --checksum --filter '- /release.json' --filter '+ *.json' --filter '+ /SHA256SUMS' --filter '- *' --header-upload "Content-Type: application/json"
-  rclone copyto $REL/release.json qed64-r2:qed64-artifacts/lean4-wasm64/$ID/release.json --immutable --header-upload "Content-Type: application/json"
+  rclone copy $REL qed64-r2:qed64-artifacts/lean4-wasm64/$ID/ --immutable --s3-no-check-bucket --checksum --filter '- *.json' --filter '- SHA256SUMS' --header-upload "Content-Type: application/octet-stream" --transfers 4 --s3-chunk-size 64M
+  rclone copy $REL qed64-r2:qed64-artifacts/lean4-wasm64/$ID/ --immutable --s3-no-check-bucket --checksum --filter '- /release.json' --filter '+ *.json' --filter '+ /SHA256SUMS' --filter '- *' --header-upload "Content-Type: application/json"
+  rclone copyto $REL/release.json qed64-r2:qed64-artifacts/lean4-wasm64/$ID/release.json --immutable --s3-no-check-bucket --header-upload "Content-Type: application/json"
 EOF

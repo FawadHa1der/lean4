@@ -103,20 +103,22 @@ release.
 The R2 prefix holds only immutable names (the release's own files; the mutable
 per-site pointers — `profiles/index.json`, `snapshots/index.json`, the site's
 choice of runtime — stay in the site's prefix), so it is uploaded with
-`rclone copy --immutable --checksum`, never `sync`, digest-named objects first
+`rclone copy --immutable --s3-no-check-bucket --checksum`, never `sync`, digest-named objects first
 and `release.json` last:
 
 ```bash
 R2=qed64-r2:qed64-artifacts/lean4-wasm64/<id>/
-rclone copy <release dir> $R2 --immutable --checksum --filter '- *.json' --filter '- SHA256SUMS' \
+rclone copy <release dir> $R2 --immutable --s3-no-check-bucket --checksum --filter '- *.json' --filter '- SHA256SUMS' \
   --header-upload "Content-Type: application/octet-stream" --transfers 4 --s3-chunk-size 64M
-rclone copy <release dir> $R2 --immutable --checksum --filter '- /release.json' --filter '+ *.json' \
+rclone copy <release dir> $R2 --immutable --s3-no-check-bucket --checksum --filter '- /release.json' --filter '+ *.json' \
   --filter '+ /SHA256SUMS' --filter '- *' --header-upload "Content-Type: application/json"
-rclone copyto <release dir>/release.json ${R2}release.json --immutable --header-upload "Content-Type: application/json"
+rclone copyto <release dir>/release.json ${R2}release.json --immutable --s3-no-check-bucket --header-upload "Content-Type: application/json"
 ```
 
 (rclone applies filter rules in order, first match wins: hence `--filter` rather
-than mixed `--include`/`--exclude`.
+than mixed `--include`/`--exclude`. `--s3-no-check-bucket`: an object-scoped R2
+token may not create buckets, and without it rclone tries to — a single-file
+`copyto` then fails with 403 AccessDenied on CreateBucket.
 
 `SHA256SUMS` rides the JSON pass only for simplicity; tools read it, not
 browsers. An object uploaded earlier with a wrong type keeps it — `--checksum`
