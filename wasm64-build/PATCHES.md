@@ -382,3 +382,65 @@ to 64 — tunable without a new runtime or a snapshot rebake, but only after a
 reload-storm measurement. The gate runs the storm at the default (2,961
 pthreads: parking off) and at 8 (163: reuse works). Served as runtime
 `wasm64-3ab1c6a9da03bc29`; live reload storm 0 of 3 crashed (2026-10-02).
+
+## 0036 — wasm: deep recursion fails with an error at the engine's stack limit (41ec56530d)
+
+A proof that recursed deeply killed its thread in a browser (qed64 HARDENING
+#60, found by lean4game): `RangeError: Maximum call stack size exceeded` in a
+pthread Worker, and the session never answered again. Wasm frames run on the
+stack of the thread running them — the engine's, not the shadow stack in
+linear memory that `check_stack` measures and that deep recursion barely
+moves. A Chrome Worker gets 500 KiB of it (V8's fixed worker limit; Firefox
+about 1 MiB, Node 4 MiB), while Lean's guards assume the 8 MiB of the pthread
+attribute: Meta's `decide` on `∀ n m : Fin 40, n * m = m * n` and the
+kernel's on `Fin 120` (`decide +kernel`) both overflowed it.
+
+No engine reports how much stack is left, but a call with N arguments needs N
+slots up front in every tier, so `Reflect.apply` with a fixed argument array
+throws (RangeError in V8 and JSC, InternalError in SpiderMonkey) exactly when
+less than that is free. `engine_stack_has_headroom()` (stackinfo.cpp) runs
+that probe — 16384 slots, 128 KiB of headroom, ~4 µs; the sink takes a formal
+parameter so no arguments object is built — at the two places deep recursion
+passes:
+
+- the kernel's depth guard `scope_rec_depth` probes on a thread's outermost
+  level and then every 16 levels deeper (the next probe depth falls back as
+  the recursion unwinds, since a frame above a probed one has more room), so
+  recursion that stays within 16 levels costs nothing. It throws a plain
+  `exception`, reported as `(kernel) the WebAssembly engine's stack is
+  exhausted: …` — not `deepRecursion`, whose advice (raise `maxRecDepth`)
+  would not help;
+- `Core.checkSystem` (CoreM.lean) calls the new `@[extern
+  "lean_wasm_native_stack_ok"] Core.nativeStackOk` first, which probes on
+  every 16th call of a thread (Lean code has no depth to go by), and throws
+  "maximum recursion depth has been reached: the WebAssembly runtime's stack
+  is exhausted (…; raising maxRecDepth does not help, …)", tagged
+  `runtime.maxRecDepth` so it is a runtime exception that no `try`/`first`
+  catches and retries.
+
+Native builds: no probe; the extern returns `true`. `LEAN_WASM_STACK_PROBE_SLOTS`
+overrides the headroom (0 disables the probe), for calibration; the
+node-runner forwards it. Also `get_stack_size(main)` on Emscripten is now
+`base - end` (the stack grows down; it was negative).
+
+The CoreM change adds two functions and no stored type. A runtime-only release
+pairs this runtime with the v4.34.0 import's stdlib and Mathlib oleans: their
+`Lean.CoreM` lacks `nativeStackOk` and `checkNativeStack` and holds the old
+`checkSystem` body until the next full import. Harmless: only compiled code
+calls them (native dispatch wins, as for 0034); interpreted callers of
+`checkSystem` reach the compiled one, which probes; naming
+`Lean.Core.nativeStackOk` in user code reports an unknown constant.
+
+Recursion that passes neither checkpoint (the IR interpreter's own recursion,
+some expression traversals) can still overflow, as native Lean can abort
+there. The node-runner knob `LEAN4_WASM64_PTHREAD_STACK_MB=0.68` gives the
+pthreads Chrome's budget (Node keeps ~192 KiB back); the gate runs both probes
+(`js/probes/deep-recursion*.lean`) at it — each must end in Lean's error with
+the thread alive — and the Meta one at the default stack, where it must still
+check. Measured 2026-10-06 (host Node 26.3): the same holds with the v4.34.0
+Mathlib packs (`import Mathlib.Data.ZMod.Defs`, Meta and kernel), where 0035b
+dies with the RangeError; the overhead on kernel-heavy (`decide +kernel`),
+Meta-heavy (`decide`, `simp`, `omega`) and Mathlib-tactic (`ring`, `linarith`,
+`norm_num`, `positivity`) files is within run-to-run noise (≤ 3%, against 0035b
+and against `LEAN_WASM_STACK_PROBE_SLOTS=0`). Of the stdlib's generated C only
+`Lean/CoreM.c` changed (names added, none removed or renumbered).

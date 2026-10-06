@@ -6,10 +6,10 @@ Tools for the Lean 4 wasm64 (Memory64) toolchain built from
 produce the artifacts a release is made of (chunked runtime, library packs).
 
 Node ≥ 24, no dependencies. The package version is the release it was cut
-with: `4.34.0-a8817d0` belongs to release `lean-v4.34.0-a8817d0`.
+with: `4.34.0-41ec565` belongs to release `lean-v4.34.0-41ec565`.
 
 ```bash
-npm install https://github.com/FawadHa1der/lean4/releases/download/lean-v4.34.0-a8817d0/lean4-wasm64-4.34.0-a8817d0.tgz
+npm install https://github.com/FawadHa1der/lean4/releases/download/lean-v4.34.0-41ec565/lean4-wasm64-4.34.0-41ec565.tgz
 ```
 
 (It is not on the npm registry: install it from a release, then `npx
@@ -19,8 +19,8 @@ lean4-wasm64 …` runs the local copy.)
 
 ```bash
 # the runtime as an artifact dir: <out>/bin/lean.js, lean.wasm (rebuilt from verified chunks)
-npx lean4-wasm64 fetch --from https://github.com/FawadHa1der/lean4/releases/download/lean-v4.34.0-a8817d0/ \
-  --id lean-v4.34.0-a8817d0 --digest sha256:<the digest in the release notes> --out toolchain --only runtime,lean-lib
+npx lean4-wasm64 fetch --from https://github.com/FawadHa1der/lean4/releases/download/lean-v4.34.0-41ec565/ \
+  --id lean-v4.34.0-41ec565 --digest sha256:<the digest in the release notes> --out toolchain --only runtime,lean-lib
 # lean-lib = the runtime build's own lib/lean (Init, Std, Lean, Lake): what run/gate/probe expect
 npx lean4-wasm64 unpack --manifest toolchain/profiles/lean-lib.manifest.json --out toolchain/lib/lean
 echo 'theorem t : 2 + 2 = 4 := rfl' > t.lean

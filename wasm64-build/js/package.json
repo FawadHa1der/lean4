@@ -1,6 +1,6 @@
 {
   "name": "lean4-wasm64",
-  "version": "4.34.0-a8817d0",
+  "version": "4.34.0-41ec565",
   "description": "Lean 4 on WebAssembly Memory64: fetch, verify, run, gate, pack and chunk the releases of the FawadHa1der/lean4 qed64-wasm64 toolchain. Node built-ins only.",
   "license": "Apache-2.0",
   "repository": {
