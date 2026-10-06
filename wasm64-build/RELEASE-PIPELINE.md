@@ -14,12 +14,14 @@ owns the lanes inside its own repository. This file is the map and the order.
  [K4] gate     numBits / proof / error / PARSE / resident import-release.sh gate     ~8 min
  [K5] native64 same commit, native linux, wasm64 target  native64.sh                ~1 h
  [K6] mathlib  Mathlib@vX.Y.Z with [K5], essential tree  mathlib-tree.sh            hours
+ [K7] release  stage + record + verify lean-vX.Y.Z-<k7>  import-release.sh release  ~20 min (RELEASE.md)
                        ▼
  [Q]  QED64        packs → manifests → umbrella → bump-chain.sh stage-artifact → test pyramid → promote
  [G]  lean4game    closure sync → build-from-source.sh (core,trees,compat,games,bake,bundle) → cypress
                        ▼
  [S]  SHIP GATE — run by the repository owner, never by the pipeline:
-        git push (kernel line first), upload-artifacts.sh, deploy-app.sh — per app
+        git push (kernel line + release tag first), gh release / rclone of the release,
+        upload-artifacts.sh, deploy-app.sh — per app
 ```
 
 Everything up to [S] is local and reversible. Nothing in this pipeline pushes,
@@ -80,7 +82,14 @@ wasm64-build/import-release.sh drift v4.34.0
 wasm64-build/native64.sh v4.34.0                # after build: the compiler that writes every shipped olean
 wasm64-build/mathlib-tree.sh v4.34.0            # Mathlib@v4.34.0 → <build dir>/mathlib/{essential,extra}-tree
 wasm64-build/import-release.sh accept v4.34.0   # LOCAL fast-forward of qed64-wasm64; prints the push command
+wasm64-build/import-release.sh release v4.34.0  # stage + verify the release; prints record/tag/publish commands
 ```
+
+The release (`RELEASE.md`) is what the apps consume: runtime chunks, the
+three library packs (`js/packs.json` — the pack cut moved here from QED64's
+`import-packs.sh`, with the same mounts, roots and release strings), the
+native compiler, module lists and the `lean4-wasm64` tools, each byte under a
+digest in `release.json`.
 
 `mathlib-tree.sh` builds one Lake workspace and stages two trees:
 `essential-tree` = import closure of the three profile roots + `CORE_ROOTS`
@@ -140,11 +149,14 @@ bake prints them); `LEAN_VERSION` in `build-from-source.sh` is bumped.
 ## A kernel-only fix after an import
 
 A fix that touches the runtime but not what the packs contain (v4.34.0:
-patch 0034) is built in its own dir (`QED64_BUILD_DIR=<K'> wasm64-build/build.sh`,
-warm ccache; a change to `Environment.lean` re-elaborates the whole stdlib,
-~1 h), gated (`gate.mjs --artifact <K'>/build/stage1` — it now also asks the
-environment for its own facts: `isModule`, default privacy, meta attributes),
-and handed to QED64 as a KERNEL-ONLY bump: `bump-chain.sh stage-artifact`
+patch 0034) is built in its own dir (`QED64_BUILD_DIR=<K'> wasm64-build/build.sh`
+from a clean, committed tree — it then records `BUILT-COMMIT`; warm ccache; a
+change to `Environment.lean` re-elaborates the whole stdlib, ~1 h), gated
+(`import-release.sh gate-dir <K'>`, which writes `GATE-PASSED`; the gate also
+asks the environment for its own facts: `isModule`, default privacy, meta
+attributes), released (`import-release.sh release vX.Y.Z --runtime <K'>`: the
+runtime and its `lean-lib` from K', the browser packs, native64 and lists from
+the import — RELEASE.md), and handed to QED64 as a KERNEL-ONLY bump: `bump-chain.sh stage-artifact`
 with `QED64_ARTIFACT=<K'>/build/stage1` and the existing lib tree (no
 `import-packs.sh`: oleans and umbrella are reused), rebake, pyramid,
 promote (~500 MB upload: runtime chunks + two snapshots). lean4game
@@ -154,7 +166,8 @@ modules lag the compiled code until the next full import.
 ## Ship gate (repository owner)
 
 ```sh
-git -C wasm64-lean-kernel push origin qed64-wasm64       # first: the apps' pins must name a pushed commit
+git -C wasm64-lean-kernel push origin qed64-wasm64 <release id>   # first: the apps' pins must name a pushed commit
+# the release: gh release create/upload/edit + rclone copy --immutable (printed by `import-release.sh release`)
 # QED64
 scripts/upload-artifacts.sh && scripts/deploy-app.sh && git push
 # lean4game

@@ -1,0 +1,64 @@
+{
+  "schema": "lean4-wasm64.packs/v1",
+  "about": "The library packs of a release and how each is cut (RELEASE.md). Read by pack-set.mjs. `build`: which build directory holds the source — `import` (the release's import build: its wasm64 stage1 lib/lean, native64, the Mathlib trees) or `runtime` (the released runtime's own build, which differs from the import after a kernel-only fix). `compiler`: whose compiler wrote the oleans — `wasm` (that build's wasm64 stage1, its BUILT-COMMIT) or `native64` (the import's NATIVE-COMMIT). Mount points, roots and release strings of lean-core and mathlib-essential are those QED64 has served since v4.33; re-packing the v4.34.0 import with them reproduces the served raw packs byte for byte. Placeholders: {leanVersion}, {buildId} and {commit12} (of the pack's build directory), {mathlib7}. Checks, refused before packing: every root has its <root path>.olean in the tree (`include`: in the selection); `excludesInit`: the tree holds no Init; `disjointFrom`: no .olean path in both trees; `modulesList` (relative to the import build directory, one module per line, blank and # lines ignored — the selection mathlib-tree.sh wrote): exactly the modules of the tree. Checked after packing: `closedOver` (pack ids, [] = self-closed) — every import of every module is a module of this pack or of those packs, whose manifests are read from --out (packed earlier in the same run — so listed before it here — or copied there first).",
+  "packs": [
+    {
+      "id": "lean-core",
+      "build": "import",
+      "from": "build/stage1/lib/lean",
+      "include": ["Init/", "Init.olean", "Init.olean.server", "Init.olean.private", "Init.ir", "Init.ir.sig"],
+      "mount": "/lib/lean/library",
+      "roots": ["Init"],
+      "urlPrefix": "/profiles/",
+      "release": "lean-core-{leanVersion}-{buildId}",
+      "compiler": "wasm",
+      "closedOver": [],
+      "about": "The Init closure, for browsers. Std and Lean travel in mathlib-essential; Lake is not mounted in browsers."
+    },
+    {
+      "id": "mathlib-essential",
+      "build": "import",
+      "from": "mathlib/essential-tree",
+      "mount": "/lib/lean/library",
+      "roots": [
+        "Mathlib.Analysis.SpecialFunctions.Complex.Circle",
+        "Mathlib.Geometry.Manifold.Instances.Sphere",
+        "Mathlib.Geometry.Manifold.IsManifold.Basic"
+      ],
+      "urlPrefix": "/profiles/",
+      "release": "mathlib-essential-{mathlib7}-{buildId}",
+      "compiler": "native64",
+      "excludesInit": true,
+      "modulesList": "mathlib/essential-modules.txt",
+      "closedOver": ["lean-core"],
+      "about": "Import closure of the roots plus Lean and Std, minus Init (mathlib-tree.sh); written by native64."
+    },
+    {
+      "id": "mathlib-game-extra",
+      "build": "import",
+      "from": "mathlib/extra-tree",
+      "mount": "/lib/lean/library",
+      "roots": [],
+      "urlPrefix": "/profiles/",
+      "release": "mathlib-game-extra-{mathlib7}-{buildId}",
+      "compiler": "native64",
+      "excludesInit": true,
+      "disjointFrom": "mathlib-essential",
+      "modulesList": "mathlib/extra-modules.txt",
+      "closedOver": ["lean-core", "mathlib-essential"],
+      "about": "Closure of the games' roots (mathlib-extra-roots.txt) minus mathlib-essential minus Init: an additive pack only the games mount."
+    },
+    {
+      "id": "lean-lib",
+      "build": "runtime",
+      "from": "build/stage1/lib/lean",
+      "mount": "/lib/lean",
+      "roots": ["Init", "Std", "Lean", "Lake", "LakeMain", "LeanChecker", "LeanIR", "Leanc"],
+      "urlPrefix": "/profiles/",
+      "release": "lean-lib-{leanVersion}-{buildId}",
+      "compiler": "wasm",
+      "closedOver": [],
+      "about": "The released runtime's own lib/lean (every olean and IR facet of Init, Std, Lean, Lake, …): the tree the release gate ran on. For Node: `lean4-wasm64 unpack` it into <artifact>/lib/lean for run/gate/probe, snapshot bakes and Lake's oleans. Browsers mount lean-core + mathlib-essential instead."
+    }
+  ]
+}

@@ -7,7 +7,11 @@
 #   wasm64-build/import-release.sh drift   <tag>     # files BOTH sides changed: the semantic-drift review list
 #   wasm64-build/import-release.sh build   <tag>     # Docker stage1 build into ../wasm64-lean-kernel-build-<tag>
 #   wasm64-build/import-release.sh gate    <tag>     # release gate on that artifact (writes GATE-PASSED)
+#   wasm64-build/import-release.sh gate-dir <build dir>
+#                                                    # the same gate on any build dir (a kernel-only fix)
 #   wasm64-build/import-release.sh accept  <tag>     # fast-forward qed64-wasm64 to import/<tag> (LOCAL only)
+#   wasm64-build/import-release.sh release <tag> [stage-release.sh options]
+#                                                    # stage + verify the lean4-wasm64 release (RELEASE.md)
 #   wasm64-build/import-release.sh status  [<tag>]   # where an import stands
 #   wasm64-build/import-release.sh run     <tag>     # import -> build -> gate, stopping at the first thing
 #                                                    # that needs judgment (conflicts, build break, gate fail)
@@ -33,11 +37,15 @@ BATTERIES_URL=https://github.com/leanprover-community/batteries
 if ! git --version >/dev/null 2>&1 && [ -d /Library/Developer/CommandLineTools ]; then
   export DEVELOPER_DIR=/Library/Developer/CommandLineTools
 fi
+export LEAN4_WASM64_CALLER_CWD="$PWD"   # stage-release.sh resolves relative paths against it
 cd "$REPO"
 
 say()  { printf '%s\n' "$*"; }
-die()  { printf 'import-release: %s\n' "$*" >&2; exit "${2:-1}"; }
-build_dir() { printf '%s' "${QED64_BUILD_DIR:-$REPO/../wasm64-lean-kernel-build-$1}"; }
+die()  { printf 'import-release: %s\n' "$1" >&2; exit "${2:-1}"; }
+# a relative QED64_BUILD_DIR or gate-dir argument is the caller's (we cd to the repo)
+abs_path() { case "$1" in /*) printf '%s' "$1" ;; *) printf '%s' "$LEAN4_WASM64_CALLER_CWD/$1" ;; esac; }
+build_dir() { abs_path "${QED64_BUILD_DIR:-$REPO/../wasm64-lean-kernel-build-$1}"; }
+SRC_PATHS=(src stage0 docker-wasm64 CMakeLists.txt CMakePresets.json wasm64-build/gen-exports.py)
 need_tag() { [[ "${1:-}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "expected a stable tag like v4.34.0, got '${1:-}'" 2; }
 
 ensure_upstream() {
@@ -82,7 +90,7 @@ cmd_watch() {
 # was built (docs and pipeline scripts may move on).
 built_from_head() {
   local bd; bd="$(build_dir "$1")"
-  [ -f "$bd/BUILT-COMMIT" ] && git diff --quiet "$(cat "$bd/BUILT-COMMIT")" "import/$1" -- src stage0 docker-wasm64 CMakeLists.txt CMakePresets.json
+  [ -f "$bd/BUILT-COMMIT" ] && git diff --quiet "$(cat "$bd/BUILT-COMMIT")" "import/$1" -- "${SRC_PATHS[@]}"
 }
 
 both_sides() { # files changed on the line AND upstream since their merge base
@@ -150,25 +158,44 @@ cmd_build() {
   fi
   # a rebuild can 'succeed' around a failed target and leave a stale binary
   if grep -qE "^make.*Error [0-9]" "$log"; then die "make reported errors — $log" 30; fi
-  git rev-parse HEAD > "$bd/BUILT-COMMIT"
+  # build.sh records BUILT-COMMIT only for a build of clean, unmoving sources
+  [ -f "$bd/BUILT-COMMIT" ] || die "the sources were dirty or moved during the build: no BUILT-COMMIT — commit and rebuild" 30
   python3 "$REPO/wasm64-build/gen-exports.py" "$bd/build/stage1/lib/temp" "$REPO/src" --check
   say "built $(git rev-parse --short HEAD): buildId wasm64-$(shasum -a 256 "$bd/build/stage1/bin/lean.wasm" | cut -c1-16)"
 }
 
-cmd_gate() {
-  need_tag "$1"; local bd; bd="$(build_dir "$1")"
+# Gate the artifact of build dir $1 (BUILT-COMMIT names what was built). GATE-PASSED
+# = BUILT-COMMIT + sha256(lean.wasm), written only on a pass and removed first, so a
+# later failed or interrupted gate never leaves an earlier pass standing.
+gate_build_dir() {
+  local bd="$1" log="$1/gate.log"
   [ -f "$bd/build/stage1/bin/lean.wasm" ] || die "no artifact in $bd — build first" 31
-  built_from_head "$1" || die "sources changed since the artifact was built — rebuild" 31
-  local log="$bd/gate.log"
+  [ -f "$bd/BUILT-COMMIT" ] || die "$bd/BUILT-COMMIT missing: not a recorded build" 31
+  rm -f "$bd/GATE-PASSED"
   # ~8 min: the two one-shot CLI checks are judged by output and end in a bounded timeout
-  if node --stack-size=8192 "$REPO/wasm64-build/gate.mjs" --artifact "$bd/build/stage1" >"$log" 2>&1 && grep -q "GATE PASSED" "$log"; then
+  if node --stack-size=8192 "$REPO/wasm64-build/js/gate.mjs" --artifact "$bd/build/stage1" >"$log" 2>&1 && grep -q "GATE PASSED" "$log"; then
     grep -E "^(FAIL| ok)" "$log" || true
-    { git rev-parse "import/$1"; shasum -a 256 "$bd/build/stage1/bin/lean.wasm" | cut -c1-64; } > "$bd/GATE-PASSED"
+    { tr -d ' \n\r' < "$bd/BUILT-COMMIT"; echo; shasum -a 256 "$bd/build/stage1/bin/lean.wasm" | cut -c1-64; } > "$bd/GATE-PASSED"
     say "GATE PASSED"
   else
     grep -E "^(FAIL| ok)" "$log" || tail -20 "$log"
     die "gate failed — $log" 31
   fi
+}
+
+cmd_gate() {
+  need_tag "$1"; local bd; bd="$(build_dir "$1")"
+  built_from_head "$1" || die "sources changed since the artifact was built — rebuild" 31
+  gate_build_dir "$bd"
+}
+
+cmd_gate_dir() {
+  local bd; bd="$(abs_path "${1:-}")"; [ -n "${1:-}" ] && [ -d "$bd" ] || die "usage: $0 gate-dir <build dir>" 2
+  bd="$(cd "$bd" && pwd)"
+  [ -f "$bd/BUILT-COMMIT" ] || die "$bd/BUILT-COMMIT missing (build.sh writes it after a build from a clean tree)" 31
+  git diff --quiet "$(cat "$bd/BUILT-COMMIT")" HEAD -- "${SRC_PATHS[@]}" \
+    || die "the sources at HEAD differ from the build's commit — gate a build of HEAD" 31
+  gate_build_dir "$bd"
 }
 
 cmd_accept() {
@@ -210,8 +237,10 @@ case "${1:-}" in
   drift)  cmd_drift "${2:-}" ;;
   build)  cmd_build "${2:-}" ;;
   gate)   cmd_gate "${2:-}" ;;
+  gate-dir) cmd_gate_dir "${2:-}" ;;
   accept) cmd_accept "${2:-}" ;;
   status) cmd_status "${2:-}" ;;
   run)    cmd_run "${2:-}" ;;
-  *) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  release) shift; exec "$REPO/wasm64-build/stage-release.sh" "$@" ;;
+  *) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

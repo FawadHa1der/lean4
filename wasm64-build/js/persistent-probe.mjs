@@ -7,27 +7,27 @@
 // a second compile reuses the environment (much faster), and a broken proof
 // surfaces an error diagnostic without killing the runtime.
 //
-// Usage: node pipeline/snapshot/persistent-probe.mjs [--artifact <dir>]
+// Usage: node persistent-probe.mjs --artifact <dir>   (or $LEAN4_WASM64_ARTIFACT)
 
 import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
 import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
 
-const here = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.resolve(here, "../..");
 function arg(name, fallback) {
   const i = process.argv.indexOf(`--${name}`);
   return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
 }
-const builtHere = path.join(repoRoot, "pipeline/toolchain/work/build/stage1");
-const artifactDir = path.resolve(
-  arg("artifact", process.env.QED64_LEAN_ARTIFACT ||
-    (fs.existsSync(path.join(builtHere, "bin/lean.js"))
-      ? builtHere
-      : path.join(repoRoot, "../../wasm64-lean-codex/experiments/lean4-wasm64-build/stage1"))),
-);
+if (process.argv.includes("--help") || process.argv.includes("-h")) {
+  console.log("usage: persistent-probe.mjs --artifact <dir>   (or $LEAN4_WASM64_ARTIFACT)\nBoot the runtime persistently and drive lean_wasm_compile (the browser's one-shot path). run as: lean4-wasm64 probe   (or: node --stack-size=8192 persistent-probe.mjs)");
+  process.exit(0);
+}
+const artifactArg = arg("artifact", process.env.LEAN4_WASM64_ARTIFACT || process.env.QED64_LEAN_ARTIFACT);
+if (!artifactArg) {
+  console.error("error: no runtime artifact — pass --artifact <dir> or set LEAN4_WASM64_ARTIFACT");
+  process.exit(2);
+}
+const artifactDir = path.resolve(artifactArg);
 const leanJs = path.join(artifactDir, "bin/lean.js");
 const libLean = path.join(artifactDir, "lib/lean");
 

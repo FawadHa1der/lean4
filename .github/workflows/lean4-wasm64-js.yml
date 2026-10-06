@@ -1,0 +1,48 @@
+# The lean4-wasm64 package (wasm64-build/js): unit tests and package contents.
+# Branch-scoped to the wasm64 line and to wasm64-build/ changes; minutes, not
+# the hours of Lean's own CI. Node built-ins only: no install step.
+name: lean4-wasm64 package
+
+on:
+  push:
+    branches: [qed64-wasm64]
+    paths: ["wasm64-build/**", ".github/workflows/lean4-wasm64-js.yml"]
+  pull_request:
+    branches: [qed64-wasm64]
+    paths: ["wasm64-build/**", ".github/workflows/lean4-wasm64-js.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        node: ["24", "26"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: wasm64-build
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Syntax
+        working-directory: wasm64-build/js
+        run: for f in *.mjs test/*.mjs; do node --check "$f"; done
+      - name: Unit tests
+        working-directory: wasm64-build/js
+        run: node --test 'test/*.test.mjs'
+      - name: Package contents
+        working-directory: wasm64-build/js
+        run: |
+          npm pack --dry-run --json > /tmp/pack.json
+          node -e '
+            const files = JSON.parse(require("fs").readFileSync("/tmp/pack.json", "utf8"))[0].files.map((f) => f.path);
+            const need = ["cli.mjs", "node-runner.mjs", "gate.mjs", "fetch-release.mjs", "verify-release.mjs", "release.mjs", "pack-set.mjs", "packs.json", "formats/README.md", "formats/HOSTING.md", "probes/task-storm.lean"];
+            const missing = need.filter((n) => !files.includes(n));
+            const tests = files.filter((f) => f.startsWith("test/"));
+            if (missing.length || tests.length) { console.error({ missing, tests }); process.exit(1); }
+            console.log(files.length + " files in the package");'
