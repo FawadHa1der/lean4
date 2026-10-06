@@ -166,6 +166,24 @@ const parked = await stormRun({ LEAN_WASM_PARKED_DEDICATED: "8" }, "parking 8");
 gate(!!parked.ok && !!parked.created && Number(parked.created[1]) * 4 <= Number(parked.ok[1]),
   "[parking 8] dedicated tasks reuse parked threads (at most 1 pthread created per 4 dedicated tasks)",
   parked.created ? `${parked.created[1]} pthreads created for ${parked.ok ? parked.ok[1] : "?"} dedicated tasks` : "pthread count unavailable");
+// DEEP RECURSION AT A BROWSER'S STACK (patch 0036, qed64 HARDENING #60). Wasm frames run on the
+// engine's stack — a Chrome Worker gets 500 KiB, Node's pthreads 4 MiB — which Lean's own guards
+// never measured: running out threw a RangeError that killed the thread. The node-runner knob
+// LEAN4_WASM64_PTHREAD_STACK_MB=0.68 gives the pthreads Chrome's budget (Node keeps ~192 KiB of it).
+const CHROME = { LEAN4_WASM64_PTHREAD_STACK_MB: "0.68" };
+const overflowed = (out) => /Maximum call stack size exceeded|too much recursion/.test(out);
+const deepMeta = stripDebug((await runLean(readProbe("deep-recursion.lean"), "deep", CHROME)).stdout);
+gate(/maximum recursion depth has been reached/.test(deepMeta) && /DEEP SURVIVED/.test(deepMeta) && !overflowed(deepMeta),
+  "deep recursion at Chrome's stack (Meta): Lean's max-recursion error, the thread survives",
+  overflowed(deepMeta) ? "the engine's stack overflowed (RangeError)" : /DEEP SURVIVED/.test(deepMeta) ? "" : "no result");
+const deepKernel = stripDebug((await runLean(readProbe("deep-recursion-kernel.lean"), "deep-kernel", CHROME)).stdout);
+gate(/engine's stack is exhausted/.test(deepKernel) && /DEEP SURVIVED/.test(deepKernel) && !overflowed(deepKernel),
+  "deep recursion at Chrome's stack (kernel): the kernel's error, the thread survives",
+  overflowed(deepKernel) ? "the engine's stack overflowed (RangeError)" : /DEEP SURVIVED/.test(deepKernel) ? "" : "no result");
+const deepRoomy = stripDebug((await runLean(readProbe("deep-recursion.lean"), "deep-roomy")).stdout);
+gate(/DEEP SURVIVED/.test(deepRoomy) && !/error/i.test(deepRoomy),
+  "the same Meta proof at the default stack still checks (the probe does not cost valid proofs)",
+  /error/i.test(deepRoomy) ? deepRoomy.split("\n").find((l) => /error/i.test(l))?.slice(0, 160) : "");
 gate(parseFixed, "THE PARSE GATE: lean_wasm_compile reports parser diagnostics",
   parseFixed ? "" : "persistent shell still swallows parse errors");
 

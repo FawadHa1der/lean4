@@ -68,6 +68,9 @@ if (args.help) {
     "  --work <dir>      mounted read-write at /work (default: a fresh temporary directory)",
     "  -h, --help        print this help and exit 0 (after `--`, --help goes to Lean)",
     "",
+    "env: LEAN4_WASM64_PTHREAD_STACK_MB=<n> gives the runtime's pthread Workers an n-MiB stack (default 4);",
+    "     0.68 reproduces a Chrome Worker's 500 KiB (deep recursion tests)",
+    "",
     "The one-shot CLI does not exit by itself: judge a job by its output (EMBED-RUNTIME.md).",
   ].join("\n"));
   process.exit(0);
@@ -218,6 +221,10 @@ globalThis.Module = {
       if (process.env.QED64_PROFILE_INIT) {
         globalThis.Module.ENV.QED64_PROFILE_INIT = process.env.QED64_PROFILE_INIT;
       }
+      // Patch 0036: the engine-stack probe's headroom, for calibration (0 disables it).
+      if (process.env.LEAN_WASM_STACK_PROBE_SLOTS) {
+        globalThis.Module.ENV.LEAN_WASM_STACK_PROBE_SLOTS = process.env.LEAN_WASM_STACK_PROBE_SLOTS;
+      }
     },
   ],
   onExit: (code) => {
@@ -230,7 +237,22 @@ globalThis.Module = {
 };
 
 // CommonJS facilities the glue expects at script scope.
-globalThis.require = createRequire(leanJs);
+// Test knob (LEAN4_WASM64_PTHREAD_STACK_MB=<n>): give the runtime's pthread Workers an n-MiB
+// stack (V8 limit and thread stack, Node's resourceLimits.stackSizeMb; default 4). Browsers run
+// pthreads in Workers with a much smaller V8 stack than Node does, and wasm frames live on that
+// stack: this reproduces a browser's stack budget headlessly (qed64 HARDENING #60).
+const nodeRequire = createRequire(leanJs);
+const pthreadStackMb = Number(process.env.LEAN4_WASM64_PTHREAD_STACK_MB || 0);
+globalThis.require = !pthreadStackMb ? nodeRequire : (id) => {
+  const m = nodeRequire(id);
+  if (id !== "node:worker_threads" && id !== "worker_threads") return m;
+  class SizedWorker extends m.Worker {
+    constructor(file, options = {}) {
+      super(file, { ...options, resourceLimits: { ...(options.resourceLimits ?? {}), stackSizeMb: pthreadStackMb } });
+    }
+  }
+  return { ...m, Worker: SizedWorker };
+};
 globalThis.__filename = "/bin/lean.js";
 globalThis.__dirname = "/bin";
 

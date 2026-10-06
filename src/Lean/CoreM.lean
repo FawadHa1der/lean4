@@ -493,8 +493,30 @@ def checkMaxHeartbeatsCore (moduleName : String) (optionName : Name) (max : Nat)
 def checkMaxHeartbeats (moduleName : String) : CoreM Unit := do
   checkMaxHeartbeatsCore moduleName `maxHeartbeats (← read).maxHeartbeats
 
+/--
+On WebAssembly, `false` when the engine's stack — the one wasm frames run on: 500 KiB in a Chrome
+Worker, far less than native Lean has — is nearly exhausted (probed on every 16th call of a
+thread). Running out of it kills the thread instead of raising an error. Always `true` on native
+builds.
+-/
+@[extern "lean_wasm_native_stack_ok"]
+opaque nativeStackOk : BaseIO Bool
+
+/--
+Raised while the WebAssembly engine's stack still has room to unwind. Tagged as the max-recursion
+error, so it is a runtime exception (`try`/`first` do not catch it and retry), but without that
+error's advice: raising `maxRecDepth` does not give the engine more stack.
+-/
+def checkNativeStack : CoreM Unit := do
+  unless (← nativeStackOk) do
+    throw <| Exception.error (← getRef) <| .tagged `runtime.maxRecDepth <| MessageData.ofFormat <| Std.Format.text <|
+      "maximum recursion depth has been reached: the WebAssembly runtime's stack is exhausted \
+        (a browser gives it far less stack than native Lean has; raising maxRecDepth does not help, \
+        and the same code may succeed natively)"
+
 def checkSystem (moduleName : String) : CoreM Unit := do
   -- TODO: bring back more checks from the C++ implementation
+  checkNativeStack
   checkInterrupted
   checkMaxHeartbeats moduleName
 

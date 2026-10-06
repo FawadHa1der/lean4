@@ -30,4 +30,11 @@ LEAN_EXPORT size_t get_available_stack_size();
 LEAN_EXPORT void check_stack(char const * component_name);
 #endif
 
+/**
+   \brief On WebAssembly: false when less than 128 KiB of the engine's own stack (the one wasm
+   frames use, far smaller than the stack \c check_stack measures) is free. A probe costs ~4 µs:
+   callers throttle it. Always true on native builds.
+*/
+LEAN_EXPORT bool engine_stack_has_headroom();
+
 }

@@ -763,6 +763,7 @@ _lean_wasm_load_snapshot
 _lean_wasm_load_snapshot_mem
 _lean_wasm_reset
 _lean_wasm_task_manager_parked_threads
+_lean_wasm_native_stack_ok
 _lean_whnf
 _lean_windows_get_next_transition
 _main

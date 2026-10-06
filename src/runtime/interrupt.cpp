@@ -8,6 +8,7 @@ Author: Leonardo de Moura
 #include "runtime/thread.h"
 #include "runtime/interrupt.h"
 #include "runtime/exception.h"
+#include "runtime/stackinfo.h"
 #include "runtime/memory.h"
 #include "runtime/object.h"
 #include "lean/lean.h"
@@ -71,15 +72,44 @@ size_t get_max_rec_depth() { return g_max_rec_depth; }
 LEAN_EXPORT scope_max_rec_depth::scope_max_rec_depth(size_t max) :
     m_max(g_max_rec_depth, max), m_curr(g_rec_depth, 0) {}
 
+#if defined(LEAN_EMSCRIPTEN)
+/* On WebAssembly the engine's stack (500 KiB in a Chrome Worker) runs out long before the depth
+   above (0036). The guard probes it (`engine_stack_has_headroom`, ~4 µs) on a thread's outermost
+   level and then every `g_engine_probe_levels` levels deeper: `g_engine_probe_depth` is the next
+   depth to probe at. Unwinding lowers it with the depth, since a frame above a probed one has at
+   least as much room, so recursion that stays within 16 levels — nearly all of it — costs nothing. */
+static constexpr size_t g_engine_probe_levels = 16;
+LEAN_THREAD_VALUE(size_t, g_engine_probe_depth, 0);
+#endif
+
 LEAN_EXPORT scope_rec_depth::scope_rec_depth() {
     g_rec_depth++;
     if (g_max_rec_depth > 0 && g_rec_depth > g_max_rec_depth * g_kernel_rec_depth_factor) {
         g_rec_depth--;
         throw stack_space_exception("type checker");
     }
+#if defined(LEAN_EMSCRIPTEN)
+    // A normal C++ exception here unwinds through every landing pad, where running out kills the
+    // thread. Plain `exception`: the kernel reports it as `other` ("(kernel) " + this text), not
+    // as `deepRecursion`, whose advice (raise maxRecDepth) would not help.
+    if (g_rec_depth == 1 || g_rec_depth >= g_engine_probe_depth) {
+        if (!engine_stack_has_headroom()) {
+            g_rec_depth--;
+            throw exception("the WebAssembly engine's stack is exhausted: this proof recurses deeper "
+                            "than a browser allows (the same proof may check natively)");
+        }
+        g_engine_probe_depth = g_rec_depth + g_engine_probe_levels;
+    }
+#endif
 }
 
-LEAN_EXPORT scope_rec_depth::~scope_rec_depth() { g_rec_depth--; }
+LEAN_EXPORT scope_rec_depth::~scope_rec_depth() {
+    g_rec_depth--;
+#if defined(LEAN_EMSCRIPTEN)
+    if (g_rec_depth + g_engine_probe_levels < g_engine_probe_depth)
+        g_engine_probe_depth = g_rec_depth + g_engine_probe_levels;
+#endif
+}
 
 LEAN_THREAD_VALUE(lean_object *, g_cancel_tk, nullptr);
 

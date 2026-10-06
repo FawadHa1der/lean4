@@ -170,6 +170,9 @@ in every `location` that adds one), `gzip off` for octet-stream, `try_files $uri
 - **Node ≥ 24.** Memory64 and shared Memory64 need no flag there (measured on
   v26.3.0). The glue builds its memory with the final JS-API spelling
   `address: "i64"`; older engines need more than a flag.
+- A browser runs the runtime's pthreads in Workers with a small engine stack (Chrome 500 KiB),
+  and deep recursion is bounded by it (EMBED-RUNTIME.md §6). Node's are 4 MiB; to test at a
+  browser's budget headlessly, `LEAN4_WASM64_PTHREAD_STACK_MB=0.68 lean4-wasm64 run …` (Chrome).
 - **`node --stack-size=8192`** for anything that boots the runtime in its own
   process (`node-runner`, `persistent-probe`, `gate`; `lean4-wasm64 run|gate|probe`
   add it).

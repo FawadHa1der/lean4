@@ -111,6 +111,7 @@ mutating `Module.ENV` in `preRun`. Two readers see them:
 | `LEAN_PATH` | Lean | `:`-separated library dirs, prepended to the built-in `/lib/lean` (§3.3) |
 | `LEAN_WASM_PARKED_DEDICATED` | C, at task-manager creation | idle dedicated task threads kept for reuse; clamped to 64; **default 0** — parked pthreads outlive a page reload by the browser's ~2 s termination grace, and overlapping the next boot they exhausted V8's pointer-compression cage (0035b) |
 | `LEAN_COMPACTOR_RESERVE` | C | bytes reserved up front when saving a snapshot (`--incr-header-save`); a doubling buffer needs old + new at once (bakes use 3.5 GiB) |
+| `LEAN_WASM_STACK_PROBE_SLOTS` | C, once | headroom (in 8-byte argument slots, default 16384 = 128 KiB) the engine-stack probe demands (§6); 0 disables it — for calibration only (0036) |
 | `LEAN_NAT_MAX_SIZE`, `LEAN_STACK_SIZE_KB` | C | upstream semantics (the latter on the `main` path only) |
 | `LEAN_IMPORT_WORKERS` | Lean | parallel region reads of a snapshot with dependency files; not on the in-memory path |
 | `LEAN_NUM_THREADS`, `LEAN_MAIN_USE_THREAD`, `LEAN_ABORT_ON_PANIC`, `LEAN_BACKTRACE*` | C | **inert on Emscripten** — not knobs |
@@ -247,6 +248,19 @@ its Worker).
   narrows the trigger; it does not remove it.
 
 ## 6. Placement and engines
+
+**The engine's stack bounds recursion (0036).** Wasm frames run on the stack of the thread that
+runs them: a pthread's Worker gets 500 KiB of V8 stack in Chrome (about 1 MiB in Firefox, 4 MiB in
+Node), far less than Lean's own guards assume — they measure Emscripten's shadow stack in linear
+memory, which deep recursion barely moves. Running out throws a JS `RangeError` that kills the
+thread. Since 0036 Lean probes the engine's stack itself (a `Reflect.apply` with a fixed argument
+array throws exactly when that much stack is no longer free) at its recursion checkpoints — the
+kernel's depth guard and Meta's `Core.checkSystem` — and raises its own error there: Meta's
+max-recursion error, or the kernel's "the WebAssembly engine's stack is exhausted". So a proof that
+recurses deeper than a browser allows fails with an error, and the session survives; whether it
+fits depends on the engine. Recursion that passes no checkpoint (the IR interpreter, some
+expression traversals) can still overflow, as native Lean can abort there. Headless, the
+node-runner knob `LEAN4_WASM64_PTHREAD_STACK_MB=0.68` gives the pthreads Chrome's budget.
 
 - Browser: a classic **DedicatedWorker** (`importScripts`, nested Workers for
   pthreads; a SharedWorker cannot host it), cross-origin isolated (HOSTING.md),
