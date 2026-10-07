@@ -444,3 +444,53 @@ Meta-heavy (`decide`, `simp`, `omega`) and Mathlib-tactic (`ring`, `linarith`,
 `norm_num`, `positivity`) files is within run-to-run noise (≤ 3%, against 0035b
 and against `LEAN_WASM_STACK_PROBE_SLOTS=0`). Of the stdlib's generated C only
 `Lean/CoreM.c` changed (names added, none removed or renumbered).
+
+## 0037 — wasm: lean_wasm_compile reports the messages of elaboration tasks (c8db69fdd3)
+
+A false proof compiled with errors=0 through `lean_wasm_compile` whenever it
+was elaborated with `Elab.async` (lean4game's report; QED64's probe-neg N6,
+N6b, N7): `set_option Elab.async true in theorem bad : 1 = 2 := by exact foo`,
+or a command elaborator running `elabCommand` under `withScope` with the
+option on — lean4game's GameServer `Runner`, so its `--verify-snapshots` and
+QED64's snapshot-probe and compiler battery passed wrong level proofs. The
+native CLI and the browser FileWorker were right: they report the whole
+snapshot tree. Under `Elab.async` a theorem's body, its kernel check,
+compilation and the linters run in tasks whose messages live only in
+`Command.State.snapshotTasks`; `wasmCompile`'s synchronous loop read only
+`messages`. Even without the option, `realizeConst`/`realizeValue` report
+through tasks, and the tasks piled up across commands (nothing cleared them),
+so a later async linter or `#guard_msgs` took in earlier commands' tasks; the
+old comment's "the synchronous loop creates no tasks" was wrong.
+
+`wasmCompile` now resets each command's `messages`, trace state and snapshot
+tasks before elaborating it, as `Language.Lean`'s `doElab` does, then waits
+for the tasks it started (`IO.wait`, each tree's `getAll` in preorder) and
+adds their UNREPORTED messages — a task starts from its parent's log marked
+reported, so `reported` would repeat messages already collected. Every
+message is reported once, in the native frontend's order (per command: parse
+messages, the command's own, then its tasks'). The call returns after every
+task still recorded for a command has finished; a task elaboration itself
+discarded (a tactic backtrack restoring a saved state, `liftCommandElabM`) is
+neither reported nor awaited, as natively, and can finish after the call
+(review, e1a79c1ce9). Contract change for embedders: the call waits for its
+tasks, so a task that never finishes now hangs it instead of leaking — supervise
+it with a wall-clock limit outside the blocked thread.
+
+Gate: 13 async probes (`js/probes/async-*.lean`: unknown identifier, unsolved
+goals, term-mode mismatch, file-wide async with linters, a valid proof, sorry,
+`#guard_msgs`, the Runner shape valid and invalid, several commands, a kernel
+error from the async kernel check, 41 proofs fanned out by one command, and
+an informational mixed-mode lint case), each with a synchronous twin, twice in
+one resident runtime (`persistent-probe.mjs --cases`): exact messages, parity
+with the twin, no duplicates, the same output on the second pass, and plain
+compiles afterwards. Calibrated on 0036 before the build: the twins matched
+every expectation and the async cases failed (11 checks); the new loop, run
+verbatim via `#eval` on 0036, already gave every async case its twin's
+messages. Measured 2026-10-06 on the gated build (runtime
+wasm64-f69cca24d0878a58, gate 33/33): the 26 synchronous and reuse compiles
+print the same messages on 0036 and 0037 (1087 vs 940 ms in all); 41 async
+proofs fanned out by one command are joined in ~0.45 s (sync twin ~0.26 s);
+`sleep 1000` inside an async proof returned after 18 s — timed sleeps on task
+pthreads wake late here — rather than hanging. Of the stdlib's generated C only
+`Lean/Shell.c` changed (its private specializations renumbered; none reused,
+none referenced elsewhere), so the v4.34.0 packs pair with this runtime.
