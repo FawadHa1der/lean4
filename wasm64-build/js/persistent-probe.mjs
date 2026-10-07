@@ -19,7 +19,7 @@ function arg(name, fallback) {
   return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
 }
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
-  console.log("usage: persistent-probe.mjs --artifact <dir>   (or $LEAN4_WASM64_ARTIFACT)\nBoot the runtime persistently and drive lean_wasm_compile (the browser's one-shot path). run as: lean4-wasm64 probe   (or: node --stack-size=8192 persistent-probe.mjs)");
+  console.log("usage: persistent-probe.mjs --artifact <dir> [--cases <a.lean,b.lean,…> [--passes <n>]]   (or $LEAN4_WASM64_ARTIFACT)\nBoot the runtime persistently and drive lean_wasm_compile (the browser's one-shot path). With --cases: compile each file n times (default 2), one `CASE {json}` line per compile, then `CASES DONE` (the gate's 0037 checks). run as: lean4-wasm64 probe   (or: node --stack-size=8192 persistent-probe.mjs)");
   process.exit(0);
 }
 const artifactArg = arg("artifact", process.env.LEAN4_WASM64_ARTIFACT || process.env.QED64_LEAN_ARTIFACT);
@@ -30,6 +30,14 @@ if (!artifactArg) {
 const artifactDir = path.resolve(artifactArg);
 const leanJs = path.join(artifactDir, "bin/lean.js");
 const libLean = path.join(artifactDir, "lib/lean");
+
+// --cases a.lean,b.lean [--passes n] (patch 0037): after init, compile each file n times (default
+// 2) in this one resident runtime and print one `CASE {json}` line per compile, then two plain
+// compiles (reuse-error, reuse-clean) and `CASES DONE`. The gate judges the lines. Without
+// --cases the probe's sequence and output are unchanged. Paths are resolved before the chdir("/").
+const caseSources = (arg("cases", "") || "").split(",").filter(Boolean)
+  .map((f) => ({ name: path.basename(f, ".lean"), source: fs.readFileSync(path.resolve(f), "utf8") }));
+const casePasses = Number(arg("passes", "2"));
 
 const asPtr = (v) => (typeof v === "bigint" ? v : BigInt(Math.trunc(v)));
 const asNum = (v) => (typeof v === "bigint" ? Number(v) : v);
@@ -118,6 +126,28 @@ globalThis.Module = {
         throw new Error("lean_init_search_path failed");
       }
       console.log("init OK");
+
+      if (caseSources.length) {
+        const emit = (name, pass, fileName, r) => console.log("CASE " + JSON.stringify({
+          name, pass, fileName, tag: r.tag, scalar: r.scalar === null ? null : Number(r.scalar),
+          elapsedMs: Math.round(r.elapsed), diags: r.diags,
+        }));
+        for (let pass = 1; pass <= casePasses; pass += 1) {
+          for (const c of caseSources) {
+            const fileName = `/workspace/${c.name}-p${pass}.lean`;
+            emit(c.name, pass, fileName, compile(c.source, fileName));
+          }
+        }
+        // REUSE: plain compiles after the async ones. The old Shell.lean comment claims that
+        // undrained elaboration tasks made the NEXT lean_wasm_compile fail immediately.
+        for (const [name, source] of [["reuse-error", "example : (1 + 1 : Nat) = 3 := by rfl\n"],
+                                      ["reuse-clean", "example : True := trivial\n"]]) {
+          const fileName = `/workspace/${name}.lean`;
+          emit(name, 0, fileName, compile(source, fileName));
+        }
+        console.log("CASES DONE");
+        process.exit(0);
+      }
 
       console.log("== compile 1: good proof (pays the Init import) ==");
       const r1 = compile(

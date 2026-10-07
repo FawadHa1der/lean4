@@ -58,7 +58,7 @@ may import any memory whose maximum is ≤ that.
 | `_lean_mk_string(cstr)` | `(i64)` | a Lean `String` (owned) | upstream |
 | `_lean_wasm_load_snapshot_mem(ptr, size, flags)` | `(i64, i64, i64)` | `IO UInt32`: 0 loaded, 1 failed (diagnostic on stderr) | 0013/0014/0016 |
 | `_lean_wasm_load_snapshot(path)` | `(i64 String)` | `IO UInt32` — a VFS path; Node tools only | 0013 |
-| `_lean_wasm_compile(code, fileName)` | `(i64 String, i64 String)` | `IO UInt32`: 0 no errors, 1 errors (not a count); messages as JSON lines on stdout | 0010/0032/0034 |
+| `_lean_wasm_compile(code, fileName)` | `(i64 String, i64 String)` | `IO UInt32`: 0 no errors, 1 errors (not a count); messages as JSON lines on stdout, every message of the file once, in the native frontend's order — including those of tasks a command started (`Elab.async` proofs, kernel checks, linters); it returns after all of them have finished, so call it only on a thread that can block (Node's main thread, a DedicatedWorker), never from a proxied or mailbox callback | 0010/0032/0034/0037 |
 | `_lean_wasm_reset()` | `()` | `IO Unit`: clears the environment cache (no current caller) | 0010 |
 | `_lean_wasm_shell_mark_preinitialized()` | `()` | — | 0031 |
 | `_lean_browser64_configure_input_ring(ptr, capacity)` | `(i64, u32)` | `u32`: 0, or `EINVAL` (28) | 0031 |

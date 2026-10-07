@@ -444,7 +444,7 @@ test("the gate boots its children on this Node with --stack-size=8192, whatever 
   const r = run("gate.mjs", ["--artifact", a], { env: { ...process.env, PATH: emptyPath, L4W_TEST_LOG: log }, timeout: 120_000 });
   assert.equal(r.status, 1, r.stdout + r.stderr); // a fake runtime fails the checks, but every child ran
   const children = fs.readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l));
-  assert.equal(children.length, 10); // 9 one-shot runs (3 of them deep-recursion probes) + the persistent probe
+  assert.equal(children.length, 11); // 9 one-shot runs (3 of them deep-recursion probes) + the persistent probe + the 0037 async-cases persistent probe
   for (const c of children) {
     assert.equal(c.execPath, process.execPath);
     assert.ok(c.execArgv.includes("--stack-size=8192"), JSON.stringify(c.execArgv));

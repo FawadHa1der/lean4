@@ -5,9 +5,11 @@
 //  1. numBits smoke      — #eval System.Platform.numBits must print 64
 //  2. proof smoke        — a kernel-checked rfl example, exit 0
 //  3. error smoke        — a false proof must produce a positioned error
-//  4. THE PARSE GATE     — garbage input must produce >=1 error diagnostic
-//                          (the defect motivating the rebuild)
-// Exits nonzero on the first failing gate.
+//  4. the persistent path, module semantics (0034), the task-manager storm (0035),
+//     deep recursion at a browser's stack (0036), and async elaboration through
+//     lean_wasm_compile (0037: every message of an Elab.async declaration reported once)
+//  5. THE PARSE GATE     — garbage input must produce >=1 error diagnostic
+// Every check prints ok or FAIL; exits nonzero if any failed.
 //
 // Usage: node gate.mjs --artifact <dir>   (lean4-wasm64 gate --artifact <dir>)
 
@@ -184,6 +186,137 @@ const deepRoomy = stripDebug((await runLean(readProbe("deep-recursion.lean"), "d
 gate(/DEEP SURVIVED/.test(deepRoomy) && !/error/i.test(deepRoomy),
   "the same Meta proof at the default stack still checks (the probe does not cost valid proofs)",
   /error/i.test(deepRoomy) ? deepRoomy.split("\n").find((l) => /error/i.test(l))?.slice(0, 160) : "");
+// ASYNC ELABORATION THROUGH lean_wasm_compile (patch 0037; qed64 probe-neg N6, N6b, N7). With
+// `Elab.async` on, a theorem's proof, kernel check and (when the whole command is async) linters
+// run in tasks whose messages live only in `Command.State.snapshotTasks`; the persistent shell
+// read only `messages`, so a false proof compiled with errors=0. The CLI checks above cannot see
+// this (runFrontend reports the whole snapshot tree), so these cases run through the persistent
+// path, twice each, in one resident runtime. Every case also runs as a synchronous twin
+// (`Elab.async true` -> `false`, line numbers kept): the async compile must report what its twin
+// reports. Init-only cases first, then the `import Lean` ones (one import, then cache hits).
+const ASYNC = ["async-unknown-id", "async-unsolved", "async-term-mismatch", "async-global", "async-ok-in",
+  "async-sorry", "async-guard-msgs",
+  "async-nested-scope", "async-nested-ok", "async-multi", "async-kernel", "async-fanout"];
+const ASYNC_INFO = ["async-mixed-lint"]; // printed, not gated (upstream mixed-mode linting)
+const twinDir = fs.mkdtempSync(path.join(os.tmpdir(), "lean4-wasm64-gate-async-"));
+let asyncRun;
+try {
+  const files = [...ASYNC, ...ASYNC_INFO].map((n) => path.join(probes, `${n}.lean`));
+  for (const n of ASYNC) {
+    const twin = path.join(twinDir, `${n}.sync.lean`);
+    fs.writeFileSync(twin, readProbe(`${n}.lean`).replaceAll("Elab.async true", "Elab.async false"));
+    files.push(twin);
+  }
+  asyncRun = await runChild([STACK, path.join(root, "persistent-probe.mjs"), "--artifact", artifact,
+    "--cases", files.join(","), "--passes", "2"], 900_000);
+} finally {
+  fs.rmSync(twinDir, { recursive: true, force: true });
+}
+const cases = [...asyncRun.stdout.matchAll(/^CASE (\{.*\})$/gm)].flatMap((m) => { try { return [JSON.parse(m[1])]; } catch { return []; } });
+const caseCount = (ASYNC.length * 2 + ASYNC_INFO.length) * 2 + 2;
+gate(asyncRun.status === 0 && /^CASES DONE$/m.test(asyncRun.stdout) && cases.length === caseCount,
+  "[0037] async cases: every lean_wasm_compile returned (no hang, abort or IO error)",
+  `${cases.length}/${caseCount} compiles${asyncRun.timedOut ? ", killed by the timeout" : ""}`);
+const caseOf = (name, pass = 1) => cases.find((c) => c.name === name && c.pass === pass);
+const brief = (d) => `${d.pos?.line}:${d.pos?.column} ${d.severity} ${String(d.data).split("\n")[0].slice(0, 70)}`;
+const shown = (c) => (c ? `return=${c.scalar} [${c.diags.map(brief).join(" | ")}]` : "no result");
+const dkey = (d) => JSON.stringify([d.severity, d.pos, d.endPos, d.kind, d.data]);
+const dupsOf = (c) => c.diags.filter((d, i) => c.diags.findIndex((e) => dkey(e) === dkey(d)) !== i);
+const foreignOf = (c) => c.diags.filter((d) => d.fileName !== c.fileName);
+// 1-based line of the probe line equal to (or, with `has`, containing) `text`; 0-based codepoint column of `needle` on it
+const srcLines = (n) => readProbe(`${n}.lean`).split("\n");
+const lineOf = (n, text, has = false) => srcLines(n).findIndex((l) => (has ? l.includes(text) : l === text)) + 1;
+const colOf = (n, text, needle) => { const l = srcLines(n).find((x) => x.includes(text)) ?? ""; return [...l.slice(0, l.indexOf(needle))].length; };
+const msg = (severity, re, line, column) => (d) =>
+  d.severity === severity && re.test(String(d.data)) && d.pos?.line === line && (column === undefined || d.pos?.column === column);
+// exactly these messages, in this order, and this return value (0/1) — from the async compile AND
+// its synchronous twin. A twin that misses is a wrong expectation, not a runtime defect: calibrate
+// on a runtime without 0037, whose synchronous path already reports correctly.
+const expectCase = (n, ret, preds, label) => {
+  const ok = (c) => !!c && c.scalar === ret && c.diags.length === preds.length && preds.every((p, i) => p(c.diags[i]));
+  const a = caseOf(n), s = caseOf(`${n}.sync`);
+  gate(ok(a) && ok(s), label, ok(s) ? shown(a) : `EXPECTATION WRONG, sync twin: ${shown(s)}`);
+};
+
+const insane = cases.filter((c) => c.tag !== 0 || dupsOf(c).length > 0 || foreignOf(c).length > 0);
+gate(cases.length > 0 && insane.length === 0,
+  "[0037] every compile: IO.ok, no message reported twice, no message of another compile",
+  insane.map((c) => `${c.name}#${c.pass}: tag=${c.tag} dups=${dupsOf(c).length} foreign=${foreignOf(c).length}`).join("; "));
+
+let pn = "async-unknown-id";
+expectCase(pn, 1, [msg("error", /^Unknown identifier `foo`$/, lineOf(pn, "exact foo", true), colOf(pn, "exact foo", "foo"))],
+  "[0037] async theorem: unknown identifier reported once, at `foo`");
+pn = "async-unsolved";
+expectCase(pn, 1, [msg("error", /^unsolved goals\n[\s\S]*⊢ n = n \+ 1$/, lineOf(pn, "by skip", true), colOf(pn, "by skip", "by"))],
+  "[0037] async theorem: unsolved goals reported once");
+pn = "async-term-mismatch";
+{
+  const line = lineOf(pn, "theorem asyncTermMismatch", true);
+  const ok = (c) => !!c && c.scalar === 1 && c.diags.length >= 1 && c.diags.every((d) => d.severity === "error" && d.pos?.line === line);
+  const a = caseOf(pn), s = caseOf(`${pn}.sync`);
+  gate(ok(a) && ok(s), "[0037] async term-mode body: its elaboration errors are reported",
+    ok(s) ? shown(a) : `EXPECTATION WRONG, sync twin: ${shown(s)}`);
+}
+pn = "async-global";
+expectCase(pn, 0, [
+  msg("warning", /^Variable name `h` is not explicitly referenced\./, lineOf(pn, "theorem asyncUnusedH", true), colOf(pn, "theorem asyncUnusedH", "(h :") + 1),
+  msg("information", /^asyncUsesH /, lineOf(pn, "#check asyncUsesH")),
+], "[0037] file-wide Elab.async: the linter task's warning is reported, and a variable used in an async body is not");
+expectCase("async-ok-in", 0, [], "[0037] valid async proof (qed64 P8 shape): nothing reported");
+pn = "async-sorry";
+expectCase(pn, 0, [msg("warning", /^declaration uses `sorry`$/, lineOf(pn, "theorem asyncSorry", true))],
+  "[0037] async theorem proved by sorry: the kernel task's `declaration uses sorry` is reported");
+pn = "async-guard-msgs";
+expectCase(pn, 1, [msg("error", /^Unknown identifier `foo`$/, lineOf(pn, "theorem asyncBeforeGuard", true), colOf(pn, "theorem asyncBeforeGuard", "foo"))],
+  "[0037] #guard_msgs consumes its own async messages and only those (per-command reset)");
+pn = "async-nested-scope";
+expectCase(pn, 1, [msg("error", /^Unknown identifier `foo✝`$/, lineOf(pn, "probe_async_scope"), 0)],
+  "[0037] elabCommand under withScope + Elab.async (lean4game Runner shape): its error is reported once");
+expectCase("async-nested-ok", 0, [], "[0037] the Runner shape with a valid proof: nothing reported");
+pn = "async-multi";
+{
+  const at = lineOf(pn, "probe_marker_then_async");
+  expectCase(pn, 1, [
+    msg("warning", /^0037-sync-marker$/, at, 0),
+    msg("error", /^unsolved goals\n/, at),
+    msg("information", /^Nat : Type$/, lineOf(pn, "#check Nat")),
+    msg("error", /^Unknown identifier `foo`$/, lineOf(pn, "exact foo", true), colOf(pn, "exact foo", "foo")),
+    msg("information", /^Nat\.succ/, lineOf(pn, "#check Nat.succ")),
+  ], "[0037] several commands: each message once, command by command, a command's own messages before its tasks'");
+}
+pn = "async-kernel";
+expectCase(pn, 1, [msg("error", /^\(kernel\) declaration type mismatch, 'asyncKernelBad' has type/, lineOf(pn, "probe_async_kernel"), 0)],
+  "[0037] a kernel error from addDecl's async kernel-check task is reported");
+pn = "async-fanout";
+expectCase(pn, 1, [msg("error", /43 % 7 = 0/, lineOf(pn, "probe_async_fanout"))],
+  "[0037] 41 async proofs started by one command: all joined, the one false proof reported once");
+console.log(`note  [0037] fan-out elapsed: async ${caseOf(pn)?.elapsedMs ?? "?"} ms, sync twin ${caseOf(`${pn}.sync`)?.elapsedMs ?? "?"} ms`);
+
+// PARITY: the async compile reports the same messages (as a set: sync and async interleave
+// differently inside one command) and the same return value as its synchronous twin. Lines, not
+// columns: upstream places some messages differently under async — `:= rfl`'s defeq-attribute
+// check (DefEqAttrib.lean) reports at the command (col 0) when async, at the name when not; the
+// cases above pin every column that matters.
+const asSet = (c) => JSON.stringify(c.diags.map((d) => JSON.stringify([d.severity, d.pos?.line,
+  String(d.data).replace(/\?(m|u)\.\d+/g, "?$1")])).sort());
+const parityOff = ASYNC.filter((a) => { const x = caseOf(a), s = caseOf(`${a}.sync`); return !x || !s || x.scalar !== s.scalar || asSet(x) !== asSet(s); });
+gate(cases.length > 0 && parityOff.length === 0, "[0037] each async case reports what its synchronous twin reports",
+  parityOff.map((a) => `${a}: async ${shown(caseOf(a))} vs sync ${shown(caseOf(`${a}.sync`))}`).join("; "));
+
+// DETERMINISM: messages come out in tree order, not task-completion order (the slim/fat
+// differential audit compares two runs' messages byte for byte)
+const sameRun = (c) => JSON.stringify(c.diags.map(({ fileName, ...d }) => d));
+const unstable = [...ASYNC, ...ASYNC.map((a) => `${a}.sync`)]
+  .filter((a) => !caseOf(a, 1) || !caseOf(a, 2) || sameRun(caseOf(a, 1)) !== sameRun(caseOf(a, 2)));
+gate(cases.length > 0 && unstable.length === 0, "[0037] a second compile of each file prints the same messages in the same order",
+  unstable.join(", "));
+
+// REUSE: plain compiles after all the async ones still work (the old Shell.lean comment's fear)
+const reErr = caseOf("reuse-error", 0), reOk = caseOf("reuse-clean", 0);
+gate(!!reErr && !!reOk && reErr.scalar === 1 && reErr.diags.some((d) => d.severity === "error") && reOk.scalar === 0 && reOk.diags.length === 0,
+  "[0037] after the async compiles, an error compile reports its error and a clean compile is clean",
+  `error compile ${shown(reErr)}; clean compile ${shown(reOk)}`);
+console.log(`note  [0037] mixed-mode linting (option scoped by \`in\`; informational): ${shown(caseOf("async-mixed-lint"))}`);
 gate(parseFixed, "THE PARSE GATE: lean_wasm_compile reports parser diagnostics",
   parseFixed ? "" : "persistent shell still swallows parse errors");
 

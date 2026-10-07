@@ -135,13 +135,17 @@ def wasmCompile (code : String) (fileName : String := "<input>") : IO UInt32 := 
   let opts : Options := {}
   let cmdState := Elab.Command.mkState env headerMessages opts
 
-  -- Elaborate synchronously with `Frontend.processCommands` — a plain loop over
-  -- `Command.elabCommandTopLevel` — rather than `Elab.IO.processCommands`. The
-  -- latter drives elaboration through the language-server snapshot/task
-  -- infrastructure, which spawns elaboration tasks. In the single-threaded WASM
-  -- worker those tasks are never drained, leaving the runtime in a state where
-  -- the *next* `lean_wasm_compile` call fails immediately. The synchronous loop
-  -- creates no tasks, so the cached environment stays reusable across compiles.
+  -- Elaborate with a plain loop over `Command.elabCommandTopLevel` (the loop of
+  -- `Frontend.processCommands`) rather than `Elab.IO.processCommands`, which runs
+  -- every command in a task on a pool pthread (8 MiB stack; every thread it starts
+  -- is a synchronous round trip to this, blocked, thread) and returned with work
+  -- still running. Elaboration still starts tasks of its own: under `Elab.async`
+  -- (false here, `opts` is empty, but a file's `set_option` or a command
+  -- elaborator's `withScope` can set it) theorem bodies, kernel checks, compilation
+  -- and linters run in tasks, and `realizeConst`/`realizeValue` report through
+  -- tasks even without it. Their messages exist only in the tasks a command leaves
+  -- in `Command.State.snapshotTasks`; the loop waits for those after every command
+  -- and reports them (patch 0037), so no task outlives the call.
   let frontendCtx : Elab.Frontend.Context := { inputCtx }
   -- Start parsing commands right after the header, so the header's `import` lines
   -- are not re-parsed as commands (they aren't commands and would error).
@@ -155,10 +159,12 @@ def wasmCompile (code : String) (fileName : String := "<input>") : IO UInt32 := 
   -- `Frontend.processCommand` so parse diagnostics reach the log directly:
   --  * `parseCommand` gets an EMPTY log, so its result is exactly the new
   --    parse errors, which we append to `acc` before elaborating;
-  --  * the command state is seeded with an empty log before elaboration, so
-  --    the post-command collection is exactly that command's elaboration
-  --    messages regardless of whether `elabCommandTopLevel` restores its
-  --    incoming log (behavior that has changed across toolchains).
+  --  * the per-command state is reset before elaboration, so the post-command
+  --    collection is exactly that command's messages and tasks regardless of
+  --    what `elabCommandTopLevel` resets (behavior that has changed across
+  --    toolchains).
+  -- Per command, `acc` gets: parse messages, the command's own messages, then the
+  -- messages of its tasks — the native frontend's order (snapshot-tree preorder).
   let collect : Elab.Frontend.FrontendM MessageLog := do
     let mut acc : MessageLog := headerMessages
     let mut done := false
@@ -174,9 +180,32 @@ def wasmCompile (code : String) (fileName : String := "<input>") : IO UInt32 := 
       acc := acc ++ parseMessages
       modify fun s => { s with commands := s.commands.push cmd }
       Elab.Frontend.setParserState ps
-      Elab.Frontend.setMessages {}
+      -- Reset the per-command state as `Language.Lean.doElab` does
+      -- (Language/Lean.lean). `elabCommandTopLevel` resets `messages` but not
+      -- `snapshotTasks`: kept, they would pile up across commands, and a later
+      -- `#guard_msgs` or async linter would take in an earlier command's tasks.
+      modify fun s => { s with commandState :=
+        { s.commandState with messages := {}, traceState := {}, snapshotTasks := #[] } }
       Elab.Frontend.elabCommandAtFrontend cmd
-      acc := acc ++ (← Elab.Frontend.getCommandState).messages
+      let st ← Elab.Frontend.getCommandState
+      acc := acc ++ st.messages
+      -- 0037: wait for every task the command started and add their messages,
+      -- each task's tree in preorder, tasks in the order they were started (as
+      -- the native frontend reports a command's `reportSnap` children, and as
+      -- `#guard_msgs` collects them). Only UNREPORTED messages: a task starts
+      -- from its parent's log marked reported, so `reported` repeats messages
+      -- that are already in `acc`.
+      let mut announced := false
+      for t in st.snapshotTasks do
+        if !announced && !(← IO.hasFinished t.task) then
+          announced := true
+          IO.eprintln s!"[WASM DEBUG] waiting on the tasks of the command at line {(inputCtx.fileMap.toPosition (cmd.getPos?.getD 0)).line}"
+        let tree ← IO.wait t.task
+        for snap in tree.getAll do
+          for msg in snap.diagnostics.msgLog.toList do
+            acc := acc.add msg
+      -- drained: release the trees now rather than at the next command
+      modify fun s => { s with commandState := { s.commandState with snapshotTasks := #[] } }
       done := Parser.isTerminalCommand cmd
     return acc
   let (msgLog, _s) ← StateRefT'.run (ReaderT.run collect frontendCtx) frontendState
