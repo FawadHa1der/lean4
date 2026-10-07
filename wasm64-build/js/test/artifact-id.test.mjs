@@ -6,7 +6,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
-  buildIdFromSha256, runtimeBuildId, buildIdOfArtifact, checkRuntimeManifest,
+  buildIdFromSha256, runtimeBuildId, buildIdOfArtifact, buildIdOfArtifactSync, sha256FileSync, checkRuntimeManifest,
   parsePatchId, comparePatchIds, latestPatchId, sha256Hex, sha256File, isSha256Hex,
 } from "../artifact-id.mjs";
 
@@ -37,6 +37,28 @@ test("buildIdOfArtifact and sha256File agree with the in-memory hash", async () 
   assert.equal(await sha256File(path.join(dir, "bin", "lean.wasm")), sha256Hex(bytes));
   assert.equal(await buildIdOfArtifact(dir), runtimeBuildId(bytes));
   await assert.rejects(buildIdOfArtifact(path.join(dir, "nope")));
+});
+
+test("buildIdOfArtifactSync: QED64's sync semantics — bin/lean.wasm, else a bin dir's lean.wasm, else null", async () => {
+  const empty = mkdtemp("l4w-idsync-");
+  assert.equal(buildIdOfArtifactSync(empty), null);
+  assert.equal(buildIdOfArtifactSync(path.join(empty, "nope")), null); // absent dir: null, no throw
+  // a bin dir (<dir>/lean.wasm): QED64's consumer check G2 hashes exactly this stand-in
+  const dir = mkdtemp("l4w-idsync-");
+  fs.writeFileSync(path.join(dir, "lean.wasm"), "\0asm stand-in");
+  assert.equal(buildIdOfArtifactSync(dir), "wasm64-17b67fe6e596cca8");
+  // an artifact dir wins over the bin-dir form; longer than one 8 MiB read
+  const bytes = Buffer.alloc((8 << 20) * 2 + 3, 7);
+  fs.mkdirSync(path.join(dir, "bin"));
+  fs.writeFileSync(path.join(dir, "bin", "lean.wasm"), bytes);
+  const id = buildIdOfArtifactSync(dir);
+  assert.equal(typeof id, "string"); // not a Promise
+  assert.equal(id, runtimeBuildId(bytes));
+  assert.equal(id, await buildIdOfArtifact(dir));
+  assert.equal(sha256FileSync(path.join(dir, "bin", "lean.wasm")), sha256Hex(bytes));
+  const lib = await import("../index.mjs");
+  assert.equal(typeof lib.buildIdOfArtifactSync, "function");
+  assert.equal(typeof lib.sha256FileSync, "function");
 });
 
 function manifest(overrides = {}) {

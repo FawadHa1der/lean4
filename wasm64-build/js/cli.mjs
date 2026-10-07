@@ -26,7 +26,7 @@ const COMMANDS = {
   "pack-set": ["pack-set.mjs",      false, "cut a release's library packs from a kernel build dir, as packs.json says"],
   unpack:  ["unpack.mjs",           false, "unpack a pack (verifying every part) into an olean tree"],
   inspect: ["inspect.mjs",          false, "inspect / deep-verify a pack manifest and its parts"],
-  "olean-imports": ["olean-imports.mjs", false, "the `import all` audit of an olean tree: olean-imports --audit <tree>"],
+  "olean-imports": ["olean-imports.mjs", false, "the `import all` audit of an olean tree, or one .olean's entry counts: olean-imports (--audit <tree> | --entries <file>)"],
   id:      [null,                   false, "print the runtime build id of an artifact dir: id <dir>"],
 };
 

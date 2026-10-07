@@ -24,7 +24,7 @@ npx lean4-wasm64 fetch --from https://github.com/FawadHa1der/lean4/releases/down
 # lean-lib = the runtime build's own lib/lean (Init, Std, Lean, Lake): what run/gate/probe expect
 npx lean4-wasm64 unpack --manifest toolchain/profiles/lean-lib.manifest.json --out toolchain/lib/lean
 echo 'theorem t : 2 + 2 = 4 := rfl' > t.lean
-npx lean4-wasm64 run --artifact toolchain --work . -- t.lean   # library: toolchain/lib/lean; t.lean is in --work
+npx lean4-wasm64 run --artifact toolchain --work . -- /work/t.lean   # library: toolchain/lib/lean; --work is /work, Lean's cwd is /
 ```
 
 `fetch` reads `release.json` first and checks it whole (self-digest, the id
@@ -50,17 +50,21 @@ digest; `--deep` also every artifact).
 | `fetch` | fetch (parts of) a release and verify every byte |
 | `verify` | verify a release directory |
 | `release` | write `release.json` + `SHA256SUMS` for a staged release directory |
-| `run` | run the wasm64 Lean CLI under Node (`--artifact <dir> [--lib <dir>] -- <lean args>`) |
+| `run` | run the wasm64 Lean CLI under Node (`--artifact <dir> [--lib <dir>] [--work <dir>] [--] <lean args>`): Lean's arguments start after `--` or at the first token that is not one of these flags; a repeated flag keeps its first value (a WARNING); `--work` is created only once the artifact checks pass. Lean's cwd is `/` (QED64's runner layout, so bakes are byte-identical to its): name files `/work/<file>`; `LEAN4_WASM64_CWD=work` keeps the older layout where relative paths land in `--work` |
 | `gate` | the release gate on a runtime (`--artifact <dir>`) |
-| `probe` | the persistent-path probe (`lean_wasm_compile`) |
+| `probe` | the persistent-path probe (`lean_wasm_compile`); `--cases <a.lean,…> [--passes n]` compiles each file n times, one `CASE {json}` line per compile (the gate's 0037 checks); an unknown flag or a stray argument is a WARNING |
 | `chunk` | chunk `lean.js` + `lean.wasm`, write the runtime manifest |
 | `pack` / `pack-set` | pack an olean tree / cut a release's packs from kernel build dirs (`packs.json`: roots, module lists, import closure) |
 | `unpack` / `inspect` | unpack (verifying every part; `--slim` leaves out `*.olean.private`, the tree QED64 bakes on) / inspect and deep-verify a pack |
-| `olean-imports` | the `import all` edges of an olean tree (the static half of a slim-bake audit) |
+| `olean-imports` | the `import all` edges of an olean tree (`--audit`, the static half of a slim-bake audit), or one `.olean`'s ModuleData entry counts as a JSON line (`--entries`); as a module, `oleanImportEntries` / `oleanImports` / `oleanExtEntryCounts` over any `Uint8Array` (types: `olean-imports.d.mts`) |
 | `id` | print the runtime build id of an artifact dir |
 
-Every command takes `--help`. As a library, `import { checkRuntimeManifest,
-runtimeBuildId, comparePatchIds, releaseDigest, … } from "lean4-wasm64"`.
+Every command takes `--help`. `run` and `probe` re-exec themselves with
+`--stack-size=8192` (same PID) when started without one. As a library,
+`import { checkRuntimeManifest, runtimeBuildId, buildIdOfArtifact,
+buildIdOfArtifactSync, ensureStackSize, comparePatchIds, releaseDigest, … }
+from "lean4-wasm64"` (`buildIdOfArtifactSync(dir)` returns `null` when the
+artifact has no `lean.wasm`; the async `buildIdOfArtifact` throws).
 
 ## Specification
 

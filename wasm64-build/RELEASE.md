@@ -57,6 +57,16 @@ unpairs); `--note <text>` adds a release note; `--recut <n>` a tools-only re-cut
 (it needs `--match-runtime` with the base release's runtime manifest, since a
 re-cut keeps the runtime). Relative paths are the caller's.
 
+A tools-only re-cut `<base>-r<n>` (package version `<v>-<k7>-r<n>`, committed):
+the base published first; `--runtime` the base's build dir, `--match-runtime
+<base>/runtime/runtime-manifest.json`, `--packs-from <base>/profiles` (every
+pack, `lean-lib` included, then comes from the base); pre-seed
+`<id>/native64/native64.tar.gz` and `<id>.native64.stamp` from the base when
+the stamp still matches; pass the base's notes again plus one for the re-cut.
+Then `SHA256SUMS` must differ from the base's only in `tools/` (and
+`release.json`). Cut it from the line when the line's gate still passes on the
+base runtime; otherwise from a branch off the base's record commit.
+
 `stage-release.sh` refuses to stage a runtime without a passing gate for that
 commit and that `lean.wasm`, a commit that is not on `qed64-wasm64` or carries
 another upstream tag, a dirty `wasm64-build/js`, a package version that does

@@ -191,14 +191,20 @@ output and reap the process, as `gate.mjs` does.
 `main`'s Node prologue (`src/util/shell.cpp`), which runs after `preRun`,
 copies the HOST `LEAN_PATH` into the VFS environment, mounts the host's `/home`
 and `/tmp` (NODEFS) and `chdir`s the VFS to the host cwd. A Node host that wants
-its own library therefore sets `process.env.LEAN_PATH` itself and makes the
-host cwd a directory reachable at that same path — `node-runner.mjs` pins
-`LEAN_PATH=/lib/lean` (the `--lib` tree; with `--lib` it also shadows the
-artifact's own `lib/lean` wherever the VFS could reach it, so `--lib` is the
-only library Lean sees) and makes the work dir both `/work` and the cwd, so
-relative Lean paths land in it. A work dir whose host path overlaps the VFS
-layout (`/work`, `/lib`, `/bin`, …) keeps the cwd at `/`: pass `/work/…` paths
-there.
+its own library therefore sets `process.env.LEAN_PATH` itself, and chooses the
+VFS cwd through the host cwd — `node-runner.mjs` pins `LEAN_PATH=/lib/lean`
+(the `--lib` tree; with `--lib` it also shadows the artifact's own `lib/lean`
+wherever the VFS could reach it, so `--lib` is the only library Lean sees) and
+runs Lean at the VFS root `/`, with the work dir mounted at `/work` — QED64's
+runner layout. Lean names the main module after the input's path relative to
+the cwd (`moduleNameOfFileName`): at `/`, `/work/probe.lean` is `work.probe`
+and `-o /work/X.olean /work/X.lean` works; anywhere else the name falls back
+to `_stdin` (with `-o`: an error), and the snapshot a bake writes records it,
+so only the `/` layout bakes byte-identically to QED64's runner. Relative Lean
+paths resolve in the in-memory root: pass `/work/…` paths (`--root=/work`
+names `/work/X.lean` `X`). `LEAN4_WASM64_CWD=work` keeps the earlier layout
+(the work dir, mirrored at its host path, is the cwd, so relative paths land
+in it).
 
 ## 4. The stdin ring (0031) [RT]
 

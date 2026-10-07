@@ -8,21 +8,48 @@
 // surfaces an error diagnostic without killing the runtime.
 //
 // Usage: node persistent-probe.mjs --artifact <dir>   (or $LEAN4_WASM64_ARTIFACT)
+// Started without --stack-size, it re-execs itself with --stack-size=8192 (same PID).
 
 import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
 import { createRequire } from "node:module";
+import { applyCliContract, ensureStackSize } from "./cli-args.mjs";
 
-function arg(name, fallback) {
-  const i = process.argv.indexOf(`--${name}`);
-  return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
-}
-if (process.argv.includes("--help") || process.argv.includes("-h")) {
-  console.log("usage: persistent-probe.mjs --artifact <dir> [--cases <a.lean,b.lean,…> [--passes <n>]]   (or $LEAN4_WASM64_ARTIFACT)\nBoot the runtime persistently and drive lean_wasm_compile (the browser's one-shot path). With --cases: compile each file n times (default 2), one `CASE {json}` line per compile, then `CASES DONE` (the gate's 0037 checks). run as: lean4-wasm64 probe   (or: node --stack-size=8192 persistent-probe.mjs)");
-  process.exit(0);
-}
-const artifactArg = arg("artifact", process.env.LEAN4_WASM64_ARTIFACT || process.env.QED64_LEAN_ARTIFACT);
+// First, before the contract prints anything: replaces this process (same PID) when
+// started without --stack-size, so every line below is printed once.
+ensureStackSize("persistent-probe");
+
+// The shared flag contract (cli-args.mjs) as QED64's persistent-probe and snapshot-probe apply
+// it (passthrough null): --help/-h anywhere, a value position included, prints the help and
+// exits 0 before reading anything; --flag=value works; an unknown flag (`--` included) is
+// `persistent-probe: WARNING — unknown flag <tok> ignored`, a stray positional `… unexpected
+// argument <tok> ignored`; a repeated flag keeps its first value and an empty one is ignored
+// (a WARNING each). Values come from the contract's result, not an indexOf over argv, so a
+// value spelled like a flag (`--cases --artifact`) is never read as that flag.
+const USAGE = "persistent-probe.mjs --artifact <dir> [--cases <a.lean,b.lean,…> [--passes <n>]]";
+const cli = applyCliContract({
+  tool: "persistent-probe",
+  usage: USAGE,
+  flags: { artifact: 1, cases: 1, passes: 1 },
+  required: [],
+  passthrough: null,
+  passthroughRequired: false,
+  help: [
+    `usage: ${USAGE}   (or $LEAN4_WASM64_ARTIFACT)`,
+    "Boot the runtime persistently and drive lean_wasm_compile (the browser's one-shot path): a good compile, a resident recompile, an error that does not kill the runtime, and survival after it.",
+    "run as: lean4-wasm64 probe   (or: node persistent-probe.mjs — started without --stack-size it re-execs itself with --stack-size=8192, same PID)",
+    "",
+    "flags:",
+    "  --artifact <dir>  bin/lean.js + bin/lean.wasm and lib/lean (mounted at /lib/lean); or $LEAN4_WASM64_ARTIFACT",
+    "  --cases <files>   comma-separated .lean files: compile each n times, one `CASE {json}` line per compile, then `CASES DONE` (the gate's 0037 checks)",
+    "  --passes <n>      passes over --cases (default 2)",
+    "  -h, --help        print this help and exit 0, before any side effect",
+    "",
+    "exit codes: 0 PERSISTENT PROBE PASS (or CASES DONE), 1 PERSISTENT PROBE FAIL or an unreadable --cases file, 2 no artifact, 3 the runtime aborted",
+  ].join("\n"),
+});
+const artifactArg = cli.values.artifact || process.env.LEAN4_WASM64_ARTIFACT || process.env.QED64_LEAN_ARTIFACT;
 if (!artifactArg) {
   console.error("error: no runtime artifact — pass --artifact <dir> or set LEAN4_WASM64_ARTIFACT");
   process.exit(2);
@@ -35,9 +62,9 @@ const libLean = path.join(artifactDir, "lib/lean");
 // 2) in this one resident runtime and print one `CASE {json}` line per compile, then two plain
 // compiles (reuse-error, reuse-clean) and `CASES DONE`. The gate judges the lines. Without
 // --cases the probe's sequence and output are unchanged. Paths are resolved before the chdir("/").
-const caseSources = (arg("cases", "") || "").split(",").filter(Boolean)
+const caseSources = (cli.values.cases ?? "").split(",").filter(Boolean)
   .map((f) => ({ name: path.basename(f, ".lean"), source: fs.readFileSync(path.resolve(f), "utf8") }));
-const casePasses = Number(arg("passes", "2"));
+const casePasses = Number(cli.values.passes ?? "2");
 
 const asPtr = (v) => (typeof v === "bigint" ? v : BigInt(Math.trunc(v)));
 const asNum = (v) => (typeof v === "bigint" ? Number(v) : v);

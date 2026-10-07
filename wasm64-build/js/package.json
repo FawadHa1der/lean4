@@ -19,6 +19,7 @@
   },
   "files": [
     "*.mjs",
+    "*.d.mts",
     "probes/",
     "formats/",
     "packs.json",

@@ -19,76 +19,71 @@
 //   $LEAN4_WASM64_ARTIFACT (or the older $QED64_LEAN_ARTIFACT); there is no
 //   default — this file ships in the lean4-wasm64 package and knows no repo.
 //   The work dir (default: a fresh temporary directory, printed to stderr) is
-//   mounted at /work read-write; the library tree at /lib/lean.
+//   mounted at /work read-write; the library tree at /lib/lean. Lean's cwd is the
+//   VFS root "/" (QED64's runner layout): name files /work/<file>. Started without
+//   --stack-size, it re-execs itself with --stack-size=8192 (same PID).
 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import vm from "node:vm";
 import { createRequire } from "node:module";
+import { applyCliContract, ensureStackSize } from "./cli-args.mjs";
 
-function parseArgs(argv) {
-  const out = { artifact: null, work: null, lib: null, leanArgs: [] };
-  let i = 0;
-  while (i < argv.length) {
-    const a = argv[i];
-    if (a === "--artifact") {
-      out.artifact = argv[i + 1];
-      i += 2;
-    } else if (a === "--lib") {
-      out.lib = argv[i + 1];
-      i += 2;
-    } else if (a === "--work") {
-      out.work = argv[i + 1];
-      i += 2;
-    } else if (a === "--help" || a === "-h") {
-      out.help = true; // only before `--`: after it, --help is Lean's
-      i += 1;
-    } else if (a === "--") {
-      out.leanArgs = argv.slice(i + 1);
-      break;
-    } else {
-      out.leanArgs = argv.slice(i);
-      break;
-    }
-  }
-  return out;
-}
+// First, before the contract prints anything: replaces this process (same PID) when
+// started without --stack-size, so every line below is printed once.
+ensureStackSize("node-runner");
 
-const args = parseArgs(process.argv.slice(2));
-if (args.help) {
-  console.log([
-    "usage: node-runner.mjs --artifact <dir> [--lib <dir>] [--work <dir>] [--] <lean args…>",
+// The shared flag contract (cli-args.mjs) with QED64's runner grammar, passthrough "implicit"
+// (QED64 SPECS["node-runner"]): the runner's own flags are --artifact, --work and --lib, each
+// taking a value (--flag=value too). Lean's argv starts after `--` (which is not passed on) or,
+// with no warning, at the FIRST other token: an unknown --x, an --x=y of another name, a
+// positional, a single-dash flag. Everything from there is Lean's, verbatim: --help and the
+// runner's own flag names included. Before that point --help/-h (even in a value position:
+// `--artifact --help`) prints the help and exits 0 before any side effect; a repeated flag keeps
+// its first value and a flag without a value is ignored, one `node-runner: WARNING — …` line on
+// stderr each. A value-taking flag always takes the next token, even `--`.
+const USAGE = "node-runner.mjs --artifact <dir> [--lib <dir>] [--work <dir>] [--] <lean args…>";
+const cli = applyCliContract({
+  tool: "node-runner",
+  usage: USAGE,
+  flags: { artifact: 1, work: 1, lib: 1 },
+  required: [],
+  passthrough: "implicit",
+  passthroughRequired: false,
+  help: [
+    `usage: ${USAGE}`,
     "Run the wasm64 Lean CLI under Node (NODEFS): the artifact's bin/lean.js + bin/lean.wasm, the library at /lib/lean, the work dir at /work.",
-    "run as: lean4-wasm64 run   (or: node --stack-size=8192 node-runner.mjs)",
+    "run as: lean4-wasm64 run   (or: node node-runner.mjs — started without --stack-size it re-execs itself with --stack-size=8192, same PID)",
     "",
     "flags:",
     "  --artifact <dir>  bin/lean.js + bin/lean.wasm (and lib/lean unless --lib); or $LEAN4_WASM64_ARTIFACT",
     "  --lib <dir>       the olean tree mounted at /lib/lean (default: <artifact>/lib/lean)",
-    "  --work <dir>      mounted read-write at /work (default: a fresh temporary directory)",
-    "  -h, --help        print this help and exit 0 (after `--`, --help goes to Lean)",
+    "  --work <dir>      mounted read-write at /work, created when absent once the artifact checks pass (default: a fresh temporary directory);",
+    "                    Lean's cwd is /, so name files /work/<file> (/work/x.lean is module work.x, as under QED64's runner)",
+    "  -h, --help        print this help and exit 0, before any side effect (after Lean's arguments start, --help goes to Lean)",
+    "",
+    "arguments: Lean's own, verbatim: everything after --, or from the first token that is not one of the flags above",
+    "  (an unknown --x or --x=y, a positional); `-- --help` asks Lean. A repeated flag keeps its first value and a flag",
+    "  without a value is ignored, with one `node-runner: WARNING — …` line each.",
     "",
     "env: LEAN4_WASM64_PTHREAD_STACK_MB=<n> gives the runtime's pthread Workers an n-MiB stack (default 4);",
     "     0.68 reproduces a Chrome Worker's 500 KiB (deep recursion tests)",
+    "     LEAN4_WASM64_CWD=work makes the work dir Lean's cwd (the pre-r2 layout: relative paths land in --work;",
+    "     bakes then differ from QED64's runner in the main module name)",
     "",
-    "The one-shot CLI does not exit by itself: judge a job by its output (EMBED-RUNTIME.md).",
-  ].join("\n"));
-  process.exit(0);
-}
+    "exit codes: 2 no artifact, or lean.js or the library tree not found (nothing created); 3 the runtime aborted;",
+    "otherwise Lean's own. The one-shot CLI does not exit by itself: judge a job by its output (EMBED-RUNTIME.md).",
+  ].join("\n"),
+});
+const args = { artifact: cli.values.artifact ?? null, work: cli.values.work ?? null, lib: cli.values.lib ?? null, leanArgs: cli.passthrough };
+
 const artifactArg = args.artifact || process.env.LEAN4_WASM64_ARTIFACT || process.env.QED64_LEAN_ARTIFACT;
 if (!artifactArg) {
   console.error("error: no runtime artifact — pass --artifact <dir> (bin/lean.js, bin/lean.wasm) or set LEAN4_WASM64_ARTIFACT");
   process.exit(2);
 }
 const artifactDir = path.resolve(artifactArg);
-let workDir;
-if (args.work) {
-  workDir = path.resolve(args.work);
-  fs.mkdirSync(workDir, { recursive: true });
-} else {
-  workDir = fs.mkdtempSync(path.join(os.tmpdir(), "lean4-wasm64-work-"));
-  console.error(`node-runner: work dir ${workDir}`);
-}
 
 const leanJs = path.join(artifactDir, "bin/lean.js");
 // --lib replaces the library tree (e.g. an unpacked profile pack) so bakes run
@@ -104,24 +99,50 @@ if (!fs.existsSync(libLean)) {
   console.error(`error: ${libLean} not found`);
   process.exit(2);
 }
+// Created only once the inputs are known to exist: a refused run (exit 2) leaves the
+// filesystem as it found it, --work and the default temporary directory alike (QED64's
+// node-runner, docs/CLI-CONTRACT.md exit class 2 there).
+let workDir;
+if (args.work) {
+  workDir = path.resolve(args.work);
+  fs.mkdirSync(workDir, { recursive: true });
+} else {
+  workDir = fs.mkdtempSync(path.join(os.tmpdir(), "lean4-wasm64-work-"));
+  console.error(`node-runner: work dir ${workDir}`);
+}
 
 // lean_main's Node prologue (src/util/shell.cpp) runs after preRun: it copies the
 // HOST LEAN_PATH into the VFS environment and chdirs the VFS to the host cwd. Pin
-// both: LEAN_PATH to the mounted library (a host value — `lake env`, a project
-// shell — would replace --lib), and the cwd to the work dir, which preRun mirrors
-// at its host path, so relative Lean paths (-o x.olean, --incr-header-save=x.snap)
-// land in the work dir instead of the in-memory root.
-// realpath.native: the on-disk spelling, which process.cwd() reports (case-insensitive APFS)
-const workReal = fs.realpathSync.native(workDir);
-// The prologue mounts host /tmp and /home 1:1 (and reads /private/tmp as /tmp), so a work
-// dir there needs no mirror; one whose host path overlaps the VFS layout cannot have one
-// — its cwd stays "/" and relative Lean paths resolve in memory (use /work/… paths).
-const vfsCwd = workReal.replace(/^\/private\/tmp(?=\/|$)/, "/tmp");
-const collides = vfsCwd === "/" || /^\/(work|lib|bin|dev|proc|workspace)(\/|$)/.test(vfsCwd);
-const mirrorWork = !collides && !/^\/(tmp|home)(\/|$)/.test(vfsCwd);
-if (collides) console.error(`node-runner: work dir ${workReal} overlaps the runtime's own paths; relative Lean paths resolve in memory — pass /work/… paths`);
+// both. LEAN_PATH: the mounted library (a host value — `lake env`, a project shell —
+// would replace --lib). The cwd: "/", as QED64's runner has always had it
+// (pipeline/snapshot/node-runner.mjs there): Lean names the main module after the
+// input's path relative to the cwd (Shell.lean moduleNameOfFileName), so
+// /work/probe.lean is `work.probe` at "/" and `_stdin` (with -o: an error) anywhere
+// else, and a snapshot baked here is byte-identical to one baked by QED64's runner
+// only at "/". Relative Lean paths therefore resolve in the in-memory root, not the
+// work dir: pass /work/… paths (--root=/work names /work/X.lean `X`).
+// LEAN4_WASM64_CWD=work keeps the 4.34.0-41ec565 / -e1a79c1 layout instead (the cwd is
+// the work dir, mirrored at its host path) for scripts that pass relative paths; its
+// bakes differ from QED64's in the main module name.
+let vfsCwd = "/";
+let mirrorWork = false;
+const cwdMode = process.env.LEAN4_WASM64_CWD ?? "";
+if (cwdMode && cwdMode !== "work") console.error(`node-runner: WARNING — LEAN4_WASM64_CWD=${cwdMode} ignored (only \`work\` is known); the cwd is /`);
+if (cwdMode === "work") {
+  // realpath.native: the on-disk spelling, which process.cwd() reports (case-insensitive APFS)
+  const workReal = fs.realpathSync.native(workDir);
+  // The prologue mounts host /tmp and /home 1:1 (and reads /private/tmp as /tmp), so a work
+  // dir there needs no mirror; one whose host path overlaps the VFS layout cannot have one.
+  const inVfs = workReal.replace(/^\/private\/tmp(?=\/|$)/, "/tmp");
+  if (inVfs === "/" || /^\/(work|lib|bin|dev|proc|workspace)(\/|$)/.test(inVfs)) {
+    console.error(`node-runner: work dir ${workReal} overlaps the runtime's own paths; relative Lean paths resolve in memory — pass /work/… paths`);
+  } else {
+    vfsCwd = workReal;
+    mirrorWork = !/^\/(tmp|home)(\/|$)/.test(inVfs);
+  }
+}
 process.env.LEAN_PATH = "/lib/lean";
-process.chdir(collides ? "/" : workReal);
+process.chdir(vfsCwd);
 // Emscripten forwards process.argv[1] as argv[0]; present the virtual install
 // layout so Lean derives /lib/lean as its sysroot.
 process.argv[1] = "/bin/lean";
@@ -174,14 +195,14 @@ globalThis.Module = {
         mkdirTree(d);
         try { FS.mount(NODEFS, { root: d }, d); } catch { /* mounted */ }
       }
-      if (mirrorWork) {
-        mkdirTree(workReal);
-        try { FS.mount(NODEFS, { root: workReal }, workReal); } catch { /* mounted */ }
+      if (mirrorWork) { // LEAN4_WASM64_CWD=work only
+        mkdirTree(vfsCwd);
+        try { FS.mount(NODEFS, { root: vfsCwd }, vfsCwd); } catch { /* mounted */ }
       }
       // With --lib, the built-in search entry (<artifact>/lib/lean, from lean.js's host path)
       // must answer nothing else: shadow it with --lib wherever it is reachable — through the
-      // work-dir mirror, or through the prologue's own /home and /tmp mounts, which come after
-      // preRun (so the shadow is re-laid behind them).
+      // work-dir mirror (LEAN4_WASM64_CWD=work), or through the prologue's own /home and /tmp
+      // mounts, which come after preRun (so the shadow is re-laid behind them).
       const builtinLibs = binDirs.map((d) => path.join(path.dirname(d), "lib", "lean"));
       const shadow = () => {
         if (!args.lib) return;

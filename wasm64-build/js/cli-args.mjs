@@ -6,9 +6,15 @@
 //   an unknown flag  a WARNING on stderr, then ignored
 //   --flag=value     rewritten to the two-token form the tool reads
 //   a repeated flag  the first value wins (a warning)
+//   --stack-size     a tool that boots the runtime in its own process re-execs
+//                    itself with --stack-size=8192 when started without one
+//                    (ensureStackSize, below)
 // `spec` = { tool, usage, help, flags: {name: arity 0|1}, required: [[name, …], …],
 //            passthrough: null | "explicit" | "implicit", passthroughRequired }.
 // It rewrites process.argv in place, so tools read their flags with a plain indexOf.
+import path from "node:path";
+import { isMainThread } from "node:worker_threads";
+
 export function cliContract(spec, args, io = { out: (s) => console.log(s), err: (s) => console.error(s), exit: (c) => process.exit(c) }) {
   const values = {};
   const warnings = [];
@@ -47,9 +53,59 @@ export function cliContract(spec, args, io = { out: (s) => console.log(s), err: 
   return { values, passthrough, args: normalized };
 }
 
-/** Apply the contract to this process's argv (rewriting it in place). */
-export function applyCliContract(spec) {
+/**
+ * Apply the contract to this process's argv (rewriting it in place) and return
+ * cliContract's result, { values, passthrough, args }: `values` holds each
+ * flag's FIRST non-empty value (booleans as true), `passthrough` the arguments
+ * after `--` (or, "implicit", from the first token that is not a flag of the
+ * spec). Tools may keep reading process.argv with indexOf instead; the return
+ * value is what a parser that must not misread a value spelled like a flag
+ * (`--cases --artifact`) uses. Null only when an injected io.exit returned.
+ */
+export function applyCliContract(spec, io = undefined) {
   const args = process.argv.slice(2);
-  const normalized = cliContract(spec, args)?.args ?? args;
+  const result = cliContract(spec, args, io);
+  const normalized = result?.args ?? args;
   if (normalized.join("\0") !== args.join("\0")) process.argv.splice(2, args.length, ...normalized);
+  return result;
+}
+
+const STACK_SIZE_FLAG = /^--stack[-_]size(=|$)/;
+
+/**
+ * The tools that boot the wasm runtime in their own process (node-runner,
+ * persistent-probe) need V8's --stack-size=8192 (formats/HOSTING.md). Started
+ * without any --stack-size, this replaces the process with itself plus that
+ * flag through process.execve: the same PID, the same stdin/stdout/stderr, the
+ * new image's exit code, nothing printed, so a supervisor that pipes and
+ * SIGKILLs the PID (QED64's supervised-run and bake-snapshot, the gate's
+ * timeout) sees one process. The new image's execArgv holds the flag, so there
+ * it returns "present": no loop, no environment guard. An explicit
+ * --stack-size of any size (either spelling) is respected. Where execve cannot
+ * work (Windows, os400, a Worker, --permission without --allow-child-process)
+ * or would drop an IPC channel (a fork()ed tool), one WARNING says how to run
+ * the tool and it continues as before; a call that fails anyway adds Node's own
+ * ExperimentalWarning to that WARNING.
+ * Call it FIRST, before anything is printed or process.argv is rewritten: the
+ * re-executed image runs everything again, so a line printed before it would
+ * print twice. Ported from QED64 pipeline/toolchain/artifact-paths.mjs
+ * (ensureStackSize), plus the platform guard above.
+ */
+export function ensureStackSize(tool, kib = 8192, proc = process) {
+  if (proc.execArgv.some((a) => STACK_SIZE_FLAG.test(a))) return "present";
+  const how = `run it as node --stack-size=${kib} ${path.basename(proc.argv[1] ?? tool)} (formats/HOSTING.md)`;
+  // execve cannot work there (Windows, os400, a Worker, --permission without
+  // --allow-child-process): say so once, before Node's own call would queue its
+  // ExperimentalWarning next to ours
+  if (typeof proc.execve !== "function" || proc.channel || proc.platform === "win32" || proc.platform === "os400"
+      || (proc === process && !isMainThread) || proc.permission?.has?.("child") === false) {
+    console.error(`${tool}: WARNING — started without --stack-size and cannot re-exec itself with it; ${how}`);
+    return "absent";
+  }
+  try {
+    proc.execve(proc.execPath, [proc.execPath, ...proc.execArgv, `--stack-size=${kib}`, ...proc.argv.slice(1)], { ...proc.env });
+  } catch (e) {
+    console.error(`${tool}: WARNING — started without --stack-size and the re-exec failed (${e?.code ?? e?.message}); ${how}`);
+  }
+  return "absent";
 }

@@ -175,14 +175,21 @@ in every `location` that adds one), `gzip off` for octet-stream, `try_files $uri
   browser's budget headlessly, `LEAN4_WASM64_PTHREAD_STACK_MB=0.68 lean4-wasm64 run …` (Chrome).
 - **`node --stack-size=8192`** for anything that boots the runtime in its own
   process (`node-runner`, `persistent-probe`, `gate`; `lean4-wasm64 run|gate|probe`
-  add it).
+  add it, and `node-runner` / `persistent-probe` started without it re-exec
+  themselves with it, same PID — under a `fork()` IPC channel they print one
+  WARNING instead).
 - **`bin/package.json` = `{ "type": "commonjs" }`** beside `lean.js`. The glue is
   CommonJS and every pthread re-loads `lean.js` as a Worker script; under a
   `"type": "module"` package.json (this package's own, if a runtime lands inside
   `node_modules/lean4-wasm64/`) each pthread dies with `require is not defined`.
   `lean4-wasm64 fetch --only runtime` writes it.
 - The artifact layout `node-runner` expects: `--artifact <dir>` with
-  `bin/lean.js`, `bin/lean.wasm` and `lib/lean` (or `--lib <dir>`).
+  `bin/lean.js`, `bin/lean.wasm` and `lib/lean` (or `--lib <dir>`). Lean's cwd
+  is the VFS root `/` and the work dir is `/work`: name files `/work/<file>`
+  (`/work/x.lean` is module `work.x`, as under QED64's runner; a snapshot baked
+  through either runner is byte-identical). `LEAN4_WASM64_CWD=work` makes the
+  work dir the cwd instead (relative paths land there; bakes then differ in the
+  main module name).
 - The one-shot CLI does not exit on its own (patches 0020/0031): judge a job by
   its output and reap the process, as `gate.mjs` does.
 - Browsers, for completeness: desktop Chrome/Edge 133+ or Firefox 134+; Safari

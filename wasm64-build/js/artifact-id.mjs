@@ -56,6 +56,33 @@ export async function buildIdOfArtifact(dir) {
   return buildIdFromSha256(await sha256File(wasm));
 }
 
+/** sha256 of a file, synchronously, in 8 MiB reads (no readFileSync 2 GiB limit). */
+export function sha256FileSync(file) {
+  const h = createHash("sha256");
+  const buf = Buffer.allocUnsafe(8 << 20);
+  const fd = fs.openSync(file, "r");
+  try {
+    for (let n; (n = fs.readSync(fd, buf, 0, buf.length, null)) > 0;) h.update(buf.subarray(0, n));
+  } finally {
+    fs.closeSync(fd);
+  }
+  return h.digest("hex");
+}
+
+/**
+ * The runtime build id of an artifact dir (<dir>/bin/lean.wasm) or a bin dir
+ * (<dir>/lean.wasm), synchronously; null when neither exists. The semantics of
+ * QED64's pipeline/toolchain/artifact-paths.mjs buildIdOfArtifact (which is sync),
+ * for callers that compare it without await. buildIdOfArtifact above stays async
+ * and throws on a missing bin/lean.wasm (`lean4-wasm64 id` exits 1 on that).
+ */
+export function buildIdOfArtifactSync(dir) {
+  for (const candidate of [path.join(dir, "bin", "lean.wasm"), path.join(dir, "lean.wasm")]) {
+    if (fs.existsSync(candidate)) return buildIdFromSha256(sha256FileSync(candidate));
+  }
+  return null;
+}
+
 /**
  * Structural check of an org.lean-browser64.runtime/v1 manifest, including the
  * build-id invariant. Pure string checks: it never hashes bytes (verify-release

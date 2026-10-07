@@ -3,4 +3,4 @@
 // "lean4-wasm64/<script>.mjs" resolve too (package.json exports "./*").
 export * from "./artifact-id.mjs";
 export * from "./release-record.mjs";
-export { cliContract, applyCliContract } from "./cli-args.mjs";
+export { cliContract, applyCliContract, ensureStackSize } from "./cli-args.mjs";
