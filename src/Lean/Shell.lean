@@ -145,7 +145,10 @@ def wasmCompile (code : String) (fileName : String := "<input>") : IO UInt32 := 
   -- and linters run in tasks, and `realizeConst`/`realizeValue` report through
   -- tasks even without it. Their messages exist only in the tasks a command leaves
   -- in `Command.State.snapshotTasks`; the loop waits for those after every command
-  -- and reports them (patch 0037), so no task outlives the call.
+  -- and reports them (patch 0037), so every task still recorded for a command has
+  -- finished when the call returns. Tasks that elaboration itself discards (a tactic
+  -- backtrack restoring a saved state, `liftCommandElabM`) are neither reported nor
+  -- awaited, as in the native frontend; a running one can finish after the call.
   let frontendCtx : Elab.Frontend.Context := { inputCtx }
   -- Start parsing commands right after the header, so the header's `import` lines
   -- are not re-parsed as commands (they aren't commands and would error).

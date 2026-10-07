@@ -48,9 +48,15 @@ const STACK = "--stack-size=8192";
 // it is waiting on (a blocking execFileSync could not, and the never-exiting
 // runtime would outlive it).
 let current = null;
+// the gate's temp dirs: removed when their run ends, and by the handler on a signal
+// (process.exit skips every pending `finally`)
+const tempDirs = new Set();
+const mkTemp = (prefix) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); tempDirs.add(d); return d; };
+const rmTemp = (d) => { fs.rmSync(d, { recursive: true, force: true }); tempDirs.delete(d); };
 for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   process.on(sig, () => {
     if (current) current.kill("SIGKILL");
+    for (const d of tempDirs) try { fs.rmSync(d, { recursive: true, force: true }); } catch {}
     process.exit(128 + os.constants.signals[sig]);
   });
 }
@@ -79,7 +85,7 @@ function runChild(args, timeoutMs, env = {}) {
 }
 
 async function runLean(source, label, env = {}) {
-  const work = fs.mkdtempSync(path.join(os.tmpdir(), "lean4-wasm64-gate-"));
+  const work = mkTemp("lean4-wasm64-gate-");
   fs.writeFileSync(path.join(work, "input.lean"), source);
   // Since the keepalive guard (patch 0020) and the resident transport (0031),
   // the one-shot CLI prints its output and then never exits — the Emscripten
@@ -91,7 +97,7 @@ async function runLean(source, label, env = {}) {
   try {
     return await runChild([STACK, runner, "--artifact", artifact, "--work", work, "--", "/work/input.lean"], 240_000, env);
   } finally {
-    fs.rmSync(work, { recursive: true, force: true });
+    rmTemp(work);
   }
 }
 let failures = 0;
@@ -198,7 +204,7 @@ const ASYNC = ["async-unknown-id", "async-unsolved", "async-term-mismatch", "asy
   "async-sorry", "async-guard-msgs",
   "async-nested-scope", "async-nested-ok", "async-multi", "async-kernel", "async-fanout"];
 const ASYNC_INFO = ["async-mixed-lint"]; // printed, not gated (upstream mixed-mode linting)
-const twinDir = fs.mkdtempSync(path.join(os.tmpdir(), "lean4-wasm64-gate-async-"));
+const twinDir = mkTemp("lean4-wasm64-gate-async-");
 let asyncRun;
 try {
   const files = [...ASYNC, ...ASYNC_INFO].map((n) => path.join(probes, `${n}.lean`));
@@ -210,7 +216,7 @@ try {
   asyncRun = await runChild([STACK, path.join(root, "persistent-probe.mjs"), "--artifact", artifact,
     "--cases", files.join(","), "--passes", "2"], 900_000);
 } finally {
-  fs.rmSync(twinDir, { recursive: true, force: true });
+  rmTemp(twinDir);
 }
 const cases = [...asyncRun.stdout.matchAll(/^CASE (\{.*\})$/gm)].flatMap((m) => { try { return [JSON.parse(m[1])]; } catch { return []; } });
 const caseCount = (ASYNC.length * 2 + ASYNC_INFO.length) * 2 + 2;
@@ -232,10 +238,14 @@ const msg = (severity, re, line, column) => (d) =>
 // exactly these messages, in this order, and this return value (0/1) — from the async compile AND
 // its synchronous twin. A twin that misses is a wrong expectation, not a runtime defect: calibrate
 // on a runtime without 0037, whose synchronous path already reports correctly.
+// Only a twin that ran and returned can show a wrong expectation; a run that stopped early is
+// the async-cases check's failure, not the expectations'.
+const verdictOf = (ok, a, s) => !s ? `no sync-twin result (the run stopped early: ${cases.length}/${caseCount} compiles)`
+  : ok(s) ? shown(a) : s.tag !== 0 ? `sync twin failed: IO error tag=${s.tag}` : `EXPECTATION WRONG, sync twin: ${shown(s)}`;
 const expectCase = (n, ret, preds, label) => {
   const ok = (c) => !!c && c.scalar === ret && c.diags.length === preds.length && preds.every((p, i) => p(c.diags[i]));
   const a = caseOf(n), s = caseOf(`${n}.sync`);
-  gate(ok(a) && ok(s), label, ok(s) ? shown(a) : `EXPECTATION WRONG, sync twin: ${shown(s)}`);
+  gate(ok(a) && ok(s), label, verdictOf(ok, a, s));
 };
 
 const insane = cases.filter((c) => c.tag !== 0 || dupsOf(c).length > 0 || foreignOf(c).length > 0);
@@ -252,10 +262,13 @@ expectCase(pn, 1, [msg("error", /^unsolved goals\n[\s\S]*⊢ n = n \+ 1$/, lineO
 pn = "async-term-mismatch";
 {
   const line = lineOf(pn, "theorem asyncTermMismatch", true);
-  const ok = (c) => !!c && c.scalar === 1 && c.diags.length >= 1 && c.diags.every((d) => d.severity === "error" && d.pos?.line === line);
+  // both errors, columns and order free: the body's type mismatch (only in the proof task when
+  // async) and `:= rfl`'s defeq-attribute check (the command's own message; col 0 when async)
+  const has = (c, re) => c.diags.some((d) => re.test(String(d.data)));
+  const ok = (c) => !!c && c.scalar === 1 && c.diags.length === 2 && c.diags.every((d) => d.severity === "error" && d.pos?.line === line)
+    && has(c, /^Type mismatch\n/) && has(c, /^Not a definitional equality/);
   const a = caseOf(pn), s = caseOf(`${pn}.sync`);
-  gate(ok(a) && ok(s), "[0037] async term-mode body: its elaboration errors are reported",
-    ok(s) ? shown(a) : `EXPECTATION WRONG, sync twin: ${shown(s)}`);
+  gate(ok(a) && ok(s), "[0037] async term-mode body: its elaboration errors are reported", verdictOf(ok, a, s));
 }
 pn = "async-global";
 expectCase(pn, 0, [
