@@ -316,7 +316,7 @@ function requireTagged(o, ctx) {
     : null;
   if (!problem) return true;
   if (o.dryRun && problem.closedBy?.every((s) => o.only.includes(s))) {
-    say(`  (${problem.text} yet — the ${problem.closedBy.join(" and ")} step${problem.closedBy.length > 1 ? "s" : ""} come first; planning only)`);
+    say(`  (${problem.text} yet — the ${problem.closedBy.join(" and ")} ${problem.closedBy.length > 1 ? "steps come" : "step comes"} first; planning only)`);
     return false;
   }
   throw new Stop(`${problem.text}: run \`publish ${o.id} --only record,push\` first`);
