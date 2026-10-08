@@ -43,7 +43,7 @@ export class SnapshotIndexError extends Error {}
 /** The index lock still held, by anyone, past the wait (a lock is never taken over). Nothing was written. */
 export class IndexLockHeldError extends Error {
   lockPath: string;
-  /** describeIndexLockHolder's text, or `a holder it cannot read (read failed: <error code>)` / `(read failed: ENOENT, every time)` when the lock cannot be read */
+  /** describeIndexLockHolder's text, or `a holder it cannot read (a symlink | a directory | not a regular file | unreadable: <error code>)` when the lock is no regular file or cannot be read */
   who: string;
   /** the bound waited (ms) */
   waitMs: number;
@@ -102,6 +102,8 @@ export function copyPathOf(indexPath: string, buildId: string): string;
 export interface IndexIO {
   /** readIndex passes "utf8"; the locks pass { encoding: "utf8", flag } (O_NOFOLLOW|O_NONBLOCK where the platform has them) */
   readFileSync(path: string, options: "utf8" | { encoding: "utf8"; flag?: string | number }): string;
+  /** the locks lstat an existing lock before reading it */
+  lstatSync(path: string): { isSymbolicLink(): boolean; isDirectory(): boolean; isFile(): boolean };
   openSync(path: string, flags: string): number;
   writeFileSync(fd: number, data: string): void;
   fsyncSync(fd: number): void;

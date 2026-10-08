@@ -309,26 +309,34 @@ test("acquireIndexLock: released between the bound and the read → taken; an un
   l.release();
   // a directory where the lock goes: the create says EEXIST, the read EISDIR — named, after the bound
   fs.mkdirSync(lock);
-  await assert.rejects(acquireIndexLock(lock, { waitMs: 100 }), (e) => e instanceof IndexLockHeldError && e.who === "a holder it cannot read (read failed: EISDIR)");
+  await assert.rejects(acquireIndexLock(lock, { waitMs: 100 }), (e) => e instanceof IndexLockHeldError && e.who === "a holder it cannot read (a directory)");
   assert.ok(fs.statSync(lock).isDirectory());
   fs.rmdirSync(lock);
   // a dangling symbolic link: the create says EEXIST, a read that followed it ENOENT forever; it is not followed
   fs.symlinkSync(path.join(d, "nowhere"), lock);
-  await assert.rejects(acquireIndexLock(lock, { waitMs: 100 }), (e) => e instanceof IndexLockHeldError && e.who === "a holder it cannot read (read failed: ELOOP)");
-  assert.deepEqual(createWorkLock(lock), { taken: false, who: "a holder it cannot read (read failed: ELOOP)" });
-  assert.equal(fs.readlinkSync(lock), path.join(d, "nowhere"));
+  await assert.rejects(acquireIndexLock(lock, { waitMs: 100 }), (e) => e instanceof IndexLockHeldError && e.who === "a holder it cannot read (a symlink)");
+  assert.deepEqual(createWorkLock(lock), { taken: false, who: "a holder it cannot read (a symlink)" });
+  // a symlink to a real file is no bake's lock either: never followed, never read
+  fs.rmSync(lock);
+  fs.writeFileSync(path.join(d, "a-pid"), `${process.pid}\n`);
+  fs.symlinkSync(path.join(d, "a-pid"), lock);
+  assert.deepEqual(createWorkLock(lock), { taken: false, who: "a holder it cannot read (a symlink)" });
+  assert.equal(fs.readlinkSync(lock), path.join(d, "a-pid")); // left exactly as found
   // a FIFO: opened without blocking, read as an empty holder
   fs.rmSync(lock);
   if (process.platform !== "win32" && spawnSync("mkfifo", [lock]).status === 0) {
-    await assert.rejects(acquireIndexLock(lock, { waitMs: 50 }), (e) => e.who === 'a holder it cannot read ("")');
-    assert.deepEqual(createWorkLock(lock), { taken: false, who: 'a holder it cannot read ("")' });
+    await assert.rejects(acquireIndexLock(lock, { waitMs: 50 }), (e) => e.who === "a holder it cannot read (not a regular file)");
+    assert.deepEqual(createWorkLock(lock), { taken: false, who: "a holder it cannot read (not a regular file)" });
   }
   // a lock that vanishes on every read (a platform without O_NOFOLLOW): named after 100 tries, not spun on
   fs.rmSync(lock, { force: true });
   fs.writeFileSync(lock, "1\n");
   const vanishing = { ...fs, readFileSync: (f, o) => { if (f === lock) { const e = new Error("ENOENT"); e.code = "ENOENT"; throw e; } return fs.readFileSync(f, o); } };
-  await assert.rejects(acquireIndexLock(lock, { waitMs: 0, io: vanishing }), (e) => e.who === "a holder it cannot read (read failed: ENOENT, every time)");
-  assert.equal(createWorkLock(lock, { io: vanishing }).who, "a holder it cannot read (read failed: ENOENT, every time)");
+  let vanishingReads = 0;
+  const counted = { ...vanishing, readFileSync: (f, o) => { if (f === lock) vanishingReads += 1; return vanishing.readFileSync(f, o); } };
+  await assert.rejects(acquireIndexLock(lock, { waitMs: 0, io: counted }), (e) => e.who === "a holder it cannot read (unreadable: ENOENT)");
+  assert.equal(vanishingReads, 101, "retried 100 times (QED64's bound), then named");
+  assert.equal(createWorkLock(lock, { io: vanishing }).who, "a holder it cannot read (unreadable: ENOENT)");
 });
 
 test("acquireIndexLock: the wait is aborted by its signal", async () => {

@@ -438,19 +438,25 @@ function createLock(lockPath, text, io) {
 /** O_NOFOLLOW where the platform has it (not Windows): a symbolic link at a lock path is read as unreadable (ELOOP), not followed. */
 // O_NONBLOCK: a FIFO at a lock path opens at once (and reads as empty) instead of blocking the bake.
 const READ_LOCK_FLAG = fs.constants.O_NOFOLLOW ? fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | (fs.constants.O_NONBLOCK ?? 0) : "r";
-/** How many times in a row a lock may vanish between its create (EEXIST) and its read before it is named as unreadable. */
+/** How many times a lock may vanish between its create (EEXIST) and its read and be retried (QED64's bound). */
 const VANISHING_READS = 100;
 
 /**
- * The text of an existing lock: { text }, { gone: true } (ENOENT: released meanwhile), or
- * { who } for one it cannot read (`a holder it cannot read (read failed: <code>)`). Symbolic
- * links are not followed: a dangling one would otherwise read as released on every try.
+ * The text of an existing lock, read without following a link (QED64 1a7cc0c's rule, its words):
+ * { text } for a regular file; { gone: true } when it was released meanwhile (ENOENT); else
+ * { who }: `a holder it cannot read (a symlink)` — an exclusive create never makes one, dangling
+ * or not —, `(a directory)`, `(not a regular file)` (a FIFO, a socket…) or `(unreadable: <code>)`.
+ * Each is named at once: open() keeps answering EEXIST for them while no read succeeds.
  */
 function readLock(lockPath, io) {
   try {
+    const st = io.lstatSync(lockPath);
+    if (st.isSymbolicLink()) return { who: unreadableHolder("a symlink") };
+    if (st.isDirectory()) return { who: unreadableHolder("a directory") };
+    if (!st.isFile()) return { who: unreadableHolder("not a regular file") };
     return { text: io.readFileSync(lockPath, { encoding: "utf8", flag: READ_LOCK_FLAG }) };
   } catch (e) {
-    return e?.code === "ENOENT" ? { gone: true } : { who: unreadableHolder(`read failed: ${e?.code ?? e?.message}`) };
+    return e?.code === "ENOENT" ? { gone: true } : { who: unreadableHolder(`unreadable: ${e?.code ?? e?.message}`) };
   }
 }
 
@@ -499,8 +505,8 @@ export async function acquireIndexLock(lockPath, { waitMs = INDEX_LOCK_WAIT_MS, 
     }
     if (Date.now() - started > waitMs) {
       const held = readLock(lockPath, io);
-      if (held.gone && (vanished += 1) < VANISHING_READS) continue; // released just then: straight back to the create
-      const who = held.gone ? unreadableHolder("read failed: ENOENT, every time") : held.who ?? describeIndexLockHolder(held.text, alive);
+      if (held.gone && (vanished += 1) <= VANISHING_READS) continue; // released just then: straight back to the create
+      const who = held.gone ? unreadableHolder("unreadable: ENOENT") : held.who ?? describeIndexLockHolder(held.text, alive);
       throw new IndexLockHeldError(lockPath, who, waitMs);
     }
     try {
@@ -525,8 +531,8 @@ export function createWorkLock(lockPath, { pid = process.pid, alive = pidAlive, 
     const fd = createLock(lockPath, text, io);
     if (fd === null) {
       const held = readLock(lockPath, io);
-      if (held.gone && (vanished += 1) < VANISHING_READS) continue; // released between the create and the read
-      return { taken: false, who: held.gone ? unreadableHolder("read failed: ENOENT, every time") : held.who ?? describeWorkLockHolder(held.text, alive) };
+      if (held.gone && (vanished += 1) <= VANISHING_READS) continue; // released between the create and the read
+      return { taken: false, who: held.gone ? unreadableHolder("unreadable: ENOENT") : held.who ?? describeWorkLockHolder(held.text, alive) };
     }
     let open = true;
     return {

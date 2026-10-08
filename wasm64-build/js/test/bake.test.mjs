@@ -590,7 +590,7 @@ test("--work's lock is never taken over: running, dead, unreadable or old, it re
   const before = tree(f.root);
   const d = bake(f);
   assert.equal(d.status, 2, d.stderr);
-  assert.deepEqual(d.err, [workRefusal(f, "a holder it cannot read (read failed: ELOOP)")]);
+  assert.deepEqual(d.err, [workRefusal(f, "a holder it cannot read (a symlink)")]);
   assert.deepEqual(tree(f.root), before);
   fs.rmSync(lock);
   for (const t of ["init.snap.tmp.42", "init.snap.tmp.7", "mathlib.snap.tmp.42"]) write(path.join(f.work, t), "a killed save");

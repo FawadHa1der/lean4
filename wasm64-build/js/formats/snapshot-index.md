@@ -216,11 +216,12 @@ deploy). The precedent is the runtime manifest's two copies
    time (the bake: 120 s from before its first attempt), then gives up and
    names the lock and its holder: `pid N (running on this host)`, `pid N (not
    running on this host)`, `a holder it cannot read ("<its first 200
-   characters>")`, or, when the lock itself cannot be read, `a holder it
-   cannot read (read failed: <error code>)` (a directory; a symbolic link,
-   which is not followed where the platform has `O_NOFOLLOW`, Windows aside)
-   or `a holder it cannot read (read failed: ENOENT, every time)` (a lock that
-   exists for the exclusive create yet vanishes on each of 100 reads). The bake then exits 1 with that line and
+   characters>")`, or, for a lock path that is no regular file or cannot be
+   read (read without following a link, as QED64's bake reads it), `a holder
+   it cannot read (a symlink)` (an exclusive create never makes one),
+   `(a directory)`, `(not a regular file)` or `(unreadable: <error code>)`; a
+   lock released between the create and the read is retried at most 100
+   times, then named `(unreadable: ENOENT)`. The bake then exits 1 with that line and
    `unindexed entry <json>`; its `.snapz` is in place and neither index is
    touched. Once no writer uses the directory, removing the lock and rerunning
    finishes the upsert. (A bake stopped by a signal after its `.snapz` is in
