@@ -9,6 +9,7 @@ below; `verify-release.mjs` checks every one of them on a release directory.
 | [release.md](release.md) | `lean4-wasm64.release/v1` | `release.mjs` | `fetch-release.mjs`, `verify-release.mjs`, every consumer that pins a release |
 | [runtime-manifest.md](runtime-manifest.md) | `org.lean-browser64.runtime/v1` | `chunk-runtime.mjs` | browser workers, `verify-release.mjs`, `fetch-release.mjs` |
 | [artifact-manifest.md](artifact-manifest.md) | `browser64.artifact-manifest` v1 | `pack.mjs` | browser workers (WORKERFS mounts), `unpack.mjs`, `inspect.mjs`, `verify-release.mjs` |
+| [snapshot-index.md](snapshot-index.md) | `qed64.snapshot-index/v1` | `bake-snapshot.mjs` (`snapshot-index.mjs`) | browser shells (QED64's `loadSnapshotIndex`, lean4game), sites' deploy tools; not part of a release |
 | [HOSTING.md](HOSTING.md) | — | — | anyone serving release bytes to a browser |
 
 The runtime's embedding ABI (exports, boot sequence, environment, the stdin
@@ -50,7 +51,7 @@ ring) is [`../../EMBED-RUNTIME.md`](../../EMBED-RUNTIME.md); the release process
 
 | Pair | Rule | Why |
 |---|---|---|
-| snapshot ↔ runtime | snapshot index entry `runtime` === runtime manifest `buildId` | a snapshot is a memory image of one binary's function table |
+| snapshot ↔ runtime | snapshot index entry `runtime` === runtime manifest `buildId` ([snapshot-index.md](snapshot-index.md)) | a snapshot is a memory image of one binary's function table |
 | pack ↔ runtime | pack manifest `content.lean.version` === runtime manifest `leanVersion` | an olean is readable only by the Lean version that wrote it (the githash check is compiled off; the manifests are the trust root) |
 | release ↔ runtime | `release.json` `runtime.buildId` === manifest `buildId`; `gate.wasmSha256` === `files["lean.wasm"].sha256` | the gate must have run on exactly the released binary |
 

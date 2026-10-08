@@ -41,7 +41,8 @@ jobs:
           npm pack --dry-run --json > /tmp/pack.json
           node -e '
             const files = JSON.parse(require("fs").readFileSync("/tmp/pack.json", "utf8"))[0].files.map((f) => f.path);
-            const need = ["cli.mjs", "node-runner.mjs", "gate.mjs", "fetch-release.mjs", "verify-release.mjs", "release.mjs", "pack-set.mjs", "packs.json", "formats/README.md", "formats/HOSTING.md", "probes/task-storm.lean"];
+            const need = ["cli.mjs", "node-runner.mjs", "gate.mjs", "fetch-release.mjs", "verify-release.mjs", "release.mjs", "pack-set.mjs", "packs.json", "formats/README.md", "formats/HOSTING.md", "probes/task-storm.lean",
+              "bake-snapshot.mjs", "snapshot-probe.mjs", "snapshot-index.mjs", "snapshot-index.d.mts", "formats/snapshot-index.md", "LICENSE"];
             const missing = need.filter((n) => !files.includes(n));
             const tests = files.filter((f) => f.startsWith("test/"));
             if (missing.length || tests.length) { console.error({ missing, tests }); process.exit(1); }

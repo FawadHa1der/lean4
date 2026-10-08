@@ -60,10 +60,12 @@ test("node-runner: Lean's cwd is the VFS root /, LEAN_PATH is pinned, /lib/lean 
     assert.equal(out.hostLeanPath, "/lib/lean"); // an inherited host LEAN_PATH never reaches the prologue
     assert.equal(out.envLeanPath, "/lib/lean");
     assert.deepEqual(out.leanArgs, ["/work/probe.lean"]);
-    assert.ok(has(out.mounts, lib ?? path.join(out.a, "lib", "lean"), "/lib/lean"), JSON.stringify(out.mounts));
-    assert.ok(has(out.mounts, out.work, "/work"), JSON.stringify(out.mounts));
+    // every host directory is mounted by its real path (a NODEFS root that is a symlink cannot be walked)
+    assert.ok(has(out.mounts, fs.realpathSync(lib ?? path.join(out.a, "lib", "lean")), "/lib/lean"), JSON.stringify(out.mounts));
+    assert.ok(has(out.mounts, fs.realpathSync(out.work), "/work"), JSON.stringify(out.mounts));
     const bin = path.join(out.a, "bin");
-    assert.ok(has(out.mounts, bin, bin), JSON.stringify(out.mounts)); // patch 0031: lean.js's host dir
+    assert.ok(has(out.mounts, fs.realpathSync(bin), bin), JSON.stringify(out.mounts)); // patch 0031: lean.js's host dir
+    assert.equal(out.mounts.filter(([, mp]) => mp === "/lib/lean" || mp === "/work").every(([root]) => root === fs.realpathSync(root)), true);
     assert.ok(has(out.mounts, fs.realpathSync("/tmp"), "/tmp")); // the prologue's symlinked roots, resolved
     assert.equal(out.mounts.some(([, mp]) => mp === out.workReal), false, "the work dir is not mirrored at its host path");
     assert.equal(out.stderr, "");
@@ -78,4 +80,13 @@ test("node-runner: LEAN4_WASM64_CWD=work keeps the pre-r2 layout (cwd = the work
   const bogus = layout([], { LEAN4_WASM64_CWD: "here" });
   assert.equal(bogus.cwd, "/");
   assert.equal(bogus.stderr, "node-runner: WARNING — LEAN4_WASM64_CWD=here ignored (only `work` is known); the cwd is /\n");
+});
+
+test("node-runner: a --lib (or --work) given as a symbolic link to a directory is mounted by its target, so the VFS can walk it", () => {
+  const target = tmp();
+  const link = path.join(tmp(), "lib-link");
+  fs.symlinkSync(target, link);
+  const out = layout(["--lib", link]);
+  assert.ok(has(out.mounts, fs.realpathSync(target), "/lib/lean"), JSON.stringify(out.mounts));
+  assert.equal(out.mounts.some(([root]) => root === link), false, "the link itself is never a NODEFS root");
 });

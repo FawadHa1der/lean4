@@ -27,7 +27,8 @@ directory.
 | `release.json`, `SHA256SUMS` | the record and its digests | `release.mjs` |
 
 Snapshots (`.snapz`) are not in a release: they are memory images of one app's
-environment, baked by the app against a release's runtime.
+environment, baked by the app with `lean4-wasm64 bake` against a release's
+runtime (`js/formats/snapshot-index.md`).
 
 ## Cutting a release
 

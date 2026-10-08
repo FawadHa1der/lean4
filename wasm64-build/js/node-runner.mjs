@@ -12,7 +12,7 @@
 // Lean sysroot from the virtual executable path.
 //
 // Usage:
-//   node node-runner.mjs --artifact <dir> [--lib <dir>] [--work <dir>] [--] <lean args...>
+//   node node-runner.mjs --artifact <dir> [--lib <dir>] [--work <dir>] [--exit-with-parent [--parent-pid <pid>]] [--] <lean args...>
 //
 //   <dir> must contain bin/lean.js + bin/lean.wasm, and lib/lean (the olean
 //   tree) unless --lib names another tree. The artifact may also come from
@@ -36,18 +36,18 @@ ensureStackSize("node-runner");
 
 // The shared flag contract (cli-args.mjs) with QED64's runner grammar, passthrough "implicit"
 // (QED64 SPECS["node-runner"]): the runner's own flags are --artifact, --work and --lib, each
-// taking a value (--flag=value too). Lean's argv starts after `--` (which is not passed on) or,
+// taking a value (--flag=value too), and this package's --exit-with-parent (no value) and --parent-pid. Lean's argv starts after `--` (which is not passed on) or,
 // with no warning, at the FIRST other token: an unknown --x, an --x=y of another name, a
 // positional, a single-dash flag. Everything from there is Lean's, verbatim: --help and the
 // runner's own flag names included. Before that point --help/-h (even in a value position:
 // `--artifact --help`) prints the help and exits 0 before any side effect; a repeated flag keeps
 // its first value and a flag without a value is ignored, one `node-runner: WARNING — …` line on
 // stderr each. A value-taking flag always takes the next token, even `--`.
-const USAGE = "node-runner.mjs --artifact <dir> [--lib <dir>] [--work <dir>] [--] <lean args…>";
+const USAGE = "node-runner.mjs --artifact <dir> [--lib <dir>] [--work <dir>] [--exit-with-parent [--parent-pid <pid>]] [--] <lean args…>";
 const cli = applyCliContract({
   tool: "node-runner",
   usage: USAGE,
-  flags: { artifact: 1, work: 1, lib: 1 },
+  flags: { artifact: 1, work: 1, lib: 1, "exit-with-parent": 0, "parent-pid": 1 },
   required: [],
   passthrough: "implicit",
   passthroughRequired: false,
@@ -61,6 +61,12 @@ const cli = applyCliContract({
     "  --lib <dir>       the olean tree mounted at /lib/lean (default: <artifact>/lib/lean)",
     "  --work <dir>      mounted read-write at /work, created when absent once the artifact checks pass (default: a fresh temporary directory);",
     "                    Lean's cwd is /, so name files /work/<file> (/work/x.lean is module work.x, as under QED64's runner)",
+    "  --exit-with-parent  exit (1) once the process that started this one is gone: the one-shot CLI never exits by itself,",
+    "                    so a runner whose supervisor was SIGKILLed would otherwise run on (lean4-wasm64 bake passes it)",
+    "  --parent-pid <pid>  the pid of the process that spawned node-runner.mjs itself, which --exit-with-parent watches",
+    "                    (default: the parent pid when the runner starts, which misses a parent that died while Node",
+    "                    started); a live process that is not this runner's parent is exit 2. Not through `lean4-wasm64",
+    "                    run` or npx, which add a process: start node <package>/node-runner.mjs. lean4-wasm64 bake passes it",
     "  -h, --help        print this help and exit 0, before any side effect (after Lean's arguments start, --help goes to Lean)",
     "",
     "arguments: Lean's own, verbatim: everything after --, or from the first token that is not one of the flags above",
@@ -72,11 +78,47 @@ const cli = applyCliContract({
     "     LEAN4_WASM64_CWD=work makes the work dir Lean's cwd (the pre-r2 layout: relative paths land in --work;",
     "     bakes then differ from QED64's runner in the main module name)",
     "",
-    "exit codes: 2 no artifact, or lean.js or the library tree not found (nothing created); 3 the runtime aborted;",
-    "otherwise Lean's own. The one-shot CLI does not exit by itself: judge a job by its output (EMBED-RUNTIME.md).",
+    "exit codes: 2 no artifact, lean.js or the library tree not found, or a --parent-pid that is not a pid or not this runner's",
+    "parent (nothing created); 3 the runtime aborted;",
+    "1 with --exit-with-parent once the parent is gone; otherwise Lean's own. The one-shot CLI does not exit by itself:",
+    "judge a job by its output (EMBED-RUNTIME.md).",
   ].join("\n"),
 });
 const args = { artifact: cli.values.artifact ?? null, work: cli.values.work ?? null, lib: cli.values.lib ?? null, leanArgs: cli.passthrough };
+
+// --exit-with-parent: the one-shot CLI never exits by itself (patches 0020/0031), so a runner
+// whose supervisor died without passing a signal on (a SIGKILLed bake) would run on, writing into
+// --work. Installed first, before any check: the parent is --parent-pid when given (the bake passes
+// its own pid, so a bake that died while this Node was still starting is seen at once: the ppid
+// is then another process's), else the ppid now. Every 500 ms, and at once: when this process's
+// ppid is no longer the parent, or the parent no longer runs, exit 1. The runtime runs on
+// pthreads (Workers); this thread only serves their proxied calls, so the check keeps running.
+if (cli.values["exit-with-parent"]) {
+  const given = cli.values["parent-pid"];
+  if (given !== undefined && !(/^[1-9]\d*$/.test(given) && Number(given) <= 0x7fffffff)) {
+    console.error(`error: --parent-pid ${JSON.stringify(given)} is not a pid`);
+    process.exit(2);
+  }
+  const parent = given !== undefined ? Number(given) : process.ppid;
+  // A live --parent-pid that is not this process's parent is a caller's mistake, not a parent gone.
+  if (process.ppid !== parent && process.ppid !== 1 && (() => { try { process.kill(parent, 0); return true; } catch (e) { return e?.code === "EPERM"; } })()) {
+    console.error(`error: --parent-pid ${parent} is not this runner's parent (its parent is ${process.ppid})`);
+    process.exit(2);
+  }
+  const gone = () => {
+    if (process.ppid !== parent) return true;
+    try { process.kill(parent, 0); return false; } catch (e) { return e?.code !== "EPERM"; }
+  };
+  const check = () => {
+    if (!gone()) return;
+    console.error(`node-runner: the parent process ${parent} is gone (--exit-with-parent); exiting`);
+    process.exit(1);
+  };
+  check();
+  setInterval(check, 500).unref();
+} else if (cli.values["parent-pid"] !== undefined) {
+  console.error("node-runner: WARNING — --parent-pid without --exit-with-parent is ignored");
+}
 
 const artifactArg = args.artifact || process.env.LEAN4_WASM64_ARTIFACT || process.env.QED64_LEAN_ARTIFACT;
 if (!artifactArg) {
@@ -124,6 +166,8 @@ if (args.work) {
 // LEAN4_WASM64_CWD=work keeps the 4.34.0-41ec565 / -e1a79c1 layout instead (the cwd is
 // the work dir, mirrored at its host path) for scripts that pass relative paths; its
 // bakes differ from QED64's in the main module name.
+/** A host path by its real spelling (symbolic links resolved); as given when it cannot be resolved. */
+const real = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
 let vfsCwd = "/";
 let mirrorWork = false;
 const cwdMode = process.env.LEAN4_WASM64_CWD ?? "";
@@ -181,8 +225,10 @@ globalThis.Module = {
         }
       };
       for (const dir of ["/lib/lean", "/work", "/bin", "/workspace"]) mkdirTree(dir);
-      FS.mount(NODEFS, { root: libLean }, "/lib/lean");
-      FS.mount(NODEFS, { root: workDir }, "/work");
+      // A NODEFS root that is a symbolic link cannot be walked (its root node is the link): mount
+      // every host directory by its real path. The VFS paths, and so the bytes, do not change.
+      FS.mount(NODEFS, { root: real(libLean) }, "/lib/lean");
+      FS.mount(NODEFS, { root: real(workDir) }, "/work");
       // Patch 0031 runs main on a pthread whose Node context derives the app
       // path from the HOST path of lean.js; Lean then stats that directory inside
       // the VFS. Mirror bin/ — only bin/: mirroring the whole artifact would put
@@ -193,7 +239,7 @@ globalThis.Module = {
       const binDirs = [...new Set([binDir, fs.realpathSync(binDir)])];
       for (const d of binDirs) {
         mkdirTree(d);
-        try { FS.mount(NODEFS, { root: d }, d); } catch { /* mounted */ }
+        try { FS.mount(NODEFS, { root: real(d) }, d); } catch { /* mounted */ }
       }
       if (mirrorWork) { // LEAN4_WASM64_CWD=work only
         mkdirTree(vfsCwd);
@@ -207,7 +253,7 @@ globalThis.Module = {
       const shadow = () => {
         if (!args.lib) return;
         for (const lib of builtinLibs) {
-          try { if (FS.analyzePath(lib).exists) FS.mount(NODEFS, { root: libLean }, lib); } catch { /* already shadowed */ }
+          try { if (FS.analyzePath(lib).exists) FS.mount(NODEFS, { root: real(libLean) }, lib); } catch { /* already shadowed */ }
         }
       };
       shadow();

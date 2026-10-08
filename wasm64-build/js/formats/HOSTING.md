@@ -30,9 +30,13 @@ showcase); a host that breaks one gets a refusal, not a slow page.
    No manifest is rewritten. The **site's own mutable pointers stay the site's**
    and are never in a release: `/profiles/index.json` (which packs the page
    offers — QED64 lists lean-core + mathlib-essential, lean4game lean-core only)
-   and `/snapshots/*`. So a Worker routes `/profiles/index.json` to the site's
-   prefix and the rest of `/profiles/*` and `/runtime/*` to the release (or tries
-   the site first and falls back to the release).
+   and `/snapshots/*` — the snapshot index, its `.snapz` files and the per-build
+   index copies `/snapshots/index.<buildId>.json` and
+   `/snapshots/profiles-index.<buildId>.json` ([snapshot-index.md](snapshot-index.md);
+   the profile index's copy lives under `/snapshots/` too, because every other
+   `/profiles/*` path is the release's). So a Worker routes `/profiles/index.json`
+   to the site's prefix and the rest of `/profiles/*` and `/runtime/*` to the
+   release (or tries the site first and falls back to the release).
 5. **Bytes are served exactly.** No `Content-Encoding` and no transformation on
    `*.part-NNN` (runtime chunks, pack parts) or `*.snapz`: they are verified at
    their served length and SHA-256, and a chunk that arrives encoded is refused.
@@ -55,18 +59,24 @@ showcase); a host that breaks one gets a refusal, not a slow page.
    const IMMUTABLE  = "public, max-age=31536000, immutable";
    const REVALIDATE = "public, max-age=0, must-revalidate";
    function isImmutable(pathname) {
-     if (/\/runtime-manifest(\.[^/]*)?\.json$/.test(pathname) || /\/index\.json$/.test(pathname)) return false;
+     if (/\/runtime-manifest(\.[^/]*)?\.json$/.test(pathname) || /\/(?:profiles-)?index(\.[^/]*)?\.json$/.test(pathname)) return false;
      return /(\.part-\d+|\.snapz|\.chunk\.|[0-9a-f]{16,})/.test(pathname);
    }
    ```
 
-   Digest-named files are immutable; every `runtime-manifest*.json` — the
-   per-build one too, because the build id covers `lean.wasm` only and a relink
-   that changes `lean.js` keeps the name — and every `index.json` revalidate;
-   everything else revalidates. The regex matches 16+ hex digits **anywhere in
-   the path**: never put a build id or a full digest in a directory name above a
-   manifest (a release prefix `lean4-wasm64/lean-v4.34.0-a8817d0/` carries only
-   7, which is why release ids use 7).
+   Digest-named files are immutable. Every `runtime-manifest*.json` revalidates
+   — the per-build one too, because the build id covers `lean.wasm` only and a
+   relink that changes `lean.js` keeps the name — and so does every index:
+   `index.json`, the per-build snapshot index copy `index.<buildId>.json` and a
+   site's profile index copy `profiles-index.<buildId>.json`
+   ([snapshot-index.md](snapshot-index.md)). A rebake for the same runtime
+   rewrites a copy under the same name, and the 16 hex digits of its build id
+   would otherwise make it immutable for a year (a 404 before its upload stays
+   uncached by rule 7). Everything else revalidates. The regex matches 16+ hex
+   digits **anywhere in the path**: never put a build id or a full digest in a
+   directory name above a manifest (a release prefix
+   `lean4-wasm64/lean-v4.34.0-a8817d0/` carries only 7, which is why release ids
+   use 7).
 9. **Range** (recommended, not required): a single `bytes=` range with strong
    `If-Range`, `416` + `Content-Range: bytes */size` + `no-store` when
    unsatisfiable. The browser cache uses it to resume large `.snapz` downloads.
@@ -90,7 +100,8 @@ showcase); a host that breaks one gets a refusal, not a slow page.
 16 MiB (16,777,216 B) parts, and so does every pack's gzip transport. Snapshots
 (`.snapz`, up to ~365 MB) are single objects and need an object store or a host
 without a per-file cap; they are a site's product, not part of a toolchain
-release.
+release (baked with `lean4-wasm64 bake`, indexed as
+[snapshot-index.md](snapshot-index.md) specifies).
 
 ## Where a release lives
 
@@ -101,8 +112,9 @@ release.
 | a site's origin | served, mapped at `/runtime/*`, `/profiles/*` (but `/profiles/index.json`: the site's) | Yes |
 
 The R2 prefix holds only immutable names (the release's own files; the mutable
-per-site pointers — `profiles/index.json`, `snapshots/index.json`, the site's
-choice of runtime — stay in the site's prefix), so it is uploaded with
+per-site pointers — `profiles/index.json`, `snapshots/index.json`, the per-build
+copies `snapshots/index.<buildId>.json` and `snapshots/profiles-index.<buildId>.json`,
+the site's choice of runtime — stay in the site's prefix), so it is uploaded with
 `rclone copy --immutable --s3-no-check-bucket --checksum`, never `sync`, digest-named objects first
 and `release.json` last:
 
@@ -133,6 +145,50 @@ A site whose Worker serves one R2 prefix today needs a per-route prefix to
 serve `/runtime/*` and `/profiles/*` from `lean4-wasm64/<id>/` while its
 snapshots and its `profiles/index.json` stay in its own prefix.
 
+## Snapshot indexes: the pinned copies
+
+A site's snapshot index names the runtime its entries were baked for, and a
+shell built for another runtime refuses them. So the index is pinned like the
+runtime manifest: beside the mutable `/snapshots/index.json` the site serves
+`/snapshots/index.<buildId>.json`, the same bytes, for every runtime a deployed
+shell may be paired with (and, for a site that pins its profile index the same
+way, `/snapshots/profiles-index.<buildId>.json`). `lean4-wasm64 bake` writes the
+copy beside the `index.json` it upserts; a site that merges baked entries into
+its served index publishes a copy derived from the merged index instead.
+
+- **Reading.** A shell paired with build id B:
+  1. reads the mutable `index.json` (revalidating: `cache: "no-cache"` in a
+     browser) and checks it: the `schema`, a `snapshots` array, every entry
+     well formed (`name` and `url` strings, `imports` an array, `runtime` a
+     string when present, the page fields as snapshot-index.md defines them)
+     and every `url` on the page's origin;
+  2. only when B has the runtime/v1 shape `^wasm64-[0-9a-f]{16}$` (any other
+     paired id is ignored, and then no copy is ever read) and an entry's
+     `runtime` is a string other than B, reads the copy `index.<B>.json` from
+     the same directory (the index URL's query and fragment dropped), with
+     step 1's checks, and **uses it only if it has entries and every one names
+     B**; a `404`, HTML, a network error, a malformed body, an empty copy or a
+     copy naming any other runtime keeps the mutable index;
+  3. loads only entries whose `runtime` is B (formats/README.md, pairing).
+
+  Mutable first, not copy first: an index paired with the shell costs no
+  second request, so a site that publishes no copies never logs a `404` for
+  one (a failed resource load, which breaks console allowlists) while it stays
+  paired. QED64 implements this as `loadSnapshotIndex(url, { pairedBuildId })`
+  (`pairedCopyOr`).
+- **Uploading, an invariant:** the copy for runtime R reaches the server before
+  any mutable index that names R, and before a shell paired to R is deployed;
+  the outgoing index's copy is pinned first if it is missing. The order
+  `.snapz` files, copies, mutable indexes, deploy (QED64's) meets it and keeps
+  every shell that reads the copies on its pairing. The stricter order
+  `.snapz` files, copies, deploy, `index.json` last also keeps a deployed shell
+  that reads only the mutable index (one older than the copies) clear of the
+  window in which that index names a runtime it does not run — provided the
+  newly deployed shell reads the copies.
+- **Caching:** the copies revalidate like `index.json` (rule 8); a request for
+  a copy that is not there yet is a `404` with `no-store` (rule 7), never a
+  cached miss and never an HTML fallback.
+
 ## A minimal isolated static host
 
 `python3 -m http.server` gets every content type right and sends none of the
@@ -141,7 +197,7 @@ isolation headers; it cannot boot the runtime. Twenty lines fix that (tested):
 ```python
 import http.server, re, sys
 IMMUTABLE = re.compile(r"(\.part-\d+|\.snapz|\.chunk\.|[0-9a-f]{16,})")
-MUTABLE = re.compile(r"/runtime-manifest(\.[^/]*)?\.json$|/index\.json$")
+MUTABLE = re.compile(r"/runtime-manifest(\.[^/]*)?\.json$|/(?:profiles-)?index(\.[^/]*)?\.json$")
 class H(http.server.SimpleHTTPRequestHandler):
     extensions_map = {**http.server.SimpleHTTPRequestHandler.extensions_map,
                       ".wasm": "application/wasm", ".js": "text/javascript", ".mjs": "text/javascript",

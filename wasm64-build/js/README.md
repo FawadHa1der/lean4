@@ -2,8 +2,9 @@
 
 Tools for the Lean 4 wasm64 (Memory64) toolchain built from
 [`FawadHa1der/lean4`](https://github.com/FawadHa1der/lean4) branch
-`qed64-wasm64`: fetch and verify a release, run the runtime under Node, and
-produce the artifacts a release is made of (chunked runtime, library packs).
+`qed64-wasm64`: fetch and verify a release, run the runtime under Node,
+produce the artifacts a release is made of (chunked runtime, library packs),
+and bake the environment snapshots a site serves against a release's runtime.
 
 Node ≥ 24, no dependencies. The package version is the release it was cut
 with: `4.34.0-e1a79c1-r2` belongs to release `lean-v4.34.0-e1a79c1-r2`.
@@ -50,26 +51,45 @@ digest; `--deep` also every artifact).
 | `fetch` | fetch (parts of) a release and verify every byte |
 | `verify` | verify a release directory |
 | `release` | write `release.json` + `SHA256SUMS` for a staged release directory |
-| `run` | run the wasm64 Lean CLI under Node (`--artifact <dir> [--lib <dir>] [--work <dir>] [--] <lean args>`): Lean's arguments start after `--` or at the first token that is not one of these flags; a repeated flag keeps its first value (a WARNING); `--work` is created only once the artifact checks pass. Lean's cwd is `/` (QED64's runner layout, so bakes are byte-identical to its): name files `/work/<file>`; `LEAN4_WASM64_CWD=work` keeps the older layout where relative paths land in `--work` |
+| `run` | run the wasm64 Lean CLI under Node (`--artifact <dir> [--lib <dir>] [--work <dir>] [--exit-with-parent [--parent-pid <pid>]] [--] <lean args>`): Lean's arguments start after `--` or at the first token that is not one of these flags; a repeated flag keeps its first value (a WARNING); `--work` is created only once the artifact checks pass. Lean's cwd is `/` (QED64's runner layout, so bakes are byte-identical to its): name files `/work/<file>`; `LEAN4_WASM64_CWD=work` keeps the older layout where relative paths land in `--work`; `--exit-with-parent [--parent-pid <pid>]` (runner flags, not Lean's) exits once the process that started it is gone; `--parent-pid` is the pid of the process that spawns `node-runner.mjs` itself (so `node <package>/node-runner.mjs`, not `lean4-wasm64 run` or npx, which add a process); the bake passes both, with its own pid |
 | `gate` | the release gate on a runtime (`--artifact <dir>`) |
 | `probe` | the persistent-path probe (`lean_wasm_compile`); `--cases <a.lean,…> [--passes n]` compiles each file n times, one `CASE {json}` line per compile (the gate's 0037 checks); an unknown flag or a stray argument is a WARNING |
+| `bake` | bake an environment snapshot (`--lib <tree> --work <dir> --out <dir>` required; `--artifact <dir>`, else `LEAN4_WASM64_ARTIFACT`, else `QED64_LEAN_ARTIFACT`, required too; `--name`, `--probe`, `--reserve`, `--roots`/`--label`/`--initial-bytes`, `--entry-fields <json object>`, `--reap-quiet-ms`/`--reap-stable-ms`, `--allow-legacy-imports`, `--runner`): runs the runner (default: this package's `node-runner.mjs`) on `/work/probe.lean` with `--incr-header-save`, reaps its kept-alive exit, gzips the `.snap` to the content-addressed `<name>.<digest16>.snapz` and upserts `index.json` and its per-build copy `index.<buildId>.json` under `index.json.lock` (`formats/snapshot-index.md`; QED64's bake takes the same lock). **No lock is ever taken over**: a held `index.json.lock` is waited for at most 120 s, then the bake exits 1 naming it and its holder, with `unindexed entry <json>` (the `.snapz` kept, neither index touched); one bake per `--work`: `<work>/.bake.lock` holds the bake's pid and then its runner's, and a held one refuses the bake at once (exit 2, nothing changed). Remove a lock only once no bake uses its directory; a rerun then finishes. The runner's environment is exactly `PATH`, `HOME`, `TMPDIR`, `LEAN_COMPACTOR_RESERVE`, `QED64_ALLOW_LEGACY_IMPORTS=1` when asked for and `QED64_PROFILE_INIT` when non-empty. The probe's header is read as Lean reads it (one Lean rejects is refused, exit 2). Exit 0 baked, 1 the job failed (every refusal after the runner started), 2 refused before any side effect, 128+n a signal it received (passed to the runner; no index write; a `.snapz` already written is kept and its entry printed). Stop a bake with SIGTERM, which it passes to its runner and which releases its locks; a SIGKILL leaves `<work>/.bake.lock` behind (and `<out>/index.json.lock` when it lands during the index write); the package's runner, started with `--exit-with-parent --parent-pid <bake pid>`, exits by itself, another `--runner` keeps running until stopped. A closed stdout never stops a bake; a bake that crashes with its runner running kills it and keeps `.bake.lock` |
+| `snapshot-probe` | load a baked `.snap` through the worker's export (`--via-mem`: the browser's path) and compile a probe on it (`(--snap <file> \| --fresh-import) --lib <tree> (--probe-file <file> \| --probe <source>)`): `SNAPSHOT PROBE PASS` / `SNAPSHOT PROBE FAIL: …`; a watchdog thread SIGKILLs the probe past `--watchdog-ms` |
 | `chunk` | chunk `lean.js` + `lean.wasm`, write the runtime manifest |
 | `pack` / `pack-set` | pack an olean tree / cut a release's packs from kernel build dirs (`packs.json`: roots, module lists, import closure) |
 | `unpack` / `inspect` | unpack (verifying every part; `--slim` leaves out `*.olean.private`, the tree QED64 bakes on) / inspect and deep-verify a pack |
 | `olean-imports` | the `import all` edges of an olean tree (`--audit`, the static half of a slim-bake audit), or one `.olean`'s ModuleData entry counts as a JSON line (`--entries`); as a module, `oleanImportEntries` / `oleanImports` / `oleanExtEntryCounts` over any `Uint8Array` (types: `olean-imports.d.mts`) |
 | `id` | print the runtime build id of an artifact dir |
 
-Every command takes `--help`. `run` and `probe` re-exec themselves with
-`--stack-size=8192` (same PID) when started without one. As a library,
+Every command takes `--help`. `run`, `probe` and `snapshot-probe` re-exec
+themselves with `--stack-size=8192` (same PID) when started without one.
+`lean4-wasm64 bake` and `lean4-wasm64 snapshot-probe` replace the dispatcher
+(`process.execve`), so the tool runs in the PID its caller started — a caller
+that SIGKILLs or measures that PID gets the tool itself; where execve cannot
+work (Windows, a Worker, a `fork()` IPC channel, `--permission`) one WARNING,
+and they run as its child like every other command. `npx lean4-wasm64 …` adds
+a process of its own above the dispatcher: a caller that needs the tool's PID
+runs `node <package>/bake-snapshot.mjs` (or `node --stack-size=8192
+<package>/snapshot-probe.mjs`). As a library,
 `import { checkRuntimeManifest, runtimeBuildId, buildIdOfArtifact,
 buildIdOfArtifactSync, ensureStackSize, comparePatchIds, releaseDigest, … }
 from "lean4-wasm64"` (`buildIdOfArtifactSync(dir)` returns `null` when the
-artifact has no `lean.wasm`; the async `buildIdOfArtifact` throws).
+artifact has no `lean.wasm`; the async `buildIdOfArtifact` throws); the
+snapshot index writer is `lean4-wasm64/snapshot-index.mjs` (types:
+`snapshot-index.d.mts`).
 
 ## Specification
 
 `formats/` is the contract: identity rules, pairing rules and the release
 layout (`formats/README.md`), `release.json` (`formats/release.md`), the runtime
-manifest, the pack manifest, and how to serve release bytes to a browser
-(`formats/HOSTING.md`). The runtime's embedding ABI is `EMBED-RUNTIME.md` in
-the repository's `wasm64-build/`.
+manifest, the pack manifest, the snapshot index (`formats/snapshot-index.md`),
+and how to serve release bytes to a browser (`formats/HOSTING.md`). The
+runtime's embedding ABI is `EMBED-RUNTIME.md` in the repository's
+`wasm64-build/`.
+
+## License
+
+Apache-2.0 (`LICENSE`). `bake-snapshot.mjs`, `snapshot-probe.mjs` and
+`snapshot-index.mjs` were ported from QED64 (MIT, same author) and relicensed
+Apache-2.0 by the author; each says so in its header.

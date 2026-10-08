@@ -23,7 +23,8 @@
     "probes/",
     "formats/",
     "packs.json",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=24"
