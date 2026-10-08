@@ -12,11 +12,15 @@
 #   wasm64-build/import-release.sh accept  <tag>     # fast-forward qed64-wasm64 to import/<tag> (LOCAL only)
 #   wasm64-build/import-release.sh release <tag> [stage-release.sh options]
 #                                                    # stage + verify the lean4-wasm64 release (RELEASE.md)
+#   wasm64-build/import-release.sh publish <id> [publish-release.mjs options]
+#                                                    # the owner's step: record + tag, push, GitHub release,
+#                                                    # R2, each verified; resumable (--dry-run to preview)
 #   wasm64-build/import-release.sh status  [<tag>]   # where an import stands
 #   wasm64-build/import-release.sh run     <tag>     # import -> build -> gate, stopping at the first thing
 #                                                    # that needs judgment (conflicts, build break, gate fail)
 #
-# Nothing here pushes, uploads or deploys: `accept` prints the push command and
+# Only `publish` pushes or uploads, and the repository owner runs it. Otherwise
+# nothing here pushes, uploads or deploys: `accept` prints the push command and
 # the downstream lanes (RELEASE-PIPELINE.md) end at a ship gate the repository
 # owner runs by hand. The version imported so far is not stored anywhere — it
 # is the newest upstream stable tag that is an ancestor of the branch.
@@ -242,5 +246,6 @@ case "${1:-}" in
   status) cmd_status "${2:-}" ;;
   run)    cmd_run "${2:-}" ;;
   release) shift; exec "$REPO/wasm64-build/stage-release.sh" "$@" ;;
-  *) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  publish) shift; exec node "$REPO/wasm64-build/publish-release.mjs" "$@" ;;
+  *) awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$REPO/wasm64-build/import-release.sh"; exit 2 ;;
 esac

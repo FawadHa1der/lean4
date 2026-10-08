@@ -112,13 +112,17 @@ rclone copy <release dir> $R2 --immutable --s3-no-check-bucket --checksum --filt
   --header-upload "Content-Type: application/octet-stream" --transfers 4 --s3-chunk-size 64M
 rclone copy <release dir> $R2 --immutable --s3-no-check-bucket --checksum --filter '- /release.json' --filter '+ *.json' \
   --filter '+ /SHA256SUMS' --filter '- *' --header-upload "Content-Type: application/json"
-rclone copyto <release dir>/release.json ${R2}release.json --immutable --s3-no-check-bucket --header-upload "Content-Type: application/json"
+rclone copy <release dir> $R2 --immutable --s3-no-check-bucket --checksum --filter '+ /release.json' --filter '- *' \
+  --header-upload "Content-Type: application/json"
 ```
 
 (rclone applies filter rules in order, first match wins: hence `--filter` rather
 than mixed `--include`/`--exclude`. `--s3-no-check-bucket`: an object-scoped R2
 token may not create buckets, and without it rclone tries to — a single-file
-`copyto` then fails with 403 AccessDenied on CreateBucket.
+copy then fails with 403 AccessDenied on CreateBucket. `release.json` goes up
+with `copy` and a filter, not `copyto`: `copyto` ignores `--immutable` and would
+replace a different `release.json`. `wasm64-build/import-release.sh publish
+<id>` runs these passes and verifies them.)
 
 `SHA256SUMS` rides the JSON pass only for simplicity; tools read it, not
 browsers. An object uploaded earlier with a wrong type keeps it — `--checksum`

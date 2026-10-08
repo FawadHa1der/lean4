@@ -341,17 +341,19 @@ cat <<EOF
 
 Staged and verified: $REL   (digest $DIGEST)
 $( [ "$ON_ORIGIN" = no ] && echo "NOTE: $C is not on origin/$LINE yet — push the line before publishing." )
-Next (RELEASE.md): commit the record, tag it, then the owner publishes —
+Next (RELEASE.md): the owner publishes — record + tag, push, GitHub, R2, each verified, resumable:
+  $REPO/wasm64-build/import-release.sh publish $ID --release-dir $REL --dry-run     # then without --dry-run
+The manual fallback (none of publish's checks: no resume, no SHA-256 or R2 verification):
   mkdir -p $REPO/wasm64-build/releases && cp $REL/release.json $REPO/wasm64-build/releases/$ID.json
   git -C $REPO add wasm64-build/releases/$ID.json && git -C $REPO commit -m "release $ID"
   git -C $REPO tag -a $ID -m "lean4-wasm64 $ID ($DIGEST)"
   # repository owner — the line and the tag first, then the bytes:
-  git -C $REPO push origin $LINE $ID
+  $( [ -n "$RECUT" ] && [ "$(git -C "$REPO" symbolic-ref -q HEAD)" != "refs/heads/$LINE" ] && echo "git -C $REPO push origin refs/tags/$ID      # a re-cut staged on a branch off its base: the tag alone" || echo "git -C $REPO push --atomic origin $LINE $ID" )
   gh release create $ID --repo FawadHa1der/lean4 --draft --verify-tag --title "lean4-wasm64 $ID" --notes "Toolchain release $ID. Pin: --id $ID --digest $DIGEST. Contents and digests: release.json"
   (cd $REL && find . -type f | sed 's|^\./||' | xargs -n 25 gh release upload $ID --repo FawadHa1der/lean4)   # flat, by basename
-  gh release edit $ID --repo FawadHa1der/lean4 --draft=false
+  gh release edit $ID --repo FawadHa1der/lean4 --tag $ID --verify-tag --draft=false
   # R2 (served layout; objects, then manifests, then release.json — js/formats/HOSTING.md):
   rclone copy $REL qed64-r2:qed64-artifacts/lean4-wasm64/$ID/ --immutable --s3-no-check-bucket --checksum --filter '- *.json' --filter '- SHA256SUMS' --header-upload "Content-Type: application/octet-stream" --transfers 4 --s3-chunk-size 64M
   rclone copy $REL qed64-r2:qed64-artifacts/lean4-wasm64/$ID/ --immutable --s3-no-check-bucket --checksum --filter '- /release.json' --filter '+ *.json' --filter '+ /SHA256SUMS' --filter '- *' --header-upload "Content-Type: application/json"
-  rclone copyto $REL/release.json qed64-r2:qed64-artifacts/lean4-wasm64/$ID/release.json --immutable --s3-no-check-bucket --header-upload "Content-Type: application/json"
+  rclone copy $REL qed64-r2:qed64-artifacts/lean4-wasm64/$ID/ --immutable --s3-no-check-bucket --checksum --filter '+ /release.json' --filter '- *' --header-upload "Content-Type: application/json"   # copy, not copyto: copyto ignores --immutable
 EOF

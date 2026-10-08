@@ -78,17 +78,31 @@ verification report (`<id>.verify.json`). It runs `verify-release --deep` last
 prints the commands below, with the record's digest.
 
 ```bash
-# 3. the record and the tag (local)
-mkdir -p wasm64-build/releases && cp ../wasm64-lean-kernel-release/<id>/release.json wasm64-build/releases/<id>.json
-git add wasm64-build/releases/<id>.json && git commit -m "release <id>"
-git tag -a <id> -m "lean4-wasm64 <id> (sha256:<digest>)"
-# 4. publish — the repository owner, by hand (the commands are printed in full)
-git push origin qed64-wasm64 <id>
-gh release create <id> --draft … ; gh release upload <id> <every file, flat> ; gh release edit <id> --draft=false
-rclone copy … --immutable   # three passes: objects, manifests, release.json (js/formats/HOSTING.md)
+# 3 + 4. record, tag and publish — the repository owner, one command (publish-release.mjs)
+wasm64-build/import-release.sh publish <id> --dry-run    # read every state, print what it would do
+wasm64-build/import-release.sh publish <id>              # asks before the push and before going public
 ```
 
-Nothing in the pipeline pushes, uploads or publishes. A release is immutable
+`publish` does, each step only if it is not done yet (so a re-run resumes):
+commit `wasm64-build/releases/<id>.json` on the line and tag that commit; push
+the tag and the line up to it (an atomic fast-forward; a re-cut recorded on a
+branch off its base pushes its tag alone); create ONE GitHub release for the tag as a
+draft (or reuse the existing one; two releases for a tag is a stop, with the
+command that removes the stray empty draft), upload every file flat by basename
+(skipping assets whose SHA-256 already matches; an interrupted, byte-less
+upload is replaced on any release, an asset whose bytes differ only on a draft,
+never on a published release), verify every
+asset's SHA-256, and only then publish; copy to R2 in the served order
+(objects, then manifests + `SHA256SUMS`, then `release.json` — js/formats/HOSTING.md)
+and verify names, sizes, content types and every object's SHA-256; finally a
+consumer's anonymous `fetch --id --digest` of the GitHub release and
+`verify --deep`. `--only record,push,github,r2,fetch` runs a subset,
+`--r2-quick` skips R2's download-hash pass, `--fetch-check runtime|none`
+shortens the last step, `--yes` skips the two questions. `stage-release.sh` also prints the manual
+counterparts, as a fallback without publish's checks (no resume, no SHA-256 or
+R2 verification).
+
+Only `publish` pushes, uploads or publishes, and only the repository owner runs it. A release is immutable
 once tagged: the tag, the GitHub assets and the R2 prefix are never rewritten
 (until the tag exists, re-running the staging replaces the staged dir). A
 mistake is fixed by a new release; a change to the tools alone (same runtime,

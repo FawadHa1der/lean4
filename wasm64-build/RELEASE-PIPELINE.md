@@ -20,12 +20,12 @@ owns the lanes inside its own repository. This file is the map and the order.
  [G]  lean4game    closure sync → build-from-source.sh (core,trees,compat,games,bake,bundle) → cypress
                        ▼
  [S]  SHIP GATE — run by the repository owner, never by the pipeline:
-        git push (kernel line + release tag first), gh release / rclone of the release,
-        upload-artifacts.sh, deploy-app.sh — per app
+        import-release.sh publish <id> (record + tag, atomic push, GitHub, R2, each verified),
+        then upload-artifacts.sh, deploy-app.sh — per app
 ```
 
 Everything up to [S] is local and reversible. Nothing in this pipeline pushes,
-uploads or deploys.
+uploads or deploys; `publish` (the owner's command) is the one step that does.
 
 ## Why a merge, and why a tag
 
@@ -166,8 +166,11 @@ modules lag the compiled code until the next full import.
 ## Ship gate (repository owner)
 
 ```sh
-git -C wasm64-lean-kernel push origin qed64-wasm64 <release id>   # first: the apps' pins must name a pushed commit
-# the release: gh release create/upload/edit + rclone copy --immutable (printed by `import-release.sh release`)
+wasm64-lean-kernel/wasm64-build/import-release.sh publish <release id> --dry-run   # then without --dry-run (RELEASE.md)
+# first: the apps' pins must name a pushed commit and a published release. It commits and tags the record,
+# pushes the line and the tag atomically, publishes ONE GitHub release (every asset SHA-256-verified before
+# it goes public) and copies to R2 in the served order, verified. Manual fallback: the commands
+# `import-release.sh release` prints (push --atomic …), without those checks.
 # QED64
 scripts/upload-artifacts.sh && scripts/deploy-app.sh && git push
 # lean4game
