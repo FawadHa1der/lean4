@@ -2,18 +2,24 @@
 // reference"). A small first cut is staged and released once; each case clones its files outside
 // tools/ into a fresh <id>-r3 dir beside a new tgz, derives the config from the base's record as
 // by-reference staging does, and runs release.mjs as a separate process. Every refusal writes
-// nothing.
+// nothing, and ends by exitCode, not process.exit() (see exitSpy).
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { canonicalRelease, checkRecutBase, checkReleaseRecord, serializeRelease } from "../release-record.mjs";
 
 const pkg = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const run = (script, args) => spawnSync(process.execPath, [path.join(pkg, script), ...args], { encoding: "utf8" });
+// a timeout on every spawn: a tool that hangs (process.exit() after hashing can deadlock Node
+// 26.3's shutdown, fetch-release.mjs) fails its test within a minute, by name, not at CI's limit
+const run = (script, args, node = []) => {
+  const r = spawnSync(process.execPath, [...node, path.join(pkg, script), ...args], { encoding: "utf8", timeout: 60_000, killSignal: "SIGKILL" });
+  if (r.error) assert.fail(`${script} ${args.join(" ")}: ${r.error.code === "ETIMEDOUT" ? "still running after 60 s (a hang), killed" : r.error.message}`);
+  return r;
+};
 const KERNEL = "a8817d01f97227b1b04cc7d661b9e396f6ca8f34";
 const BASE_ID = "lean-v4.34.0-a8817d0", RECUT_ID = "lean-v4.34.0-a8817d0-r3";
 const RECUT_TGZ = "tools/lean4-wasm64-4.34.0-a8817d0-r3.tgz";
@@ -21,10 +27,22 @@ const made = [];
 const mkdtemp = (prefix) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); made.push(d); return d; };
 after(() => { for (const d of made) fs.rmSync(d, { recursive: true, force: true }); });
 
+/** Node flags for a preload that reports every process.exit() call on stderr (EXIT_CALLED), then
+ *  exits as asked: past its usage checks, release.mjs has hashed files, and a refusal there must
+ *  set process.exitCode and return (Node 26.3 can deadlock exiting during background JIT work). */
+let exitSpy;
+const EXIT_CALLED = /^l4w-test: process\.exit\(/m;
+
 /** The first cut every case re-cuts: <root>/<BASE_ID>/, released (release.json + SHA256SUMS). */
 let B;
 before(() => {
   const root = mkdtemp("l4w-recut-rel-");
+  const spy = path.join(root, "exit-spy.mjs");
+  fs.writeFileSync(spy, `import fs from "node:fs";
+const exit = process.exit;
+process.exit = function (code) { fs.writeSync(2, "l4w-test: process.exit(" + code + ") called\\n"); return exit.call(process, code); };
+`);
+  exitSpy = ["--import", pathToFileURL(spy).href];
   const bin = path.join(root, "bin");
   fs.mkdirSync(bin);
   fs.writeFileSync(path.join(bin, "lean.js"), Buffer.alloc(2500, 1));
@@ -101,7 +119,13 @@ function recut(edit = (c) => c) {
   fs.writeFileSync(configPath, JSON.stringify(config));
   return { root, dir, config, configPath };
 }
-const release = (s, ...extra) => run("release.mjs", ["--release", s.dir, "--config", s.configPath, ...extra]);
+/** release.mjs on a case, under exitSpy: whatever the outcome but a usage error (2, before any
+ *  read), it ends without process.exit(). */
+const release = (s, ...extra) => {
+  const r = run("release.mjs", ["--release", s.dir, "--config", s.configPath, ...extra], exitSpy);
+  if (r.status !== 2) assert.doesNotMatch(r.stderr, EXIT_CALLED, `release.mjs ${extra.join(" ")} (exit ${r.status}) called process.exit()`);
+  return r;
+};
 const written = (dir) => ["release.json", "SHA256SUMS"].filter((n) => fs.existsSync(path.join(dir, n)));
 const sumsOf = (dir) => new Map(fs.readFileSync(path.join(dir, "SHA256SUMS"), "utf8").trim().split("\n").map((l) => l.split("  ").reverse()));
 
@@ -244,4 +268,32 @@ test("config.base on a first cut, or tools/ that break S5, fails the record's ow
   assert.equal(r.status, 1, r.stdout);
   assert.match(r.stderr, /exactly one file under tools\/, tools\.tgz — got tools\/lean4-wasm64-4\.34\.0-a8817d0-r3\.tgz, tools\/lean4-wasm64-4\.34\.0-a8817d0\.tgz/);
   assert.deepEqual(written(s.dir), []);
+});
+
+test("each refusal after hashing sets exitCode and returns, never process.exit(): exit 1, its report, nothing written", () => {
+  // one case per refusal site; runtime/bin/leanmake is hashed before the first
+  const cases = [
+    ["the first checks", () => [], /^release: REFUSED — 1 problem\(s\):\n {2}config\.base names a base/],
+    ["files[]", (s) => { fs.writeFileSync(path.join(s.dir, "lists", ".DS_Store"), "x"); return ["--base", B.rel]; },
+      /^release: REFUSED — 1 problem\(s\):\n {2}lists\/\.DS_Store: dotfiles and unsafe names are not release files/],
+    ["the record's own rules", (s) => { s.config.tools.version = B.record.tools.version; return ["--base", B.rel]; },
+      /^release: REFUSED — the record would break its own rules:\n {2}[\s\S]*is not tools\/<package>-<version>\.tgz/],
+    ["checkRecutBase", (s) => { fs.writeFileSync(path.join(s.dir, "lists", "essential-modules.txt"), "Init\nMathlib\n"); return ["--base", B.rel]; },
+      new RegExp(`^release: REFUSED — not a re-cut by reference of ${BASE_ID}:\\n {2}files\\[\\]: lists/essential-modules\\.txt is not the base's bytes`)],
+  ];
+  for (const [label, setup, re] of cases) {
+    const s = recut();
+    const extra = setup(s);
+    fs.writeFileSync(s.configPath, JSON.stringify(s.config));
+    const r = run("release.mjs", ["--release", s.dir, "--config", s.configPath, ...extra], exitSpy);
+    assert.equal(r.status, 1, `${label}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, re, label);
+    assert.doesNotMatch(r.stderr, EXIT_CALLED, `${label}: process.exit() after hashing`);
+    assert.deepEqual(written(s.dir), [], label);
+  }
+  // the spy sees an exit: a usage error, before any read, still leaves by process.exit(2)
+  const s = recut();
+  const r = run("release.mjs", ["--release", s.dir, "--config", s.configPath, "--base", ""], exitSpy);
+  assert.equal(r.status, 2, r.stderr);
+  assert.match(r.stderr, /^l4w-test: process\.exit\(2\) called$/m);
 });

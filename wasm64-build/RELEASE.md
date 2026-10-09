@@ -73,7 +73,8 @@ A tools-only re-cut `<base>-r<n>`, by reference (decision 8; js/formats/release.
 
 Staging clones every file outside `tools/` from the mirror (copy-on-write where
 the file system has it, each clone hashed against the base's record), packs the
-tools, gates the packed tools on the mirror's runtime and `lean-lib`, writes
+tools, gates the packed tools on the base's runtime and `lean-lib` as cloned
+into the release dir (the hashed clones, not the mirror's files), writes
 the record with `base` and refuses unless it differs from the base's only in
 `id`, `base`, `gate.checks`, `tools`, `notes` and `tools/` — and unless
 `SHA256SUMS` differs only at `release.json` and the two tgz lines. It needs no
@@ -99,9 +100,13 @@ does not descend from the base, a clone whose bytes are not the base's, a gate
 failure (exit 31), any drift from the base's record, and a `SHA256SUMS`
 difference outside `tools/` and `release.json`. It writes
 `../wasm64-lean-kernel-release/<id>/` and, beside it, the release config
-(`<id>.config.json`), the packs' provenance (`<id>.pack-set.json`) and the
-verification report (`<id>.verify.json`). It runs `verify-release --deep` last
-(on failure it removes `release.json`, so nothing half-checked looks cut) and
+(`<id>.config.json`) and the verification report (`<id>.verify.json`); a
+release by value also writes the packs' provenance (`<id>.pack-set.json`),
+while a re-cut by reference writes none (its packs are the base's) and leaves
+the files listed above. A release by value runs `verify-release --deep` last;
+a re-cut by reference runs it, then the `SHA256SUMS` check against the base's,
+and writes its R2 lists only once both pass. On a failure it removes
+`release.json` and `SHA256SUMS`, so nothing half-checked looks cut. It then
 prints the commands below, with the record's digest.
 
 ```bash
@@ -123,9 +128,15 @@ asset's SHA-256, and only then publish; copy to R2 in the served order
 (objects, then manifests + `SHA256SUMS`, then `release.json` — js/formats/HOSTING.md)
 and verify names, sizes, content types and every object's SHA-256; finally a
 consumer's anonymous `fetch --id --digest` of the GitHub release and
-`verify --deep`. `--only record,push,github,r2,fetch` runs a subset,
-`--r2-quick` skips R2's download-hash pass, `--fetch-check
-auto|full|runtime|none` sets the last step, `--yes` skips the two questions.
+`verify --deep`, run with the tools the release ships. Before any step,
+whatever `--only` is and under `--dry-run` too, it verifies the staged dir,
+then unpacks the staged tools tgz: it must be `tools.package@tools.version`,
+and its own `verify` must pass the staged dir (with `--base` for a re-cut by
+reference), so no release is published that its own tools cannot read; the
+fetch step runs that unpacked reader. `--only record,push,github,r2,fetch`
+runs a subset, `--r2-quick` checks R2 by listing only (names, sizes, content
+types: no hashing at all), `--fetch-check auto|full|runtime|none` sets the
+last step, `--yes` skips the two questions.
 
 For a re-cut by reference, `publish` first — in preflight, before any push, and
 whatever `--only` is — reads the base's record at its tag, checks that the
@@ -136,7 +147,10 @@ uploads only the 3 own assets. R2 is a server-side copy of the shared paths
 from `lean4-wasm64/<base>/` (objects, then manifests), then the own files,
 `release.json` last; it is verified by listing, the own files' SHA-256 and an
 MD5 check of every shared object against the staged clones (objects R2 holds
-no MD5 for are download-hashed; `--r2-full` hashes everything). The fetch check
+no MD5 for are download-hashed; `--r2-full` hashes everything). `--r2-quick`
+skips both the own files' SHA-256 and that MD5 check of the copied objects:
+preflight's check of the base's prefix does not replace it, since it checks
+the source of the copy, not what the copy wrote. The fetch check
 is `runtime,tools`, run with the staged tgz's own `cli.mjs` (`--fetch-check
 full` for everything). `--r2-source local` uploads the shared files from the
 staged dir instead of copying them (the fallback if the base prefix is

@@ -24,20 +24,32 @@
 #                           the base release (served layout, e.g. `lean4-wasm64 fetch --only all` of
 #                           it, or its own staged dir) whose release.json is the record the base's tag
 #                           holds. No build dir, GATE-PASSED or Docker: every file outside tools/ is
-#                           cloned from the mirror, and the new tools are gated on its runtime + lean-lib.
+#                           cloned from the mirror and sha256-checked against that record, and the new
+#                           tools are gated on the base's runtime + lean-lib taken from those clones.
 #   --out <dir>             parent of the release dir (default ../wasm64-lean-kernel-release)
 #
 # The release dir is <out>/<id>; beside it sit <id>.config.json (the release
 # config), <id>.pack-set.json (where each pack came from), <id>.native64.stamp
-# and <id>.verify.json — inputs and provenance, not release files. A re-cut by
-# reference leaves, beside <id>.config.json and <id>.verify.json, <id>.gate/
-# (the artifact its gate ran on, kept for a re-run while <id>.gate.stamp
-# holds), <id>.tools/ (its tools tarball, extracted), <id>.gate.log and
-# <id>.r2-objects.txt / <id>.r2-manifests.txt (its shared paths, for the R2
-# copy). Re-running restages: runtime, lists and tools are rebuilt; the native64
-# tarball and packs packed by an earlier run are kept only if their recorded
-# fingerprints of the inputs still match. A release is immutable once its tag
-# exists; until then a re-run replaces it.
+# and <id>.verify.json — inputs and provenance, not release files. The last
+# step is verify-release --deep. Re-running restages: runtime, lists and tools
+# are rebuilt; the native64 tarball and packs packed by an earlier run are kept
+# only if their recorded fingerprints of the inputs still match.
+#
+# A re-cut by reference (--base; its node steps: stage-by-reference.mjs) runs, in
+# order: the clones (each sha256-checked), tools, the gate on the clones,
+# release.json (release.mjs --base), verify-release --deep --base, and last the
+# check that its SHA256SUMS differs from the base's at exactly release.json and
+# the two tarballs, which then writes <id>.r2-objects.txt / <id>.r2-manifests.txt
+# (its shared paths, for the R2 copy). A failure or an interrupt from
+# release.json on removes release.json and SHA256SUMS (as one during the gate's
+# fetch removes the base's record it reads there). Beside the release dir it
+# leaves <id>.config.json, <id>.verify.json, <id>.gate/ (the artifact its gate
+# ran on, kept for a re-run while <id>.gate.stamp holds), <id>.tools/ (its tools
+# tarball, extracted), <id>.gate.log and the R2 lists; no <id>.pack-set.json
+# (a by-value staging's sidecars of the same id are removed). Re-running
+# re-clones the files and repacks the tools.
+#
+# A release is immutable once its tag exists; until then a re-run replaces it.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -55,6 +67,12 @@ cd "$REPO"
 say() { printf '%s\n' "$*"; }
 die() { printf 'stage-release: %s\n' "$1" >&2; exit "${2:-1}"; }
 size_of() { wc -c < "$1" | tr -d ' '; }
+shq() { printf '%q' "$1"; }   # a path in a printed command: runnable as printed, spaces and all
+# While $REL holds a release.json that is not (yet) a checked one, any exit — an interrupt included —
+# removes it and SHA256SUMS, so a dir that was not staged never looks staged. The signal handlers
+# exit, which runs the EXIT one.
+guard_rel() { trap 'rm -f "$REL/release.json" "$REL/SHA256SUMS"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP; }
+unguard_rel() { trap - EXIT INT TERM HUP; }
 
 TAG="${1:-}"; [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$REPO/wasm64-build/stage-release.sh"; exit 2; }
 shift
@@ -87,23 +105,9 @@ done
 stage_by_reference() {
   V="${TAG#v}"
   BASE_REC_FILE="$BASE_REC_DIR/release.json"
+  SBR="$REPO/wasm64-build/stage-by-reference.mjs"   # the node steps (unit-tested: js/test/stage-by-reference.test.mjs)
   # ---------- the base: a first cut of $TAG, the record its tag holds ----------
-  BASE_REC_FIELDS="$(node --input-type=module - "$JS/release-record.mjs" "$BASE_REC_FILE" "$TAG" <<'JS'
-import fs from "node:fs";
-const [lib, file, tag] = process.argv.slice(2);
-const { RELEASE_ID, checkReleaseRecord } = await import(lib);
-const b = JSON.parse(fs.readFileSync(file, "utf8"));
-const p = checkReleaseRecord(b);
-const m = RELEASE_ID.exec(b?.id ?? "");
-if (!m || m[1] !== tag || m[3]) p.push(`it is ${b?.id}, not a first cut of ${tag} (lean-${tag}-<kernel7>): a re-cut by reference names its first cut`);
-if (b?.base !== undefined) p.push(`it is itself a re-cut by reference (of ${b.base?.id})`);
-if (b?.tools?.package !== "lean4-wasm64") p.push(`its tools are ${JSON.stringify(b?.tools?.package)}, not lean4-wasm64: a re-cut ships the base's package`);
-const leanLib = (b?.packs ?? []).find((k) => k?.id === "lean-lib");
-if (!leanLib) p.push("it has no lean-lib pack: the new tools are gated on the base's runtime and its lean-lib");
-if (p.length) throw new Error(`${file}: ${p.join("; ")}`);
-console.log([b.id, b.digest, b.kernel.commit, b.gate.wasmSha256, leanLib.rawSha256].join(" "));
-JS
-)" || die "the base at $BASE_REC_DIR cannot be re-cut by reference (reason above)"
+  BASE_REC_FIELDS="$(node "$SBR" base "$BASE_REC_FILE" "$TAG")" || die "the base at $BASE_REC_DIR cannot be re-cut by reference (reason above)"
   read -r BASE_REC_ID BASE_REC_DIGEST C WASM_SHA BASE_REC_LIB <<<"$BASE_REC_FIELDS"
   git rev-parse -q --verify "refs/tags/$BASE_REC_ID" >/dev/null \
     || die "tag $BASE_REC_ID is not in this repository (the base is pinned by its own tag): git fetch --no-tags origin refs/tags/$BASE_REC_ID:refs/tags/$BASE_REC_ID"
@@ -128,33 +132,9 @@ JS
   command -v npm >/dev/null || die "npm is not on PATH (the tools tarball is npm pack's)"
 
   # ---------- the mirror: every file of the base outside tools/, and nothing staging replaces ----------
-  node --input-type=module - "$JS/release-record.mjs" "$BASE_REC_FILE" "$BASE_REC_DIR" "$OUT" "$ID" <<'JS' || die "cannot stage from the mirror $BASE_REC_DIR (reason above)"
-import fs from "node:fs"; import path from "node:path";
-const [lib, file, mirror, out, id] = process.argv.slice(2);
-const { isRecutOwnPath } = await import(lib);
-const b = JSON.parse(fs.readFileSync(file, "utf8"));
-const p = [];
-// physical paths, also of what does not exist yet (its nearest existing ancestor, resolved)
-const real = (q) => {
-  q = path.resolve(q); const rest = [];
-  while (!fs.existsSync(q)) { rest.unshift(path.basename(q)); q = path.dirname(q); }
-  return path.join(fs.realpathSync(q), ...rest);
-};
-const within = (a, d) => a === d || a.startsWith(d + path.sep);
-const m = real(mirror);
-const hit = [id, `${id}.gate`, `${id}.tools`].map((n) => real(path.join(out, n))).filter((w) => within(m, w) || within(w, m));
-if (hit.length) p.push(`it overlaps ${hit.join(", ")}, which staging replaces (another --out)`);
-const bad = [];
-for (const f of b.files.filter((f) => !isRecutOwnPath(f.path))) {
-  let st = null;
-  try { st = fs.lstatSync(path.join(mirror, f.path)); } catch {}
-  if (!st) bad.push(`${f.path} missing`);
-  else if (!st.isFile()) bad.push(`${f.path} is not a regular file`);
-  else if (st.size !== f.bytes) bad.push(`${f.path} is ${st.size} bytes, not ${f.bytes}`);
-}
-if (bad.length) p.push(`it does not hold ${b.id}'s files in the served layout (fetch --only all): ${bad.slice(0, 5).join(", ")}${bad.length > 5 ? `, … (${bad.length} in all)` : ""}`);
-if (p.length) throw new Error(p.join("; "));
-JS
+  # (the dirs staging replaces are compared by identity, not spelling: on a case-insensitive APFS
+  # another case of --out names the mirror too)
+  node "$SBR" mirror "$BASE_REC_FILE" "$BASE_REC_DIR" "$OUT" "$ID" || die "cannot stage from the mirror $BASE_REC_DIR (reason above)"
   say "re-cut by reference $ID of $BASE_REC_ID (${BASE_REC_DIGEST:0:23}…): kernel ${C:0:10}, tools $PKG_VERSION at ${TOOLS_COMMIT:0:10}, mirror $BASE_REC_DIR"
   mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"; REL="$OUT/$ID"   # only now: every refusal comes first
   # what an earlier staging of this id left that no longer holds: a by-value one's pack provenance,
@@ -165,33 +145,8 @@ JS
   # ---------- every file outside tools/: a clone of the mirror's, hashed against the base's record ----------
   say "== clones"
   rm -rf "$REL"
-  node --input-type=module - "$JS" "$BASE_REC_FILE" "$BASE_REC_DIR" "$REL" <<'JS' || die "cloning from $BASE_REC_DIR failed (reason above); $REL removed"
-import fs from "node:fs"; import path from "node:path";
-const [js, file, mirror, rel] = process.argv.slice(2);
-const { isRecutOwnPath } = await import(path.join(js, "release-record.mjs"));
-const { sha256File } = await import(path.join(js, "artifact-id.mjs"));
-const b = JSON.parse(fs.readFileSync(file, "utf8"));
-const shared = b.files.filter((f) => !isRecutOwnPath(f.path));
-let bytes = 0;
-try {
-  for (const f of shared) {
-    const dst = path.join(rel, f.path);
-    fs.mkdirSync(path.dirname(dst), { recursive: true });
-    // a clone where the filesystem can (APFS, btrfs, XFS), a copy elsewhere; never a hard link, which
-    // would share the mirror's inode. Only listed paths: nothing else in the mirror is staged.
-    fs.copyFileSync(path.join(mirror, f.path), dst, fs.constants.COPYFILE_FICLONE);
-    // the clone is what the gate and the release read: hash it, not the mirror's file
-    if (!fs.lstatSync(dst).isFile() || fs.statSync(dst).size !== f.bytes || (await sha256File(dst)) !== f.sha256) {
-      throw new Error(`${f.path}: the mirror's bytes are not ${b.id}'s (not a regular file, or its size or sha256 is not its record's)`);
-    }
-    bytes += f.bytes;
-  }
-} catch (e) {
-  fs.rmSync(rel, { recursive: true, force: true });
-  throw e;
-}
-console.log(`${shared.length} files cloned from ${mirror} (${(bytes / 1e9).toFixed(2)} GB), each sha256-checked against ${b.id}'s record`);
-JS
+  # (clones where the filesystem can, never hard links; only the record's paths; each sha256-checked)
+  node "$SBR" clone "$BASE_REC_FILE" "$BASE_REC_DIR" "$REL" || die "cloning from $BASE_REC_DIR failed (reason above); $REL removed"
 
   # ---------- tools (always from the committed tree at HEAD) ----------
   say "== tools"
@@ -212,12 +167,15 @@ JS
   else
     rm -rf "$GD" "$OUT/$ID.gate.stamp"   # fresh: unpack adds files and never deletes any
     # fetch reads release.json at --from's root: the base's record, there only for this read
-    # (release.mjs writes the re-cut's below). Every chunk is checked against it and the build id
-    # recomputed from the rebuilt lean.wasm.
+    # (release.mjs writes the re-cut's below; guard_rel removes it on any exit before then, an
+    # interrupt included). Every chunk is checked against it and the build id recomputed from the
+    # rebuilt lean.wasm.
+    guard_rel
     cp "$BASE_REC_FILE" "$REL/release.json"
     FETCHED=yes
     node "$P/fetch-release.mjs" --from "$REL" --layout served --only runtime --out "$GD" --id "$BASE_REC_ID" --digest "$BASE_REC_DIGEST" | tail -3 || FETCHED=no
     rm -f "$REL/release.json"
+    unguard_rel
     [ "$FETCHED" = yes ] || die "fetching $BASE_REC_ID's runtime from the clones into $GD failed (above)"
     # the full tree, not --slim: lean-lib is the tree the base's gate ran on (RELEASE.md)
     node "$P/unpack.mjs" --manifest "$REL/profiles/lean-lib.manifest.json" --out "$GD/lib/lean" | tail -1 \
@@ -225,7 +183,7 @@ JS
     printf '%s\n' "$GSTAMP" > "$OUT/$ID.gate.stamp"
   fi
   [ "$(shasum -a 256 "$GD/bin/lean.wasm" | cut -c1-64)" = "$WASM_SHA" ] \
-    || die "$GD/bin/lean.wasm is not the binary $BASE_REC_ID's gate passed on (gate.wasmSha256): rm -rf $GD and re-run"
+    || die "$GD/bin/lean.wasm is not the binary $BASE_REC_ID's gate passed on (gate.wasmSha256): rm -rf $(shq "$GD") and re-run"
   # ~8 min (import-release.sh gate): judged by its log, as there
   if node --stack-size=8192 "$P/gate.mjs" --artifact "$GD" > "$OUT/$ID.gate.log" 2>&1 && grep -q "GATE PASSED" "$OUT/$ID.gate.log"; then
     grep -E "^(FAIL| ok)" "$OUT/$ID.gate.log" || true
@@ -239,23 +197,10 @@ JS
   # ---------- release.json: every field but the re-cut's own from the base's record ----------
   say "== release.json"
   CONFIG="$OUT/$ID.config.json"
-  node --input-type=module - "$BASE_REC_FILE" "$CONFIG" "$ID" "$RECUT" "$CHECKS" "$PKG_VERSION" "$TGZ" "$TOOLS_COMMIT" ${NOTES[@]+"${NOTES[@]}"} <<'JS'
-import fs from "node:fs";
-const [file, config, id, recut, checks, version, tgz, commit, ...notes] = process.argv.slice(2);
-const b = JSON.parse(fs.readFileSync(file, "utf8"));
-fs.writeFileSync(config, JSON.stringify({
-  id, upstreamTag: b.lean.upstreamTag, kernelCommit: b.kernel.commit, kernelPatch: b.kernel.patch,
-  kernelRepo: b.kernel.repo, kernelBranch: b.kernel.branch, recut: Number(recut), base: { id: b.id, digest: b.digest },
-  leanVersion: b.lean.version,
-  gate: { commit: b.gate.commit, wasmSha256: b.gate.wasmSha256, checks: /^\d+$/.test(checks) ? Number(checks) : null },
-  // what release.mjs cannot derive from the cloned manifests, as the base recorded it (a pack's note included)
-  packs: b.packs.map((p) => ({ id: p.id, compiler: p.lean.compiler, ...(p.mathlib ? { mathlib: p.mathlib } : {}), ...(p.note ? { note: p.note } : {}) })),
-  native64: b.native64, docker: b.docker, mathlib: b.mathlib, modules: b.modules, hosting: b.hosting,
-  tools: { package: "lean4-wasm64", version, tgz: `tools/${tgz}`, commit },
-  // the re-cut's own notes first, then the base's verbatim (formats/release.md)
-  notes: [...notes, ...b.notes],
-}, null, 2) + "\n");
-JS
+  node "$SBR" config "$BASE_REC_FILE" "$CONFIG" "$ID" "$RECUT" "$CHECKS" "$PKG_VERSION" "$TGZ" "$TOOLS_COMMIT" ${NOTES[@]+"${NOTES[@]}"} \
+    || die "cannot write $CONFIG from $BASE_REC_FILE (reason above)"
+  # from here until only tools/ is shown to differ, any exit removes release.json and SHA256SUMS
+  guard_rel
   node "$JS/release.mjs" --release "$REL" --config "$CONFIG" --base "$BASE_REC_FILE" || die "release.mjs refused (above): no release.json written"
   if ! node "$P/verify-release.mjs" --release "$REL" --deep --base "$BASE_REC_FILE" --json "$OUT/$ID.verify.json" > "$OUT/$ID.verify.log"; then
     grep -E "^FAIL" "$OUT/$ID.verify.log" | head -20 >&2 || true
@@ -265,42 +210,13 @@ JS
   tail -1 "$OUT/$ID.verify.log"
 
   # ---------- only tools/ differs from the base (RELEASE.md), then the shared paths for R2 ----------
-  node --input-type=module - "$JS/release-record.mjs" "$REPO/wasm64-build/publish-release.mjs" "$BASE_REC_FILE" "$REL" "$OUT/$ID" <<'JS' \
+  node "$SBR" final "$BASE_REC_FILE" "$REL" "$OUT/$ID" \
     || { rm -f "$REL/release.json" "$REL/SHA256SUMS"; die "$REL is not a re-cut by reference of $BASE_REC_ID (reason above); release.json removed"; }
-import fs from "node:fs"; import path from "node:path"; import { createHash } from "node:crypto";
-const [lib, publish, file, rel, sidecar] = process.argv.slice(2);
-const { checkRecutBase, isRecutOwnPath, sha256sums } = await import(lib);
-const { contentTypeOf } = await import(publish);
-const baseText = fs.readFileSync(file);
-const b = JSON.parse(baseText);
-const r = JSON.parse(fs.readFileSync(path.join(rel, "release.json"), "utf8"));
-const p = [];
-// whatever release.mjs and verify did: the record names this base, and the equality rules hold
-if (r.base?.id !== b.id || r.base?.digest !== b.digest) p.push(`release.json names base ${JSON.stringify(r.base)}, not ${b.id} (${b.digest})`);
-p.push(...checkRecutBase(r, b));
-// SHA256SUMS against the base's own, computed from its record: only release.json and the two tarballs may differ
-const parse = (text) => new Map(text.split("\n").filter(Boolean).map((l) => {
-  const m = /^([0-9a-f]{64}) {2}(\S.*)$/.exec(l);
-  if (!m) throw new Error(`SHA256SUMS line malformed: ${l.slice(0, 80)}`);
-  return [m[2], m[1]];
-}));
-const theirs = parse(sha256sums([...b.files, { path: "release.json", sha256: createHash("sha256").update(baseText).digest("hex") }]));
-const ours = parse(fs.readFileSync(path.join(rel, "SHA256SUMS"), "utf8"));
-const differ = [...new Set([...theirs.keys(), ...ours.keys()])].filter((q) => theirs.get(q) !== ours.get(q)).sort();
-const allowed = [...new Set(["release.json", b.tools.tgz, r.tools?.tgz])].sort();
-if (differ.join("\n") !== allowed.join("\n")) p.push(`SHA256SUMS differs from ${b.id}'s at ${differ.join(", ") || "nothing"}: it must differ at exactly ${allowed.join(", ")}`);
-if (p.length) throw new Error(p.join("; "));
-// the shared paths by the content type R2 serves them with (publish-release.mjs, HOSTING.md): the
-// server-side copy from the base's prefix keeps each object's own
-const shared = r.files.map((f) => f.path).filter((q) => !isRecutOwnPath(q));
-const objects = shared.filter((q) => contentTypeOf(q) === "application/octet-stream");
-const manifests = shared.filter((q) => contentTypeOf(q) === "application/json");
-fs.writeFileSync(`${sidecar}.r2-objects.txt`, objects.map((q) => `${q}\n`).join(""));
-fs.writeFileSync(`${sidecar}.r2-manifests.txt`, manifests.map((q) => `${q}\n`).join(""));
-console.log(`only tools/ differs from ${b.id}: SHA256SUMS differs at ${differ.join(", ")}; ${r.files.length} files, ${r.files.length - shared.length} own, ${shared.length} shared (${objects.length} objects, ${manifests.length} manifests)`);
-JS
+  unguard_rel
   DIGEST="$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).digest' "$REL/release.json")"
   R2="qed64-r2:qed64-artifacts/lean4-wasm64"
+  # the paths of the printed commands, shell-quoted: each line runs as printed
+  QREPO="$(shq "$REPO")"; QREL="$(shq "$REL")"; QSIDE="$(shq "$OUT/$ID")"
 
   cat <<EOF
 
@@ -310,23 +226,23 @@ SHA256SUMS; every other file release.json lists is $BASE_REC_ID's (a GitHub asse
 $( [ "$ON_ORIGIN" = no ] && echo "NOTE: $C is not on origin/$LINE yet — push the line before publishing." )
 Next (RELEASE.md): the owner publishes — record + tag, push, GitHub (the own files; the base's release holds the rest),
 R2 (the shared files copied server-side from the base's prefix), each verified, resumable:
-  $REPO/wasm64-build/import-release.sh publish $ID --release-dir $REL --dry-run     # then without --dry-run
+  $QREPO/wasm64-build/import-release.sh publish $ID --release-dir $QREL --dry-run     # then without --dry-run
 The manual fallback (none of publish's checks: no resume, no check of the base's assets, no SHA-256 or R2 verification):
-  mkdir -p $REPO/wasm64-build/releases && cp $REL/release.json $REPO/wasm64-build/releases/$ID.json
-  git -C $REPO add wasm64-build/releases/$ID.json && git -C $REPO commit -m "release $ID"
-  git -C $REPO tag -a $ID -m "lean4-wasm64 $ID ($DIGEST)"
+  mkdir -p $QREPO/wasm64-build/releases && cp $QREL/release.json $QREPO/wasm64-build/releases/$ID.json
+  git -C $QREPO add wasm64-build/releases/$ID.json && git -C $QREPO commit -m "release $ID"
+  git -C $QREPO tag -a $ID -m "lean4-wasm64 $ID ($DIGEST)"
   # repository owner — the line and the tag first, then the bytes:
-  $( [ "$(git -C "$REPO" symbolic-ref -q HEAD)" != "refs/heads/$LINE" ] && echo "git -C $REPO push origin refs/tags/$ID      # a re-cut staged on a branch off its base: the tag alone" || echo "git -C $REPO push --atomic origin $LINE $ID" )
+  $( [ "$(git -C "$REPO" symbolic-ref -q HEAD)" != "refs/heads/$LINE" ] && echo "git -C $QREPO push origin refs/tags/$ID      # a re-cut staged on a branch off its base: the tag alone" || echo "git -C $QREPO push --atomic origin $LINE $ID" )
   gh release create $ID --repo FawadHa1der/lean4 --draft --verify-tag --title "lean4-wasm64 $ID" --notes "Toolchain release $ID. Pin: --id $ID --digest $DIGEST. Contents and digests: release.json. Re-cut by reference of $BASE_REC_ID ($BASE_REC_DIGEST): this release's assets are tools/$TGZ, release.json and SHA256SUMS; every other file release.json lists is an asset of $BASE_REC_ID (lean4-wasm64 fetch takes them from there)."
-  gh release upload $ID --repo FawadHa1der/lean4 $REL/tools/$TGZ $REL/release.json $REL/SHA256SUMS   # flat, by basename: the own files only
+  gh release upload $ID --repo FawadHa1der/lean4 $QREL/tools/$TGZ $QREL/release.json $QREL/SHA256SUMS   # flat, by basename: the own files only
   gh release edit $ID --repo FawadHa1der/lean4 --tag $ID --verify-tag --draft=false
   # R2 (served layout, complete): the shared files copied server-side from the base's prefix (each keeps its
   # content type), then the own files, release.json last (js/formats/HOSTING.md):
-  rclone copy $R2/$BASE_REC_ID/ $R2/$ID/ --files-from-raw $OUT/$ID.r2-objects.txt --immutable --s3-no-check-bucket --checksum --transfers 8
-  rclone copy $R2/$BASE_REC_ID/ $R2/$ID/ --files-from-raw $OUT/$ID.r2-manifests.txt --immutable --s3-no-check-bucket --checksum
-  rclone copy $REL $R2/$ID/ --immutable --s3-no-check-bucket --checksum --filter '+ /tools/**' --filter '- *' --header-upload "Content-Type: application/octet-stream"
-  rclone copy $REL $R2/$ID/ --immutable --s3-no-check-bucket --checksum --filter '+ /SHA256SUMS' --filter '- *' --header-upload "Content-Type: application/json"
-  rclone copy $REL $R2/$ID/ --immutable --s3-no-check-bucket --checksum --filter '+ /release.json' --filter '- *' --header-upload "Content-Type: application/json"   # copy, not copyto: copyto ignores --immutable
+  rclone copy $R2/$BASE_REC_ID/ $R2/$ID/ --files-from-raw $QSIDE.r2-objects.txt --immutable --s3-no-check-bucket --checksum --transfers 8
+  rclone copy $R2/$BASE_REC_ID/ $R2/$ID/ --files-from-raw $QSIDE.r2-manifests.txt --immutable --s3-no-check-bucket --checksum
+  rclone copy $QREL $R2/$ID/ --immutable --s3-no-check-bucket --checksum --filter '+ /tools/**' --filter '- *' --header-upload "Content-Type: application/octet-stream"
+  rclone copy $QREL $R2/$ID/ --immutable --s3-no-check-bucket --checksum --filter '+ /SHA256SUMS' --filter '- *' --header-upload "Content-Type: application/json"
+  rclone copy $QREL $R2/$ID/ --immutable --s3-no-check-bucket --checksum --filter '+ /release.json' --filter '- *' --header-upload "Content-Type: application/json"   # copy, not copyto: copyto ignores --immutable
 EOF
 }
 
@@ -609,24 +525,26 @@ if ! node "$JS/verify-release.mjs" --release "$REL" --deep --json "$OUT/$ID.veri
 fi
 tail -1 "$OUT/$ID.verify.log"
 DIGEST="$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).digest' "$REL/release.json")"
+# the paths of the printed commands, shell-quoted: each line runs as printed
+QREPO="$(shq "$REPO")"; QREL="$(shq "$REL")"
 
 cat <<EOF
 
 Staged and verified: $REL   (digest $DIGEST)
 $( [ "$ON_ORIGIN" = no ] && echo "NOTE: $C is not on origin/$LINE yet — push the line before publishing." )
 Next (RELEASE.md): the owner publishes — record + tag, push, GitHub, R2, each verified, resumable:
-  $REPO/wasm64-build/import-release.sh publish $ID --release-dir $REL --dry-run     # then without --dry-run
+  $QREPO/wasm64-build/import-release.sh publish $ID --release-dir $QREL --dry-run     # then without --dry-run
 The manual fallback (none of publish's checks: no resume, no SHA-256 or R2 verification):
-  mkdir -p $REPO/wasm64-build/releases && cp $REL/release.json $REPO/wasm64-build/releases/$ID.json
-  git -C $REPO add wasm64-build/releases/$ID.json && git -C $REPO commit -m "release $ID"
-  git -C $REPO tag -a $ID -m "lean4-wasm64 $ID ($DIGEST)"
+  mkdir -p $QREPO/wasm64-build/releases && cp $QREL/release.json $QREPO/wasm64-build/releases/$ID.json
+  git -C $QREPO add wasm64-build/releases/$ID.json && git -C $QREPO commit -m "release $ID"
+  git -C $QREPO tag -a $ID -m "lean4-wasm64 $ID ($DIGEST)"
   # repository owner — the line and the tag first, then the bytes:
-  $( [ -n "$RECUT" ] && [ "$(git -C "$REPO" symbolic-ref -q HEAD)" != "refs/heads/$LINE" ] && echo "git -C $REPO push origin refs/tags/$ID      # a re-cut staged on a branch off its base: the tag alone" || echo "git -C $REPO push --atomic origin $LINE $ID" )
+  $( [ -n "$RECUT" ] && [ "$(git -C "$REPO" symbolic-ref -q HEAD)" != "refs/heads/$LINE" ] && echo "git -C $QREPO push origin refs/tags/$ID      # a re-cut staged on a branch off its base: the tag alone" || echo "git -C $QREPO push --atomic origin $LINE $ID" )
   gh release create $ID --repo FawadHa1der/lean4 --draft --verify-tag --title "lean4-wasm64 $ID" --notes "Toolchain release $ID. Pin: --id $ID --digest $DIGEST. Contents and digests: release.json"
-  (cd $REL && find . -type f | sed 's|^\./||' | xargs -n 25 gh release upload $ID --repo FawadHa1der/lean4)   # flat, by basename
+  (cd $QREL && find . -type f | sed 's|^\./||' | xargs -n 25 gh release upload $ID --repo FawadHa1der/lean4)   # flat, by basename
   gh release edit $ID --repo FawadHa1der/lean4 --tag $ID --verify-tag --draft=false
   # R2 (served layout; objects, then manifests, then release.json — js/formats/HOSTING.md):
-  rclone copy $REL qed64-r2:qed64-artifacts/lean4-wasm64/$ID/ --immutable --s3-no-check-bucket --checksum --filter '- *.json' --filter '- SHA256SUMS' --header-upload "Content-Type: application/octet-stream" --transfers 4 --s3-chunk-size 64M
-  rclone copy $REL qed64-r2:qed64-artifacts/lean4-wasm64/$ID/ --immutable --s3-no-check-bucket --checksum --filter '- /release.json' --filter '+ *.json' --filter '+ /SHA256SUMS' --filter '- *' --header-upload "Content-Type: application/json"
-  rclone copy $REL qed64-r2:qed64-artifacts/lean4-wasm64/$ID/ --immutable --s3-no-check-bucket --checksum --filter '+ /release.json' --filter '- *' --header-upload "Content-Type: application/json"   # copy, not copyto: copyto ignores --immutable
+  rclone copy $QREL qed64-r2:qed64-artifacts/lean4-wasm64/$ID/ --immutable --s3-no-check-bucket --checksum --filter '- *.json' --filter '- SHA256SUMS' --header-upload "Content-Type: application/octet-stream" --transfers 4 --s3-chunk-size 64M
+  rclone copy $QREL qed64-r2:qed64-artifacts/lean4-wasm64/$ID/ --immutable --s3-no-check-bucket --checksum --filter '- /release.json' --filter '+ *.json' --filter '+ /SHA256SUMS' --filter '- *' --header-upload "Content-Type: application/json"
+  rclone copy $QREL qed64-r2:qed64-artifacts/lean4-wasm64/$ID/ --immutable --s3-no-check-bucket --checksum --filter '+ /release.json' --filter '- *' --header-upload "Content-Type: application/json"   # copy, not copyto: copyto ignores --immutable
 EOF

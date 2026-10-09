@@ -96,9 +96,11 @@ if (record.base) {
   if (arg("base")) {
     const bp = path.resolve(arg("base"));
     const bfile = fs.existsSync(bp) && fs.statSync(bp).isDirectory() ? path.join(bp, "release.json") : bp;
-    // checkRecutBase checks the base's own record too (checkReleaseRecord), then the pin and the equality rules
-    let problems;
-    try { problems = checkRecutBase(record, readJson(bfile)); } catch (e) { problems = [`cannot read the base's release.json ${bfile}: ${e.message}`]; }
+    // checkRecutBase checks the pin, then the base's own record (checkReleaseRecord) and the equality rules
+    let baseRecord, problems;
+    try { baseRecord = readJson(bfile); } catch (e) { problems = [`cannot read the base's release.json ${bfile}: ${e.message}`]; }
+    // a base it read but could not check is not an unreadable file: say which it was
+    if (!problems) try { problems = checkRecutBase(record, baseRecord); } catch (e) { problems = [`the base's release.json ${bfile} could not be checked: ${e.message}`]; }
     check(problems.length === 0, `${recut}: the base's record is the pinned one, and every file outside tools/ and every shared field is the base's${problems.length ? ` — ${problems.join("; ")}` : ""}`);
   } else console.log(`info  ${recut}: not compared with its base (--base <its release dir or release.json> compares)`);
 }

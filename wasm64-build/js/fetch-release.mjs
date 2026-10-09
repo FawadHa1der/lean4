@@ -17,15 +17,15 @@
 // --digest refuse unless release.json's digest is this one — the pin: a self-digest
 //          alone proves only consistency, so a consumer pins id AND digest.
 // --base-from  a re-cut by reference (release.json `base`; formats/release.md, "Re-cut by
-//          reference"): where its base release is, a URL or a dir in either layout (inferred).
-//          Default: the sibling <parent of --from>/<base id>/, when --from's last segment is the
-//          re-cut's id. A FLAT --from (its GitHub release holds only tools/, release.json and
-//          SHA256SUMS): release.json and tools/ come from --from, every other file from the base,
-//          routed by path (never a fallback after a miss), and the base's release.json must pass
-//          checkRecutBase (pinned by base.{id,digest}) before anything is written; a fetch that
-//          selects only tools/ needs no base. A SERVED --from (an R2 prefix, a mirror dir) is
-//          complete under the re-cut's own id: every file comes from it, and --base-from only
-//          adds the comparison.
+//          reference"): its base release, a URL or a dir in either layout (inferred).
+//          A FLAT --from (its GitHub release holds only tools/, release.json and SHA256SUMS):
+//          release.json and tools/ come from --from, every other file from the base, routed by
+//          path (never a fallback after a miss), and the base's release.json must pass
+//          checkRecutBase (pinned by base.{id,digest}) before anything is written. Default there:
+//          the sibling <parent of --from>/<base id>/, when --from's last segment is the re-cut's id.
+//          A SERVED --from (an R2 prefix, a mirror dir) is complete under the re-cut's own id, and
+//          a flat fetch that selects only tools/ needs no base: every file comes from --from, and
+//          only a --base-from given adds the comparison (no default: a sibling is never read).
 //
 // release.json is read first and checked structurally (release-record.mjs
 // checkReleaseRecord: the id rule, the gate binding, safe paths, …) before
@@ -68,9 +68,9 @@ applyCliContract({
     "  --id <id>          refuse unless release.json names this release id",
     "  --digest <d>       refuse unless release.json's digest is <d> (pin id AND digest)",
     "  --layout <l>       served | flat (default: inferred from --from)",
-    "  --base-from <src>  a re-cut by reference: where its base release is (default: the sibling <…>/<base id>/",
-    "                     of --from, when --from ends in the re-cut's id); flat --from: every file outside",
-    "                     tools/ comes from there; served --from: compares with the base only",
+    "  --base-from <src>  a re-cut by reference: its base release (a URL or dir, layout inferred). Flat --from:",
+    "                     every file outside tools/ comes from there (default: the sibling <…>/<base id>/ when",
+    "                     --from ends in the re-cut's id). Served --from, or tools/ only: compares with it (no default)",
     "  -h, --help         print this help and exit 0",
     "",
     "exit codes: 0 fetched and verified, 1 a check failed, 2 usage",
@@ -206,169 +206,176 @@ async function readText(relPath, src = undefined) {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-// ---------- release.json ----------
-let record;
-try {
-  record = JSON.parse(await readText("release.json"));
-} catch (e) {
-  console.error(`fetch: cannot read release.json from ${own.locate("release.json")}: ${e.message}`);
-  process.exit(1);
-}
-if (record?.schema !== RELEASE_SCHEMA) { console.error(`fetch: release.json schema ${record?.schema} is not ${RELEASE_SCHEMA}`); process.exit(1); }
-const recordProblems = checkReleaseRecord(record);
-if (recordProblems.length) { console.error(`fetch: release.json refused — ${recordProblems.length} problem(s):\n  ${recordProblems.join("\n  ")}`); process.exit(1); }
-if (arg("id") && record.id !== arg("id")) { console.error(`fetch: release is ${record.id}, expected ${arg("id")}`); process.exit(1); }
-if (arg("digest") && record.digest !== arg("digest")) { console.error(`fetch: release.json digest is ${record.digest}, pinned ${arg("digest")}`); process.exit(1); }
-
-// ---------- what to fetch: chosen before anything is written (a re-cut's base is needed only outside tools/) ----------
-const byPath = new Map(record.files.map((f) => [f.path, f]));
-// `all` is every release file (the served layout, a release dir); the artifact layout
-// (`runtime`: <out>/bin rebuilt from the chunks) is never implied — ask for it
-const want = (g) => only.has(g) || (g !== "runtime" && only.has("all"));
-const selected = new Set();
-const add = (p) => selected.add(p); // every path below comes from files[]
-const packFiles = (packId) => record.files.filter((f) => f.path.startsWith(`profiles/${packId}.`)).map((f) => f.path);
-const under = (dir) => record.files.filter((f) => f.path.startsWith(`${dir}/`)).map((f) => f.path);
-const unknown = [...only].filter((g) => !["all", "runtime", "runtime-chunks", "packs", "native64", "lists", "tools"].includes(g) && !(record.packs ?? []).some((p) => p.id === g));
-if (unknown.length) { console.error(`fetch: unknown --only group(s): ${unknown.join(", ")}`); process.exit(2); }
-if (only.has("all")) record.files.forEach((f) => add(f.path)); // everything listed, whatever its group
-if (want("runtime-chunks")) under("runtime").forEach(add);
-for (const pk of record.packs ?? []) if (want("packs") || want(pk.id)) packFiles(pk.id).forEach(add);
-if (want("native64")) under("native64").forEach(add);
-if (want("lists")) under("lists").forEach(add);
-if (want("tools")) under("tools").forEach(add);
-// a group asked for by name must bring something: a release without it is not what was asked
-const groupFiles = { "runtime-chunks": under("runtime"), packs: (record.packs ?? []).flatMap((k) => packFiles(k.id)), native64: under("native64"), lists: under("lists"), tools: under("tools") };
-const empty = [...only].filter((g) => groupFiles[g] && groupFiles[g].length === 0);
-if (empty.length) { console.error(`fetch: FAILED — this release has no files for --only ${empty.join(", ")}`); console.log("\nFETCH FAILED"); process.exit(1); }
-
-// ---------- a re-cut by reference: its base (formats/release.md), before anything is written ----------
-let baseNote = "";
-if (arg("base-from") && !record.base) { console.error(`fetch: --base-from was given, but ${record.id} is not a re-cut by reference (release.json names no base)`); process.exit(1); }
-if (record.base) {
-  const recut = `re-cut of ${record.base.id} (${record.base.digest.slice(0, 23)}…)`;
-  // its flat (GitHub) release holds tools/, release.json and SHA256SUMS only: any other file is the base's
-  // (`runtime` reads the runtime manifest, the chunks and runtime/bin)
-  const needFiles = layout === "flat" && (want("runtime") || [...selected].some((p) => !isRecutOwnPath(p)));
-  const bsrc = arg("base-from") ? source(arg("base-from"))
-    : needFiles && own.lastSegment === record.id ? own.sibling(record.base.id) : null;
-  if (needFiles && !bsrc) {
-    console.error(`fetch: ${record.id} is a re-cut by reference of ${record.base.id}: every file outside tools/ is the base's, and --from (${own.label}) does not end in ${record.id}, so its sibling cannot be found — pass --base-from <the base release's download URL or dir>`);
-    process.exit(1);
+// Everything from here runs after async work (the reads), so it returns its exit code and the
+// script ends by itself: never process.exit() past this point (see the end: Node 26.3).
+async function main() {
+  // ---------- release.json ----------
+  let record;
+  try {
+    record = JSON.parse(await readText("release.json"));
+  } catch (e) {
+    console.error(`fetch: cannot read release.json from ${own.locate("release.json")}: ${e.message}`);
+    return 1;
   }
-  if (bsrc) {
-    let baseRecord;
-    try {
-      baseRecord = JSON.parse(await readText("release.json", bsrc));
-    } catch (e) {
-      const hint = arg("base-from") ? "" : " (the sibling of --from: pass --base-from <the base release's download URL or dir> if the base is elsewhere)";
-      console.error(`fetch: ${record.id} is a re-cut by reference of ${record.base.id}: cannot read the base's release.json from ${bsrc.locate("release.json")}${hint}: ${e.message}`);
-      process.exit(1);
+  if (record?.schema !== RELEASE_SCHEMA) { console.error(`fetch: release.json schema ${record?.schema} is not ${RELEASE_SCHEMA}`); return 1; }
+  const recordProblems = checkReleaseRecord(record);
+  if (recordProblems.length) { console.error(`fetch: release.json refused — ${recordProblems.length} problem(s):\n  ${recordProblems.join("\n  ")}`); return 1; }
+  if (arg("id") && record.id !== arg("id")) { console.error(`fetch: release is ${record.id}, expected ${arg("id")}`); return 1; }
+  if (arg("digest") && record.digest !== arg("digest")) { console.error(`fetch: release.json digest is ${record.digest}, pinned ${arg("digest")}`); return 1; }
+
+  // ---------- what to fetch: chosen before anything is written (a re-cut's base is needed only outside tools/) ----------
+  const byPath = new Map(record.files.map((f) => [f.path, f]));
+  // `all` is every release file (the served layout, a release dir); the artifact layout
+  // (`runtime`: <out>/bin rebuilt from the chunks) is never implied — ask for it
+  const want = (g) => only.has(g) || (g !== "runtime" && only.has("all"));
+  const selected = new Set();
+  const add = (p) => selected.add(p); // every path below comes from files[]
+  const packFiles = (packId) => record.files.filter((f) => f.path.startsWith(`profiles/${packId}.`)).map((f) => f.path);
+  const under = (dir) => record.files.filter((f) => f.path.startsWith(`${dir}/`)).map((f) => f.path);
+  const unknown = [...only].filter((g) => !["all", "runtime", "runtime-chunks", "packs", "native64", "lists", "tools"].includes(g) && !(record.packs ?? []).some((p) => p.id === g));
+  if (unknown.length) { console.error(`fetch: unknown --only group(s): ${unknown.join(", ")}`); return 2; }
+  if (only.has("all")) record.files.forEach((f) => add(f.path)); // everything listed, whatever its group
+  if (want("runtime-chunks")) under("runtime").forEach(add);
+  for (const pk of record.packs ?? []) if (want("packs") || want(pk.id)) packFiles(pk.id).forEach(add);
+  if (want("native64")) under("native64").forEach(add);
+  if (want("lists")) under("lists").forEach(add);
+  if (want("tools")) under("tools").forEach(add);
+  // a group asked for by name must bring something: a release without it is not what was asked
+  const groupFiles = { "runtime-chunks": under("runtime"), packs: (record.packs ?? []).flatMap((k) => packFiles(k.id)), native64: under("native64"), lists: under("lists"), tools: under("tools") };
+  const empty = [...only].filter((g) => groupFiles[g] && groupFiles[g].length === 0);
+  if (empty.length) { console.error(`fetch: FAILED — this release has no files for --only ${empty.join(", ")}`); console.log("\nFETCH FAILED"); return 1; }
+
+  // ---------- a re-cut by reference: its base (formats/release.md), before anything is written ----------
+  let baseNote = "";
+  if (arg("base-from") && !record.base) { console.error(`fetch: --base-from was given, but ${record.id} is not a re-cut by reference (release.json names no base)`); return 1; }
+  if (record.base) {
+    const recut = `re-cut of ${record.base.id} (${record.base.digest.slice(0, 23)}…)`;
+    // its flat (GitHub) release holds tools/, release.json and SHA256SUMS only: any other file is the base's
+    // (`runtime` reads the runtime manifest, the chunks and runtime/bin)
+    const needFiles = layout === "flat" && (want("runtime") || [...selected].some((p) => !isRecutOwnPath(p)));
+    const bsrc = arg("base-from") ? source(arg("base-from"))
+      : needFiles && own.lastSegment === record.id ? own.sibling(record.base.id) : null;
+    if (needFiles && !bsrc) {
+      console.error(`fetch: ${record.id} is a re-cut by reference of ${record.base.id}: every file outside tools/ is the base's, and --from (${own.label}) does not end in ${record.id}, so its sibling cannot be found — pass --base-from <the base release's download URL or dir>`);
+      return 1;
     }
-    // checkRecutBase runs checkReleaseRecord on the base too: one call, nothing to forget
-    const problems = checkRecutBase(record, baseRecord);
-    if (problems.length) { console.error(`fetch: ${record.id} refused against its base ${record.base.id} at ${bsrc.label} — ${problems.length} problem(s):\n  ${problems.join("\n  ")}`); process.exit(1); }
-    if (needFiles) baseSource = bsrc;
-    baseNote = `; ${recut}, base checked${needFiles ? `, files outside tools/ from ${bsrc.label}` : ""}`;
-  } else {
-    baseNote = `; ${recut}, ${layout === "served" ? "served, complete under its own id" : "only tools/ selected"}: base not compared (--base-from compares)`;
-  }
-}
-fs.mkdirSync(out, { recursive: true });
-const recordText = serializeRelease(record);
-fs.writeFileSync(path.join(out, "release.json"), recordText);
-console.log(`release ${record.id} (${record.digest.slice(0, 23)}…): Lean ${record.lean.version}, runtime ${record.runtime.buildId}, kernel ${record.kernel.commit.slice(0, 10)} (${record.kernel.patch}) — ${layout} layout from ${own.label}${baseNote}`);
-
-let failures = 0;
-try {
-  let fetched = 0, kept = 0;
-  for (const p of [...selected].sort()) {
-    const r = await fetchVerified(p, byPath.get(p));
-    if (r === "fetched") fetched++; else kept++;
-  }
-  if (selected.size) console.log(`${selected.size} files verified (${fetched} fetched, ${kept} already present)`);
-
-  if (want("runtime")) {
-    // the artifact layout: <out>/bin/lean.js + lean.wasm rebuilt from verified chunks. The
-    // manifest is itself a listed file: fetched against its digest, never read unverified.
-    const rt = record.runtime;
-    await fetchVerified(rt.manifest, byPath.get(rt.manifest));
-    const manifest = JSON.parse(fs.readFileSync(inside(rt.manifest), "utf8"));
-    const problems = checkRuntimeManifest(manifest);
-    if (problems.length) throw new Error(`runtime manifest: ${problems.join("; ")}`);
-    if (manifest.buildId !== rt.buildId) throw new Error(`runtime manifest ${manifest.buildId} ≠ release ${rt.buildId}`);
-    const bin = inside("bin");
-    fs.mkdirSync(bin, { recursive: true });
-    for (const name of ["lean.js", "lean.wasm"]) {
-      const file = manifest.files[name];
-      const expected = rt.files[name];
-      if (file.bytes !== expected.bytes || file.sha256 !== expected.sha256 || file.chunks.length !== expected.chunks) {
-        throw new Error(`runtime manifest's ${name} (${file.bytes} bytes, ${file.chunks.length} chunks) is not release.json's (${expected.bytes} bytes, ${expected.chunks} chunks)`);
-      }
-      // every chunk is checked against release.json before anything is written
-      const chunks = file.chunks.map((c) => {
-        if (!CHUNK_URL.test(c.url)) throw new Error(`${name}: chunk url ${c.url} is not /runtime/chunks/<name>`);
-        const relPath = servedPath(c.url, rt.manifest);
-        const exp = byPath.get(relPath);
-        if (!exp || exp.bytes !== c.bytes || exp.sha256 !== c.sha256) throw new Error(`${relPath}: chunk is not listed in release.json with these bytes`);
-        return { c, relPath, exp };
-      });
-      const target = path.join(bin, name);
-      if (fs.existsSync(target) && fs.statSync(target).size === file.bytes && (await sha256File(target)) === file.sha256) continue;
-      const tmp = tempFor(target);
-      const ws = fs.createWriteStream(tmp);
+    if (bsrc) {
+      let baseRecord;
       try {
-        await once(ws, "open");
-        const whole = createHash("sha256");
-        for (const { c, relPath, exp } of chunks) {
-          const staged = inside(relPath);
-          let data;
-          if (fs.existsSync(staged) && (await sha256File(staged)) === c.sha256) data = fs.readFileSync(staged);
-          else {
-            const parts = [];
-            for await (const d of await openSource(relPath)) parts.push(Buffer.from(d));
-            data = Buffer.concat(parts);
-          }
-          if (data.length !== exp.bytes || createHash("sha256").update(data).digest("hex") !== c.sha256) throw new Error(`${relPath}: chunk failed verification`);
-          whole.update(data);
-          if (!ws.write(data)) await once(ws, "drain");
-        }
-        await new Promise((r, j) => ws.end((e) => (e ? j(e) : r())));
-        if (whole.digest("hex") !== expected.sha256) throw new Error(`${name}: whole-file digest mismatch`);
-        fs.renameSync(tmp, target);
-      } finally {
-        if (!ws.closed) { ws.destroy(); await once(ws, "close").catch(() => {}); }
-        fs.rmSync(tmp, { force: true });
-        temps.delete(tmp);
+        baseRecord = JSON.parse(await readText("release.json", bsrc));
+      } catch (e) {
+        const hint = arg("base-from") ? "" : " (the sibling of --from: pass --base-from <the base release's download URL or dir> if the base is elsewhere)";
+        console.error(`fetch: ${record.id} is a re-cut by reference of ${record.base.id}: cannot read the base's release.json from ${bsrc.locate("release.json")}${hint}: ${e.message}`);
+        return 1;
       }
+      // checkRecutBase runs checkReleaseRecord on the base too: one call, nothing to forget. Should
+      // whatever the base serves ever make it throw, that is this refusal too, never a crash
+      let problems;
+      try { problems = checkRecutBase(record, baseRecord); } catch (e) { problems = [`the base's release.json could not be checked: ${e.message}`]; }
+      if (problems.length) { console.error(`fetch: ${record.id} refused against its base ${record.base.id} at ${bsrc.label} — ${problems.length} problem(s):\n  ${problems.join("\n  ")}`); return 1; }
+      if (needFiles) baseSource = bsrc;
+      baseNote = `; ${recut}, base checked${needFiles ? `, files outside tools/ from ${bsrc.label}` : ""}`;
+    } else {
+      baseNote = `; ${recut}, ${layout === "served" ? "served, complete under its own id" : "only tools/ selected"}: base not compared (--base-from compares)`;
     }
-    for (const extra of rt.bin ?? []) await fetchVerified(extra.path, byPath.get(extra.path), `bin/${extra.name}`);
-    for (const extra of rt.bin ?? []) if (/^lean(make)?$/.test(extra.name)) fs.chmodSync(path.join(bin, extra.name), 0o755);
-    // The glue is CommonJS and every pthread re-loads lean.js as a Worker script: under a
-    // "type": "module" package.json (this package's own, say) that is ESM and each pthread dies
-    // with "require is not defined". Pin the nearest package.json (EMBED-RUNTIME.md, Node).
-    if (!(rt.bin ?? []).some((e) => e.name === "package.json")) {
-      fs.writeFileSync(path.join(bin, "package.json"), '{ "type": "commonjs" }\n');
+  }
+  fs.mkdirSync(out, { recursive: true });
+  const recordText = serializeRelease(record);
+  fs.writeFileSync(path.join(out, "release.json"), recordText);
+  console.log(`release ${record.id} (${record.digest.slice(0, 23)}…): Lean ${record.lean.version}, runtime ${record.runtime.buildId}, kernel ${record.kernel.commit.slice(0, 10)} (${record.kernel.patch}) — ${layout} layout from ${own.label}${baseNote}`);
+
+  let failures = 0;
+  try {
+    let fetched = 0, kept = 0;
+    for (const p of [...selected].sort()) {
+      const r = await fetchVerified(p, byPath.get(p));
+      if (r === "fetched") fetched++; else kept++;
     }
-    // both files once more, after the extras: nothing written since may stand in for them
-    if ((await sha256File(path.join(bin, "lean.js"))) !== rt.files["lean.js"].sha256) throw new Error("bin/lean.js changed after it was verified");
-    const recomputed = buildIdFromSha256(await sha256File(path.join(bin, "lean.wasm")));
-    if (recomputed !== rt.buildId) throw new Error(`build id recomputed from bin/lean.wasm is ${recomputed}, release says ${rt.buildId}`);
-    console.log(`runtime ${recomputed} → ${bin} (use --artifact ${out})`);
+    if (selected.size) console.log(`${selected.size} files verified (${fetched} fetched, ${kept} already present)`);
+
+    if (want("runtime")) {
+      // the artifact layout: <out>/bin/lean.js + lean.wasm rebuilt from verified chunks. The
+      // manifest is itself a listed file: fetched against its digest, never read unverified.
+      const rt = record.runtime;
+      await fetchVerified(rt.manifest, byPath.get(rt.manifest));
+      const manifest = JSON.parse(fs.readFileSync(inside(rt.manifest), "utf8"));
+      const problems = checkRuntimeManifest(manifest);
+      if (problems.length) throw new Error(`runtime manifest: ${problems.join("; ")}`);
+      if (manifest.buildId !== rt.buildId) throw new Error(`runtime manifest ${manifest.buildId} ≠ release ${rt.buildId}`);
+      const bin = inside("bin");
+      fs.mkdirSync(bin, { recursive: true });
+      for (const name of ["lean.js", "lean.wasm"]) {
+        const file = manifest.files[name];
+        const expected = rt.files[name];
+        if (file.bytes !== expected.bytes || file.sha256 !== expected.sha256 || file.chunks.length !== expected.chunks) {
+          throw new Error(`runtime manifest's ${name} (${file.bytes} bytes, ${file.chunks.length} chunks) is not release.json's (${expected.bytes} bytes, ${expected.chunks} chunks)`);
+        }
+        // every chunk is checked against release.json before anything is written
+        const chunks = file.chunks.map((c) => {
+          if (!CHUNK_URL.test(c.url)) throw new Error(`${name}: chunk url ${c.url} is not /runtime/chunks/<name>`);
+          const relPath = servedPath(c.url, rt.manifest);
+          const exp = byPath.get(relPath);
+          if (!exp || exp.bytes !== c.bytes || exp.sha256 !== c.sha256) throw new Error(`${relPath}: chunk is not listed in release.json with these bytes`);
+          return { c, relPath, exp };
+        });
+        const target = path.join(bin, name);
+        if (fs.existsSync(target) && fs.statSync(target).size === file.bytes && (await sha256File(target)) === file.sha256) continue;
+        const tmp = tempFor(target);
+        const ws = fs.createWriteStream(tmp);
+        try {
+          await once(ws, "open");
+          const whole = createHash("sha256");
+          for (const { c, relPath, exp } of chunks) {
+            const staged = inside(relPath);
+            let data;
+            if (fs.existsSync(staged) && (await sha256File(staged)) === c.sha256) data = fs.readFileSync(staged);
+            else {
+              const parts = [];
+              for await (const d of await openSource(relPath)) parts.push(Buffer.from(d));
+              data = Buffer.concat(parts);
+            }
+            if (data.length !== exp.bytes || createHash("sha256").update(data).digest("hex") !== c.sha256) throw new Error(`${relPath}: chunk failed verification`);
+            whole.update(data);
+            if (!ws.write(data)) await once(ws, "drain");
+          }
+          await new Promise((r, j) => ws.end((e) => (e ? j(e) : r())));
+          if (whole.digest("hex") !== expected.sha256) throw new Error(`${name}: whole-file digest mismatch`);
+          fs.renameSync(tmp, target);
+        } finally {
+          if (!ws.closed) { ws.destroy(); await once(ws, "close").catch(() => {}); }
+          fs.rmSync(tmp, { force: true });
+          temps.delete(tmp);
+        }
+      }
+      for (const extra of rt.bin ?? []) await fetchVerified(extra.path, byPath.get(extra.path), `bin/${extra.name}`);
+      for (const extra of rt.bin ?? []) if (/^lean(make)?$/.test(extra.name)) fs.chmodSync(path.join(bin, extra.name), 0o755);
+      // The glue is CommonJS and every pthread re-loads lean.js as a Worker script: under a
+      // "type": "module" package.json (this package's own, say) that is ESM and each pthread dies
+      // with "require is not defined". Pin the nearest package.json (EMBED-RUNTIME.md, Node).
+      if (!(rt.bin ?? []).some((e) => e.name === "package.json")) {
+        fs.writeFileSync(path.join(bin, "package.json"), '{ "type": "commonjs" }\n');
+      }
+      // both files once more, after the extras: nothing written since may stand in for them
+      if ((await sha256File(path.join(bin, "lean.js"))) !== rt.files["lean.js"].sha256) throw new Error("bin/lean.js changed after it was verified");
+      const recomputed = buildIdFromSha256(await sha256File(path.join(bin, "lean.wasm")));
+      if (recomputed !== rt.buildId) throw new Error(`build id recomputed from bin/lean.wasm is ${recomputed}, release says ${rt.buildId}`);
+      console.log(`runtime ${recomputed} → ${bin} (use --artifact ${out})`);
+    }
+    if (only.has("all") && !only.has("runtime")) {
+      // every listed file is in place and verified: the sums make <out> a release dir `verify` accepts
+      // (not with `runtime`: its bin/ is no release file, so that dir is no release dir)
+      const absent = record.files.filter((f) => !fs.existsSync(inside(f.path))).map((f) => f.path);
+      if (absent.length) throw new Error(`not fetched: ${absent.slice(0, 5).join(", ")}`);
+      fs.writeFileSync(path.join(out, "SHA256SUMS"), sha256sums([...record.files, { path: "release.json", sha256: createHash("sha256").update(recordText).digest("hex") }]));
+    }
+  } catch (e) {
+    failures++;
+    console.error(`fetch: FAILED — ${e.message}`);
   }
-  if (only.has("all") && !only.has("runtime")) {
-    // every listed file is in place and verified: the sums make <out> a release dir `verify` accepts
-    // (not with `runtime`: its bin/ is no release file, so that dir is no release dir)
-    const absent = record.files.filter((f) => !fs.existsSync(inside(f.path))).map((f) => f.path);
-    if (absent.length) throw new Error(`not fetched: ${absent.slice(0, 5).join(", ")}`);
-    fs.writeFileSync(path.join(out, "SHA256SUMS"), sha256sums([...record.files, { path: "release.json", sha256: createHash("sha256").update(recordText).digest("hex") }]));
-  }
-} catch (e) {
-  failures++;
-  console.error(`fetch: FAILED — ${e.message}`);
+  console.log(failures ? "\nFETCH FAILED" : "\nFETCH VERIFIED");
+  return failures ? 1 : 0;
 }
-console.log(failures ? "\nFETCH FAILED" : "\nFETCH VERIFIED");
 // exitCode, not process.exit(): exiting while V8 compiles in the background can deadlock
 // Node's platform shutdown (seen on Node 26.3: a Maglev job waits for a GC the exiting
 // main thread never runs). Nothing is left on the event loop here, so the process ends.
-process.exitCode = failures ? 1 : 0;
+process.exitCode = await main();

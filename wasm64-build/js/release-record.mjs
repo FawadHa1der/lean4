@@ -35,30 +35,39 @@ export const RECUT_SAME_GATE_KEYS = Object.freeze(["passed", "commit", "wasmSha2
 
 /**
  * The by-reference rule (formats/release.md, "Equality with the base"), given the base's
- * release.json: the base passes checkReleaseRecord, is exactly the release `base` pins (id and
- * digest) and names no base of its own; RECUT_SAME_KEYS and the gate's binding equal the base's;
+ * release.json: the base is exactly the release `base` pins (id, digest and its self-digest:
+ * checked first, so any other record is refused on that alone) and names no base of its own; it
+ * passes checkReleaseRecord; RECUT_SAME_KEYS and the gate's binding equal the base's;
  * tools.package is the base's and tools.version is not; and the files outside RECUT_OWN_DIRS are
  * exactly the base's (path, bytes, sha256: none missing, none extra). Returns the problems (empty
- * = the rule holds). Pure: the caller reads the base's record from wherever the base is.
+ * = the rule holds), whatever the base's release.json holds. Pure: the caller reads the base's
+ * record from wherever the base is.
  */
 export function checkRecutBase(r, b) {
   if (!r?.base) return ["release.json names no base"];
   if (!b || typeof b !== "object" || Array.isArray(b)) return ["the base's release.json is not an object"];
-  const p = checkReleaseRecord(b).map((q) => `the base's release.json: ${q}`);
-  if (b.id !== r.base.id) p.push(`the base's release.json is ${JSON.stringify(b.id)}, the record names ${r.base.id}`);
-  if (b.digest !== r.base.digest) p.push(`the base's release.json digest is ${b.digest}, the record pins ${r.base.digest}`);
-  if (b.base !== undefined) p.push(`the base ${b.id} is itself a re-cut by reference (of ${b.base?.id}): a base is a first cut`);
+  // The pin first, and cheap: a record other than the one base.digest pins is refused on that
+  // alone, before its structure (a files[] of any length, from wherever the base was read) is walked.
+  const pin = [];
+  let pinned = b.digest === r.base.digest;
+  if (b.id !== r.base.id) pin.push(`the base's release.json is ${JSON.stringify(b.id)}, the record names ${r.base.id}`);
+  if (!pinned) pin.push(`the base's release.json digest is ${b.digest}, the record pins ${r.base.digest}`);
+  else if (releaseDigest(b) !== b.digest) { pinned = false; pin.push("the base's release.json: self-digest does not match the content"); }
+  if (b.base !== undefined) pin.push(`the base ${b.id} is itself a re-cut by reference (of ${b.base?.id}): a base is a first cut`);
+  if (!pinned) return pin;
+  const p = checkReleaseRecord(b).map((q) => `the base's release.json: ${q}`).concat(pin);
   const same = (x, y) => JSON.stringify(x) === JSON.stringify(y);
   for (const k of RECUT_SAME_KEYS) if (!same(r[k], b[k])) p.push(`${k} differs from the base's (a re-cut by reference changes ${RECUT_OWN_DIRS.join(", ")}/ only)`);
   for (const k of RECUT_SAME_GATE_KEYS) if (!same(r.gate?.[k], b.gate?.[k])) p.push(`gate.${k} differs from the base's`);
   if (r.tools?.package !== b.tools?.package) p.push(`tools.package ${JSON.stringify(r.tools?.package)} is not the base's ${JSON.stringify(b.tools?.package)}`);
   if (r.tools?.version === b.tools?.version) p.push(`tools.version ${r.tools?.version} is the base's: a re-cut ships other tools`);
-  const theirs = new Map((Array.isArray(b.files) ? b.files : []).filter((f) => !isRecutOwnPath(f?.path)).map((f) => [f.path, f]));
+  // an entry that is no object (null, say) is the base's structural problem above, never a crash here
+  const theirs = new Map((Array.isArray(b.files) ? b.files : []).filter((f) => f && typeof f === "object" && !isRecutOwnPath(f.path)).map((f) => [f.path, f]));
   for (const f of Array.isArray(r.files) ? r.files : []) {
     if (isRecutOwnPath(f?.path)) continue;
     const g = theirs.get(f?.path);
     if (!g) p.push(`files[]: ${f?.path} is not a file of the base`);
-    else if (g.bytes !== f.bytes || g.sha256 !== f.sha256) p.push(`files[]: ${f.path} is not the base's bytes`);
+    else if (g.bytes !== f?.bytes || g.sha256 !== f?.sha256) p.push(`files[]: ${f?.path} is not the base's bytes`);
     theirs.delete(f?.path);
   }
   for (const q of theirs.keys()) p.push(`files[]: the base's ${q} is missing`);
@@ -220,14 +229,21 @@ export function checkReleaseRecord(r) {
   if (!Array.isArray(r.files) || !files.length) p.push("files[] missing or empty");
   const byPath = new Map();
   const basenames = new Map();
+  // lower-cased path → the first two distinct paths that fold to it, in the order listed: enough
+  // to name the first earlier path a later one collides with, in one lookup (linear in files[])
+  const byFolded = new Map();
   let prev = "";
   for (const f of files) {
     if (!isReleasePath(f?.path)) { p.push(`files[]: ${JSON.stringify(f?.path)} is not a safe release path`); continue; }
     if (!isInt(f.bytes) || !isSha256Hex(f.sha256)) p.push(`files[]: ${f.path} needs bytes and a 64-hex sha256`);
     if (byPath.has(f.path)) p.push(`files[]: ${f.path} listed twice`);
     // case-insensitive file systems (macOS, Windows) would fold two such paths into one file
-    const folded = [...byPath.keys()].find((q) => q !== f.path && q.toLowerCase() === f.path.toLowerCase());
+    const lower = f.path.toLowerCase();
+    const earlier = byFolded.get(lower);
+    const folded = earlier?.find((q) => q !== f.path);
     if (folded) p.push(`files[]: ${f.path} and ${folded} differ only in letter case`);
+    if (!earlier) byFolded.set(lower, [f.path]);
+    else if (earlier.length < 2 && !earlier.includes(f.path)) earlier.push(f.path);
     if (f.path <= prev) p.push(`files[]: not sorted at ${f.path}`);
     prev = f.path;
     byPath.set(f.path, f);
@@ -255,7 +271,8 @@ export function checkReleaseRecord(r) {
     const f = byPath.get(e.path);
     if (!f || f.bytes !== e.bytes || f.sha256 !== e.sha256) p.push(`runtime.bin ${e.name} does not match its files[] entry`);
   }
-  const unrecorded = [...byPath.keys()].filter((q) => q.startsWith("runtime/bin/") && !(Array.isArray(rt.bin) && rt.bin.some((e) => e?.path === q)));
+  const binPaths = new Set((Array.isArray(rt.bin) ? rt.bin : []).map((e) => e?.path));
+  const unrecorded = [...byPath.keys()].filter((q) => q.startsWith("runtime/bin/") && !binPaths.has(q));
   if (unrecorded.length) p.push(`runtime/bin files missing from runtime.bin: ${unrecorded.join(", ")}`);
   const ids = new Set();
   if (!Array.isArray(r.packs ?? [])) p.push("packs is not an array");

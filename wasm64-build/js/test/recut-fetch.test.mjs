@@ -11,17 +11,27 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { sha256Hex } from "../artifact-id.mjs";
 import { canonicalRelease, checkRecutBase, checkReleaseRecord, isRecutOwnPath, serializeRelease, sha256sums } from "../release-record.mjs";
 
 const pkg = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const run = (script, args) => spawnSync(process.execPath, [path.join(pkg, script), ...args], { encoding: "utf8" });
-const runAsync = (script, args) => new Promise((resolve) => {
+// every spawn has a deadline: a hang (Node 26.3's exit deadlock, a stuck read) fails here, fast and
+// with what the tool printed, never at the CI job's timeout
+const TIMEOUT_MS = 60_000;
+function runNode(file, args, nodeFlags = []) {
+  const r = spawnSync(process.execPath, [...nodeFlags, file, ...args], { encoding: "utf8", timeout: TIMEOUT_MS });
+  if (r.error) throw new Error(`${path.basename(file)} ${args.join(" ")}: ${r.error.message}\n${r.stdout}${r.stderr}`);
+  return r;
+}
+const run = (script, args) => runNode(path.join(pkg, script), args);
+const runAsync = (script, args) => new Promise((resolve, reject) => {
   const p = spawn(process.execPath, [path.join(pkg, script), ...args]);
   let stdout = "", stderr = "";
+  const timer = setTimeout(() => { p.kill("SIGKILL"); reject(new Error(`${script} ${args.join(" ")}: no exit within ${TIMEOUT_MS / 1000} s\n${stdout}${stderr}`)); }, TIMEOUT_MS);
   p.stdout.on("data", (d) => (stdout += d)); p.stderr.on("data", (d) => (stderr += d));
-  p.on("close", (status) => resolve({ status, stdout, stderr }));
+  p.on("error", (e) => { clearTimeout(timer); reject(e); });
+  p.on("close", (status) => { clearTimeout(timer); resolve({ status, stdout, stderr }); });
 });
 const made = [];
 const mkdtemp = (prefix) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); made.push(d); return d; };
@@ -226,6 +236,81 @@ test("fetch refuses, writing nothing: a base that is not the pinned one, a recor
   assert.equal(r.status, 2); assert.equal(fs.existsSync(path.join(s.root, "out-unknown")), false, "an unknown group is refused before the base is read");
 });
 
+test("a base record that breaks the check's assumptions is a named refusal, never a crash: a null files[] entry, a record too deep to digest", (t) => {
+  const s = stageBase();
+  // 1. a null entry in the base's files[], re-signed, and a re-cut pinning exactly that record
+  const nulled = resign(s.record, (r) => { r.files.unshift(null); });
+  const rec = recutRecord(s.record, (r) => { r.base.digest = nulled.digest; });
+  let { fb, fr } = writeFlat(s, rec, "nulled");
+  fs.writeFileSync(path.join(fb, "release.json"), serializeRelease(nulled));
+  let out = path.join(s.root, "out-nulled");
+  let r = run("fetch-release.mjs", ["--from", fr, "--out", out]);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, /^fetch: lean-v4\.34\.0-a8817d0-r3 refused against its base lean-v4\.34\.0-a8817d0 at .* — 1 problem\(s\):\n {2}the base's release\.json: files\[\]: undefined is not a safe release path$/m);
+  assert.doesNotMatch(r.stderr, /TypeError|\n {4}at /);
+  assert.equal(fs.existsSync(out), false, "nothing written");
+  const mirror = writeServed(path.join(s.root, "mirror", rec.id), s, rec);
+  r = run("verify-release.mjs", ["--release", mirror, "--base", fb]);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /^FAIL {2}re-cut of lean-v4\.34\.0-a8817d0 .* — the base's release\.json: files\[\]: undefined is not a safe release path$/m);
+  assert.doesNotMatch(r.stdout, /cannot read/);
+  // 2. the pinned id and digest over a record nested too deep for JSON.stringify(…, null, 2):
+  //    it parses, and then the check itself throws (a RangeError) — refused by name all the same
+  const deep = `${'{"a":'.repeat(100_000)}1${"}".repeat(100_000)}`;
+  const text = JSON.stringify({ ...s.record, mathlib: "DEEP" }).replace('"DEEP"', deep);
+  const parsed = JSON.parse(text); // V8's JSON.parse is iterative: any depth parses
+  try { JSON.stringify(parsed, null, 2); t.diagnostic("this V8 digests the deep record: its half is moot"); return; } catch { /* the case at hand */ }
+  const plain = recutRecord(s.record);
+  ({ fb, fr } = writeFlat(s, plain, "deep"));
+  fs.writeFileSync(path.join(fb, "release.json"), text);
+  out = path.join(s.root, "out-deep");
+  r = run("fetch-release.mjs", ["--from", fr, "--out", out]);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, /^fetch: lean-v4\.34\.0-a8817d0-r3 refused against its base lean-v4\.34\.0-a8817d0 at .* — 1 problem\(s\):\n {2}the base's release\.json could not be checked: Maximum call stack size exceeded$/m);
+  assert.doesNotMatch(r.stderr, /\n {4}at /);
+  assert.equal(fs.existsSync(out), false, "nothing written");
+  r = run("verify-release.mjs", ["--release", writeServed(path.join(s.root, "mirror-deep", plain.id), s, plain), "--base", fb]);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /^FAIL {2}re-cut of .* — the base's release\.json .*release\.json could not be checked: Maximum call stack size exceeded$/m);
+  assert.doesNotMatch(r.stdout, /cannot read/);
+});
+
+test("fetch's refusals after its first read end by exitCode, never process.exit() (Node 26.3's exit deadlock)", () => {
+  const s = stageBase();
+  const rec = recutRecord(s.record);
+  // a preload that makes every process.exit() call visible (synchronously, before the exit)
+  const hook = path.join(s.root, "loud-exit.mjs");
+  fs.writeFileSync(hook, 'import fs from "node:fs";\nconst exit = process.exit;\nprocess.exit = (code) => { fs.writeSync(2, `process.exit(${code}) called\\n`); return exit(code); };\n');
+  let n = 0;
+  const fetchLoud = (args) => {
+    const out = path.join(s.root, `out-${n++}`);
+    return { out, ...runNode(path.join(pkg, "fetch-release.mjs"), [...args, "--out", out], ["--import", pathToFileURL(hook).href]) };
+  };
+  // the hook works: usage is refused before any read, by process.exit(2)
+  let r = fetchLoud(["--from", s.rel, "--base-from", ""]);
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.match(r.stderr, /^process\.exit\(2\) called$/m);
+  const { fb, fr } = writeFlat(s, rec, "loud");
+  const drift = writeFlat(s, recutRecord(s.record, (x) => { x.packs[0].note = "drift"; }), "loud-drift").fr;
+  const elsewhere = writeThin(path.join(s.root, "loud-elsewhere", "thin"), rec);
+  const orphan = writeThin(path.join(s.root, "loud-orphan", rec.id), rec);
+  const cases = [
+    ["--base-from on a record without a base", ["--from", s.rel, "--base-from", fb], 1, /is not a re-cut by reference/],
+    ["no sibling to be found", ["--from", elsewhere], 1, /its sibling cannot be found/],
+    ["an unreadable base", ["--from", orphan], 1, /cannot read the base's release\.json/],
+    ["a base it refuses", ["--from", drift], 1, /refused against its base/],
+    ["the record refused", ["--from", fr, "--id", BASE_ID], 1, /release is lean-v4\.34\.0-a8817d0-r3, expected/],
+    ["an unknown group", ["--from", fr, "--only", "nope"], 2, /unknown --only group/],
+  ];
+  for (const [label, args, status, re] of cases) {
+    r = fetchLoud(args);
+    assert.equal(r.status, status, `${label}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, re, label);
+    assert.doesNotMatch(r.stderr, /process\.exit\(\d+\) called/, label);
+    assert.equal(fs.existsSync(r.out), false, `${label}: nothing written`);
+  }
+});
+
 test("fetch refuses a tampered base file: the re-cut's record catches it, nothing unverified is left", () => {
   const s = stageBase();
   const rec = recutRecord(s.record);
@@ -240,6 +325,32 @@ test("fetch refuses a tampered base file: the re-cut's record catches it, nothin
   // the base's record was fine, so release.json was written (A5); the tampered file was not
   assert.equal(fs.existsSync(path.join(out, victim.path)), false);
   assert.deepEqual(partials(out), []);
+});
+
+test("a rerun into the same --out, once the tampered base file is restored, keeps what the first run verified and completes from both sources", () => {
+  const s = stageBase();
+  const rec = recutRecord(s.record);
+  const { fb, fr } = writeFlat(s, rec);
+  // the last chunk in path order: every base file before it is fetched, and kept, by the first run
+  const last = rec.files.filter((f) => f.path.startsWith("runtime/chunks/")).map((f) => f.path).sort().at(-1);
+  const victim = path.join(fb, path.basename(last));
+  const good = fs.readFileSync(victim);
+  const bad = Buffer.from(good); bad[0] ^= 0xff; fs.writeFileSync(victim, bad);
+  const out = path.join(s.root, "got");
+  const args = ["--from", fr, "--out", out, "--only", "all", "--id", rec.id, "--digest", rec.digest];
+  let r = run("fetch-release.mjs", args);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, new RegExp(`${esc(last)}: expected \\d+ bytes sha256`));
+  const kept = rec.files.map((f) => f.path).filter((p) => fs.existsSync(path.join(out, p)));
+  assert.ok(kept.length > 3 && kept.every((p) => !isRecutOwnPath(p) && p < last), `the first run kept base files before ${last}: ${kept.join(", ")}`);
+  assert.deepEqual(partials(out), []);
+  fs.writeFileSync(victim, good);
+  r = run("fetch-release.mjs", args);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, new RegExp(`^${rec.files.length} files verified \\(${rec.files.length - kept.length} fetched, ${kept.length} already present\\)$`, "m"));
+  assert.equal(fs.readFileSync(path.join(out, RECUT_TGZ), "utf8"), RECUT_TGZ_BYTES, "the re-cut's own tgz, from --from");
+  r = run("verify-release.mjs", ["--release", out, "--deep", "--base", fb]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
 });
 
 test("a flat fetch of tools/ alone needs no base; anything else does", () => {
@@ -323,6 +434,53 @@ test("over HTTP: a GitHub-style /releases/download/<id>/ URL finds its base at /
   }
 });
 
+test("over HTTP: --base-from a served URL (an R2-style prefix) is read by path, never the sibling; --layout served on a thin flat -r3 reads no base and fails", async () => {
+  const s = stageBase();
+  const rec = recutRecord(s.record);
+  writeFlat(s, rec); // the flat sibling exists too: it must not be read
+  const seen = [];
+  // /<owner>/r/releases/download/<id>/<name>: GitHub-style, flat; /site/lean4-wasm64/<id>/<path>: served
+  const server = http.createServer((req, res) => {
+    const u = new URL(req.url, "http://x").pathname;
+    seen.push(u);
+    const gh = /^\/[a-z]+\/r\/releases\/download\/([^/]+)\/([^/]+)$/.exec(u);
+    const site = /^\/site\/lean4-wasm64\/([^/]+)\/([A-Za-z0-9._/+-]+)$/.exec(u);
+    const p = gh ? path.join(s.root, "flat", gh[1], gh[2]) : site ? path.join(s.root, "served", site[1], site[2]) : null;
+    if (!p || !p.startsWith(s.root + path.sep) || !fs.existsSync(p) || !fs.statSync(p).isFile()) { res.statusCode = 404; return res.end(); }
+    fs.createReadStream(p).pipe(res);
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  try {
+    const host = `http://127.0.0.1:${server.address().port}`;
+    const from = `${host}/o/r/releases/download/${rec.id}/`, baseFrom = `${host}/site/lean4-wasm64/${BASE_ID}/`;
+    const forcedFrom = `${host}/x/r/releases/download/${rec.id}/`;
+    const out = path.join(s.root, "got"), forced = path.join(s.root, "forced");
+    // at once: the forced fetch spends ~15 s in fetch's retries of the file its served path misses
+    const [r, f] = await Promise.all([
+      runAsync("fetch-release.mjs", ["--from", from, "--base-from", baseFrom, "--out", out, "--id", rec.id, "--digest", rec.digest]),
+      runAsync("fetch-release.mjs", ["--from", forcedFrom, "--layout", "served", "--out", forced, "--only", "lists"]),
+    ]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, new RegExp(`flat layout from ${esc(from)}; re-cut of ${esc(BASE_ID)} \\(sha256:[0-9a-f]{16}…\\), base checked, files outside tools/ from ${esc(baseFrom)}$`, "m"));
+    const tgzName = path.basename(RECUT_TGZ);
+    assert.deepEqual(seen.filter((q) => q.startsWith("/o/")).sort(), [`/o/r/releases/download/${rec.id}/${tgzName}`, `/o/r/releases/download/${rec.id}/release.json`], "from --from: the record and the tgz only; the sibling never");
+    const fromSite = seen.filter((q) => q.startsWith("/site/")).map((q) => q.slice(`/site/lean4-wasm64/${BASE_ID}/`.length)).sort();
+    assert.deepEqual(fromSite, ["release.json", ...rec.files.filter((x) => !isRecutOwnPath(x.path)).map((x) => x.path)].sort(), "from the served base: its record and every shared file, by path");
+    const v = run("verify-release.mjs", ["--release", out, "--deep", "--base", s.rel]);
+    assert.equal(v.status, 0, v.stdout + v.stderr);
+    // --layout served: --from is taken as complete under the re-cut's own id, so no base is read,
+    // and a thin GitHub release does not hold the served paths
+    assert.equal(f.status, 1, f.stdout + f.stderr);
+    assert.match(f.stdout, new RegExp(`served layout from ${esc(forcedFrom)}; re-cut of ${esc(BASE_ID)} .*served, complete under its own id: base not compared`));
+    assert.match(f.stderr, /fetch: FAILED — HTTP 404 for .*\/lists\/essential-modules\.txt/);
+    const forcedSeen = seen.filter((q) => q.startsWith("/x/"));
+    assert.ok(forcedSeen.includes(`/x/r/releases/download/${rec.id}/release.json`) && forcedSeen.includes(`/x/r/releases/download/${rec.id}/lists/essential-modules.txt`), forcedSeen.join(", "));
+    assert.ok(forcedSeen.every((q) => q.startsWith(`/x/r/releases/download/${rec.id}/`)), `no base request: ${forcedSeen.join(", ")}`);
+  } finally {
+    server.close();
+  }
+});
+
 test("verify --base: usage, a record without a base, a wrong base; --json carries base.compared", () => {
   const s = stageBase();
   const rec = recutRecord(s.record);
@@ -361,11 +519,46 @@ test("verify --base: usage, a record without a base, a wrong base; --json carrie
   assert.equal(v.j.base, null);
 });
 
+// the -r2 tools (lean-v4.34.0-e1a79c1-r2's tools.commit): the last ones written before `base` existed
+const REPO = path.resolve(pkg, "..", "..");
+const R2_TOOLS = "2050a9ca0c";
+const git = (...args) => spawnSync("git", ["-C", REPO, ...args], { timeout: TIMEOUT_MS, maxBuffer: 256 << 20 });
+const haveR2Tools = git("cat-file", "-e", `${R2_TOOLS}^{commit}`).status === 0;
+
+test("older readers fail closed, end to end: the -r2 tools' own fetch refuses a re-cut by reference before writing anything, their verify calls it malformed", { skip: haveR2Tools ? false : `commit ${R2_TOOLS} (the -r2 tools) is not in this clone (a shallow checkout?)` }, () => {
+  const old = mkdtemp("l4w-r2-tools-");
+  const a = git("archive", "--format=tar", R2_TOOLS, "wasm64-build/js");
+  assert.equal(a.status, 0, String(a.stderr));
+  const x = spawnSync("tar", ["-x", "-C", old], { input: a.stdout, timeout: TIMEOUT_MS });
+  assert.equal(x.status, 0, String(x.stderr));
+  const tool = (name) => path.join(old, "wasm64-build", "js", name);
+  const s = stageBase();
+  const rec = recutRecord(s.record);
+  const { fr } = writeFlat(s, rec);
+  const mirror = writeServed(path.join(s.root, "mirror", rec.id), s, rec);
+  for (const [label, from] of [["flat", fr], ["served", mirror]]) {
+    const out = path.join(s.root, `old-${label}`);
+    const r = runNode(tool("fetch-release.mjs"), ["--from", from, "--out", out, "--id", rec.id, "--digest", rec.digest]);
+    assert.equal(r.status, 1, `${label}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /^fetch: release\.json refused — \d+ problem\(s\):\n[\s\S]*^ {2}unknown keys: base$/m, label);
+    assert.equal(fs.existsSync(out), false, `${label}: nothing written`);
+  }
+  const v = runNode(tool("verify-release.mjs"), ["--release", mirror, "--deep"]);
+  assert.equal(v.status, 1, v.stdout + v.stderr);
+  assert.match(v.stdout, /^FAIL .*unknown keys: base/m);
+  assert.match(v.stdout, new RegExp(`RELEASE FAILED \\(malformed release\\.json\\) ${esc(RECUT_ID)}`));
+  // and it is `base` they refuse: the same tools verify the first cut
+  const ok = runNode(tool("verify-release.mjs"), ["--release", s.rel]);
+  assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+});
+
 test("help: fetch names --base-from and a fresh --out, verify names --base", () => {
   let r = run("fetch-release.mjs", ["--help"]);
   assert.equal(r.status, 0);
   assert.match(r.stdout, /\[--base-from <url\|dir>\]/);
   assert.match(r.stdout, /--base-from <src> {2}a re-cut by reference/);
+  // the sibling default is for a flat --from that reads files from the base; nothing else reads a sibling
+  assert.match(r.stdout, /Flat --from:\s+every file outside tools\/ comes from there \(default: the sibling <…>\/<base id>\/ when\s+--from ends in the re-cut's id\)\. Served --from, or tools\/ only: compares with it \(no default\)/);
   assert.match(r.stdout, /--out <dir> .*a fresh dir/);
   r = run("verify-release.mjs", ["--help"]);
   assert.equal(r.status, 0);

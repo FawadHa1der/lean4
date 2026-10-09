@@ -20,7 +20,7 @@ after(() => { for (const d of made) fs.rmSync(d, { recursive: true, force: true 
 
 const pkg = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const run = (args, node = [], env = {}) =>
-  spawnSync(process.execPath, [...node, path.join(pkg, "pack-set.mjs"), ...args], { encoding: "utf8", env: { ...process.env, ...env } });
+  spawnSync(process.execPath, [...node, path.join(pkg, "pack-set.mjs"), ...args], { encoding: "utf8", env: { ...process.env, ...env }, timeout: 120_000, killSignal: "SIGKILL" });
 const BUILT = "8d91aadcda8a0b231e47c42d4ff4b9b8360563aa";
 const NATIVE = "857544b439aa51633344d638dacc03d304b9ea96";
 const MATHLIB = "5ed2965256430c3649e86755f9576b54eca72435";

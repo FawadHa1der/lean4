@@ -182,107 +182,116 @@ for (const d of packs) {
 const recordPath = path.resolve(arg("record", path.join(out, "pack-set.json")));
 // a record from an earlier run must not outlive a refused one: it would list packs this run did not vouch for
 fs.rmSync(recordPath, { force: true });
+// Every exit is by exitCode, never process.exit(): Node 26.3's platform shutdown can deadlock
+// when process.exit runs while V8 background jobs are in flight (fetch-release.mjs, its end).
 if (problems.length) {
   console.error(`pack-set: REFUSED —\n  ${problems.join("\n  ")}`);
-  process.exit(1);
+  process.exitCode = 1;
+} else {
+  process.exitCode = packAll();
 }
-if (argv.includes("--no-imports")) console.error("pack-set: WARNING --no-imports: import tables are not read, so no import closure is checked (fixtures only)");
 
-fs.mkdirSync(out, { recursive: true });
-const outputsOf = (id) => fs.readdirSync(out).filter((f) => f === `${id}.pack` || f === `${id}.manifest.json` || f.startsWith(`${id}.pack.gzip.`));
-// A hard link cannot leave its filesystem (EXDEV: --out on another volume than
-// the build) and some filesystems have none (EPERM, ENOTSUP): copy then, as a
-// clone where the filesystem can.
-const place = (from, to) => {
-  try { fs.linkSync(from, to); } catch (e) {
-    if (!["EXDEV", "EPERM", "ENOTSUP"].includes(e.code)) throw e;
-    fs.copyFileSync(from, to, fs.constants.COPYFILE_FICLONE);
-  }
-};
-// module names of the manifests in <out> a closure is checked against
-const modulesOf = new Map();
-const modulesIn = (id) => {
-  if (!modulesOf.has(id)) {
-    try { modulesOf.set(id, Object.keys(JSON.parse(fs.readFileSync(manifestIn(id), "utf8")).content.modules)); } catch { modulesOf.set(id, null); }
-  }
-  return modulesOf.get(id);
-};
-const record = [];
-for (const d of packs) {
-  const { commit, buildId } = builds.get(dirOf(d));
-  const fill = (t) => t.replaceAll("{leanVersion}", leanVersion).replaceAll("{buildId}", buildId)
-    .replaceAll("{commit12}", commit.slice(0, 12)).replaceAll("{mathlib7}", mathlib?.slice(0, 7) ?? "");
-  let lib = path.join(dirOf(d), d.from);
-  let side = null;
-  if (d.include) {
-    // pack.mjs packs everything under --lib: the selection is a hard-linked side tree
-    side = path.join(out, `.select-${d.id}`);
-    fs.rmSync(side, { recursive: true, force: true });
-    const link = (from, to) => {
-      if (fs.statSync(from).isDirectory()) {
-        fs.mkdirSync(to, { recursive: true });
-        for (const e of fs.readdirSync(from)) link(path.join(from, e), path.join(to, e));
-      } else {
-        fs.mkdirSync(path.dirname(to), { recursive: true });
-        place(from, to);
+/** Pack every selected pack and write the record: 0, or 1 after a refusal (printed). */
+function packAll() {
+  if (argv.includes("--no-imports")) console.error("pack-set: WARNING --no-imports: import tables are not read, so no import closure is checked (fixtures only)");
+
+  fs.mkdirSync(out, { recursive: true });
+  const outputsOf = (id) => fs.readdirSync(out).filter((f) => f === `${id}.pack` || f === `${id}.manifest.json` || f.startsWith(`${id}.pack.gzip.`));
+  // A hard link cannot leave its filesystem (EXDEV: --out on another volume than
+  // the build) and some filesystems have none (EPERM, ENOTSUP): copy then, as a
+  // clone where the filesystem can.
+  const place = (from, to) => {
+    try { fs.linkSync(from, to); } catch (e) {
+      if (!["EXDEV", "EPERM", "ENOTSUP"].includes(e.code)) throw e;
+      fs.copyFileSync(from, to, fs.constants.COPYFILE_FICLONE);
+    }
+  };
+  // module names of the manifests in <out> a closure is checked against
+  const modulesOf = new Map();
+  const modulesIn = (id) => {
+    if (!modulesOf.has(id)) {
+      try { modulesOf.set(id, Object.keys(JSON.parse(fs.readFileSync(manifestIn(id), "utf8")).content.modules)); } catch { modulesOf.set(id, null); }
+    }
+    return modulesOf.get(id);
+  };
+  const record = [];
+  for (const d of packs) {
+    const { commit, buildId } = builds.get(dirOf(d));
+    const fill = (t) => t.replaceAll("{leanVersion}", leanVersion).replaceAll("{buildId}", buildId)
+      .replaceAll("{commit12}", commit.slice(0, 12)).replaceAll("{mathlib7}", mathlib?.slice(0, 7) ?? "");
+    let lib = path.join(dirOf(d), d.from);
+    let side = null;
+    if (d.include) {
+      // pack.mjs packs everything under --lib: the selection is a hard-linked side tree
+      side = path.join(out, `.select-${d.id}`);
+      fs.rmSync(side, { recursive: true, force: true });
+      const link = (from, to) => {
+        if (fs.statSync(from).isDirectory()) {
+          fs.mkdirSync(to, { recursive: true });
+          for (const e of fs.readdirSync(from)) link(path.join(from, e), path.join(to, e));
+        } else {
+          fs.mkdirSync(path.dirname(to), { recursive: true });
+          place(from, to);
+        }
+      };
+      try { for (const inc of d.include) link(path.join(lib, inc), path.join(side, inc)); } catch (e) {
+        fs.rmSync(side, { recursive: true, force: true }); // a partial side tree is a stray file in <out>
+        console.error(`pack-set: ${d.id}: selecting from ${lib} failed: ${e.message}`);
+        return 1;
       }
-    };
-    try { for (const inc of d.include) link(path.join(lib, inc), path.join(side, inc)); } catch (e) {
-      fs.rmSync(side, { recursive: true, force: true }); // a partial side tree is a stray file in <out>
-      console.error(`pack-set: ${d.id}: selecting from ${lib} failed: ${e.message}`);
-      process.exit(1);
+      lib = side;
     }
-    lib = side;
+    for (const f of outputsOf(d.id)) fs.rmSync(path.join(out, f));
+    const args = [path.join(here, "pack.mjs"), "--lib", lib, "--id", d.id, "--out", out, "--mount", d.mount,
+      "--lean-version", leanVersion, "--revision", commit.slice(0, 12), "--release", fill(d.release)];
+    if (d.roots.length) args.push("--roots", d.roots.join(","));
+    if (d.urlPrefix) args.push("--url-prefix", d.urlPrefix);
+    if (argv.includes("--no-imports")) args.push("--no-imports");
+    console.log(`== ${d.id} ← ${path.join(dirOf(d), d.from)}`);
+    const r = spawnSync(process.execPath, args, { stdio: ["ignore", "pipe", "inherit"], encoding: "utf8" });
+    if (side) fs.rmSync(side, { recursive: true, force: true });
+    process.stdout.write(r.stdout);
+    if (r.status !== 0) { console.error(`pack-set: ${d.id} failed (pack.mjs exit ${r.status})`); return 1; }
+    if (!keepRaw) fs.rmSync(path.join(out, `${d.id}.pack`), { force: true });
+    const m = JSON.parse(fs.readFileSync(path.join(out, `${d.id}.manifest.json`), "utf8")).content;
+    modulesOf.set(d.id, Object.keys(m.modules));
+    if (d.closedOver) {
+      // pack.mjs leaves the implicit `Init` edge out of a pack without Init, so
+      // every import left must be a module of this pack or of d.closedOver
+      const known = new Set(Object.keys(m.modules));
+      const bad = [];
+      for (const dep of d.closedOver) {
+        const names = modulesIn(dep);
+        if (names) for (const n of names) known.add(n);
+        else bad.push(`cannot read ${manifestIn(dep)} (${d.id} is closed over ${dep})`);
+      }
+      const dangling = [];
+      let edges = 0;
+      for (const [name, mod] of Object.entries(m.modules)) {
+        for (const dep of mod.imports ?? []) { edges += 1; if (!known.has(dep)) dangling.push(`${name} → ${dep}`); }
+      }
+      if (!bad.length && dangling.length) {
+        bad.push(`${dangling.length} dangling import(s), in none of ${[d.id, ...d.closedOver].join(" + ")}: e.g. ${dangling.slice(0, 5).join("; ")}`);
+      }
+      if (edges === 0 && Object.keys(m.modules).length > 1 && !argv.includes("--no-imports")) bad.push("no import edges at all (the .olean import tables read as empty)");
+      if (bad.length) {
+        for (const f of outputsOf(d.id)) fs.rmSync(path.join(out, f)); // never left looking packed
+        console.error(`pack-set: REFUSED — ${d.id} after packing (its manifest and parts were removed from ${out}):\n  ${bad.join("\n  ")}`);
+        return 1;
+      }
+    }
+    record.push({
+      id: d.id,
+      build: d.build,
+      buildDir: dirOf(d),
+      compiler: d.compiler === "wasm" ? commit : native,
+      ...(d.compiler === "native64" && mathlib ? { mathlib: { commit: mathlib } } : {}),
+      release: m.release,
+      modules: Object.keys(m.modules).length,
+      rawSha256: m.pack.digest.replace(/^sha256:/, ""),
+    });
   }
-  for (const f of outputsOf(d.id)) fs.rmSync(path.join(out, f));
-  const args = [path.join(here, "pack.mjs"), "--lib", lib, "--id", d.id, "--out", out, "--mount", d.mount,
-    "--lean-version", leanVersion, "--revision", commit.slice(0, 12), "--release", fill(d.release)];
-  if (d.roots.length) args.push("--roots", d.roots.join(","));
-  if (d.urlPrefix) args.push("--url-prefix", d.urlPrefix);
-  if (argv.includes("--no-imports")) args.push("--no-imports");
-  console.log(`== ${d.id} ← ${path.join(dirOf(d), d.from)}`);
-  const r = spawnSync(process.execPath, args, { stdio: ["ignore", "pipe", "inherit"], encoding: "utf8" });
-  if (side) fs.rmSync(side, { recursive: true, force: true });
-  process.stdout.write(r.stdout);
-  if (r.status !== 0) { console.error(`pack-set: ${d.id} failed (pack.mjs exit ${r.status})`); process.exit(1); }
-  if (!keepRaw) fs.rmSync(path.join(out, `${d.id}.pack`), { force: true });
-  const m = JSON.parse(fs.readFileSync(path.join(out, `${d.id}.manifest.json`), "utf8")).content;
-  modulesOf.set(d.id, Object.keys(m.modules));
-  if (d.closedOver) {
-    // pack.mjs leaves the implicit `Init` edge out of a pack without Init, so
-    // every import left must be a module of this pack or of d.closedOver
-    const known = new Set(Object.keys(m.modules));
-    const bad = [];
-    for (const dep of d.closedOver) {
-      const names = modulesIn(dep);
-      if (names) for (const n of names) known.add(n);
-      else bad.push(`cannot read ${manifestIn(dep)} (${d.id} is closed over ${dep})`);
-    }
-    const dangling = [];
-    let edges = 0;
-    for (const [name, mod] of Object.entries(m.modules)) {
-      for (const dep of mod.imports ?? []) { edges += 1; if (!known.has(dep)) dangling.push(`${name} → ${dep}`); }
-    }
-    if (!bad.length && dangling.length) {
-      bad.push(`${dangling.length} dangling import(s), in none of ${[d.id, ...d.closedOver].join(" + ")}: e.g. ${dangling.slice(0, 5).join("; ")}`);
-    }
-    if (edges === 0 && Object.keys(m.modules).length > 1 && !argv.includes("--no-imports")) bad.push("no import edges at all (the .olean import tables read as empty)");
-    if (bad.length) {
-      for (const f of outputsOf(d.id)) fs.rmSync(path.join(out, f)); // never left looking packed
-      console.error(`pack-set: REFUSED — ${d.id} after packing (its manifest and parts were removed from ${out}):\n  ${bad.join("\n  ")}`);
-      process.exit(1);
-    }
-  }
-  record.push({
-    id: d.id,
-    build: d.build,
-    buildDir: dirOf(d),
-    compiler: d.compiler === "wasm" ? commit : native,
-    ...(d.compiler === "native64" && mathlib ? { mathlib: { commit: mathlib } } : {}),
-    release: m.release,
-    modules: Object.keys(m.modules).length,
-    rawSha256: m.pack.digest.replace(/^sha256:/, ""),
-  });
+  fs.writeFileSync(recordPath, `${JSON.stringify({ importDir: K, runtimeDir: R, leanVersion, packs: record }, null, 2)}\n`);
+  console.log(`pack-set: ${record.length} pack(s) → ${out} (${recordPath} lists the compilers for the release config)`);
+  return 0;
 }
-fs.writeFileSync(recordPath, `${JSON.stringify({ importDir: K, runtimeDir: R, leanVersion, packs: record }, null, 2)}\n`);
-console.log(`pack-set: ${record.length} pack(s) → ${out} (${recordPath} lists the compilers for the release config)`);

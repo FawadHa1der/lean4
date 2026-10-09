@@ -8,8 +8,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  RECUT_OWN_DIRS, RECUT_SAME_KEYS, RELEASE_DIGEST, RELEASE_KEY_ORDER, canonicalRelease, checkRecutBase, checkReleaseRecord,
-  firstCutOf, isRecutOwnPath,
+  RECUT_OWN_DIRS, RECUT_SAME_GATE_KEYS, RECUT_SAME_KEYS, RELEASE_DIGEST, RELEASE_KEY_ORDER, canonicalRelease, checkRecutBase,
+  checkReleaseRecord, firstCutOf, isRecutOwnPath,
 } from "../release-record.mjs";
 import * as olderReader from "./fixtures/release-record-r2/release-record.mjs";
 
@@ -43,7 +43,7 @@ test("committed records: valid, digests unchanged now that `base` is in the key 
     assert.equal(r.base, undefined, r.id);
   }
   assert.deepEqual(RELEASE_KEY_ORDER.slice(0, 3), ["schema", "id", "base"]);
-  for (const a of [RELEASE_KEY_ORDER, RECUT_OWN_DIRS, RECUT_SAME_KEYS]) assert.ok(Object.isFrozen(a));
+  for (const a of [RELEASE_KEY_ORDER, RECUT_OWN_DIRS, RECUT_SAME_KEYS, RECUT_SAME_GATE_KEYS]) assert.ok(Object.isFrozen(a));
 });
 
 test("firstCutOf / isRecutOwnPath / RELEASE_DIGEST", () => {
@@ -117,6 +117,99 @@ test("checkRecutBase: one refusal per family; gate.checks, notes and tools may d
   assert.notDeepEqual(ok.notes, BASE.notes);
   assert.notDeepEqual(ok.tools, BASE.tools);
   assert.deepEqual(checkRecutBase(ok, BASE), []);
+});
+
+test("checkRecutBase: each shared field of formats/release.md, changed alone and re-signed, is refused by exactly its own name", () => {
+  // equality rule 2 as the spec states it: the test walks this list, not RECUT_SAME_KEYS, so a
+  // field dropped from the code (or the spec) fails here
+  const SHARED = ["schema", "lean", "kernel", "runtime", "packs", "native64", "docker", "mathlib", "modules", "hosting"];
+  const SHARED_GATE = ["passed", "commit", "wasmSha256"];
+  const spec = fs.readFileSync(path.join(here, "..", "formats", "release.md"), "utf8");
+  const rule2 = /\n2\. These fields equal the base's([\s\S]*?)\n3\. /.exec(spec)?.[1] ?? "";
+  assert.deepEqual([...rule2.matchAll(/`([a-z][A-Za-z0-9.]*)`/g)].map((m) => m[1]), [...SHARED, ...SHARED_GATE.map((k) => `gate.${k}`)], "formats/release.md, equality rule 2");
+  assert.deepEqual([...RECUT_SAME_KEYS], SHARED);
+  assert.deepEqual([...RECUT_SAME_GATE_KEYS], SHARED_GATE);
+  const edits = {
+    schema: () => "lean4-wasm64.release/v2",
+    lean: (v) => ({ ...v, version: "4.34.1" }),
+    kernel: (v) => ({ ...v, patch: "0038" }),
+    runtime: (v) => ({ ...v, target: "wasm64-other" }),
+    packs: (v) => v.map((k, i) => (i === 0 ? { ...k, note: "re-packed" } : k)),
+    native64: (v) => ({ ...v, os: "darwin" }),
+    docker: (v) => ({ ...v, imageId: `sha256:${"0".repeat(64)}` }),
+    mathlib: (v) => ({ ...v, tag: "v4.34.1" }),
+    modules: (v) => ({ ...v, extra: "lists/essential-modules.txt" }),
+    hosting: (v) => ({ ...v, layout: "flat" }),
+  };
+  assert.deepEqual(Object.keys(edits), SHARED);
+  for (const k of SHARED) {
+    assert.notEqual(JSON.stringify(edits[k](BASE[k])), JSON.stringify(BASE[k]), `${k}: the edit changes it`);
+    const why = [`${k} differs from the base's (a re-cut by reference changes tools/ only)`];
+    assert.deepEqual(checkRecutBase(recutOf(BASE, { edit: (r) => ({ ...r, [k]: edits[k](r[k]) }) }), BASE), why, `${k} changed`);
+    assert.deepEqual(checkRecutBase(recutOf(BASE, { edit: (r) => { const { [k]: _gone, ...rest } = r; return rest; } }), BASE), why, `${k} dropped`);
+  }
+  const gateEdits = { passed: false, commit: "f".repeat(40), wasmSha256: "0".repeat(64) };
+  assert.deepEqual(Object.keys(gateEdits), SHARED_GATE);
+  for (const k of SHARED_GATE) {
+    assert.notEqual(gateEdits[k], BASE.gate[k]);
+    const r = recutOf(BASE, { edit: (x) => ({ ...x, gate: { ...x.gate, [k]: gateEdits[k] } }) });
+    assert.deepEqual(checkRecutBase(r, BASE), [`gate.${k} differs from the base's`], `gate.${k}`);
+  }
+});
+
+test("checkRecutBase: the pin first; an unpinned base is refused on it alone, its files[] never walked", () => {
+  const r = recutOf(BASE);
+  const unpinned = { ...structuredClone(BASE), digest: `sha256:${"0".repeat(64)}` };
+  Object.defineProperty(unpinned, "files", { enumerable: true, get() { throw new Error("files[] of an unpinned base was walked"); } });
+  assert.deepEqual(checkRecutBase(r, unpinned), [`the base's release.json digest is sha256:${"0".repeat(64)}, the record pins ${BASE.digest}`]);
+  // the pinned digest over other content: the self-digest says so, and nothing else is reported
+  const edited = { ...structuredClone(BASE), runtime: { ...BASE.runtime, target: "other" } };
+  assert.deepEqual(checkRecutBase(r, edited), ["the base's release.json: self-digest does not match the content"]);
+  // a re-cut by reference given as the base: its id and its own base are named with the pin
+  assert.deepEqual(checkRecutBase(r, r), [
+    `the base's release.json is "${r.id}", the record names ${BASE.id}`,
+    `the base's release.json digest is ${r.digest}, the record pins ${BASE.digest}`,
+    `the base ${r.id} is itself a re-cut by reference (of ${BASE.id}): a base is a first cut`,
+  ]);
+  // a pinned base still gets the full structural check (a re-signed record breaking the gate binding)
+  const g = resign({ ...structuredClone(BASE), gate: { ...BASE.gate, commit: "f".repeat(40) } });
+  const p = checkRecutBase(recutOf(BASE, { edit: (x) => ({ ...x, base: { ...x.base, digest: g.digest } }) }), g);
+  assert.ok(p.includes("the base's release.json: gate.commit ≠ kernel.commit: the gate must have run on the released build"), JSON.stringify(p));
+  assert.ok(p.includes("gate.commit differs from the base's"), JSON.stringify(p));
+});
+
+test("checkRecutBase returns problems, never throws, whatever files[] holds (a null entry, say)", () => {
+  for (const junk of [null, 7, "lists/x", [], {}]) {
+    // pinned, so the base's full structural check and the files[] comparison both run on it
+    const hostile = resign({ ...structuredClone(BASE), files: [junk, ...BASE.files] });
+    const r = recutOf(BASE, { edit: (x) => ({ ...x, base: { ...x.base, digest: hostile.digest } }) });
+    let p;
+    assert.doesNotThrow(() => { p = checkRecutBase(r, hostile); }, JSON.stringify(junk));
+    assert.ok(p.some((q) => /^the base's release\.json: files\[\]: .* is not a safe release path$/.test(q)), `${JSON.stringify(junk)}: ${JSON.stringify(p)}`);
+    // the re-cut's side too, against a base holding a path-less entry
+    const odd = resign({ ...structuredClone(BASE), files: [{}, ...BASE.files] });
+    const r2 = recutOf(BASE, { edit: (x) => ({ ...x, base: { ...x.base, digest: odd.digest }, files: [junk, ...x.files] }) });
+    assert.doesNotThrow(() => { p = checkRecutBase(r2, odd); }, `the re-cut's ${JSON.stringify(junk)}`);
+    assert.ok(p.length > 0);
+  }
+});
+
+test("checkReleaseRecord: case folds are named as before, in one pass over files[]", () => {
+  const f = (p) => ({ path: p, bytes: 1, sha256: "a".repeat(64) });
+  // the first EARLIER path that folds to the same name is named, also for a repeat of the first
+  const r = resign({ ...structuredClone(BASE), files: [...BASE.files, f("lists/Zz.txt"), f("lists/zz.txt"), f("lists/Zz.txt"), f("lists/ZZ.txt")] });
+  assert.deepEqual(checkReleaseRecord(r).filter((q) => /letter case|listed twice/.test(q)), [
+    "files[]: lists/zz.txt and lists/Zz.txt differ only in letter case",
+    "files[]: lists/Zz.txt listed twice",
+    "files[]: lists/Zz.txt and lists/zz.txt differ only in letter case",
+    "files[]: lists/ZZ.txt and lists/Zz.txt differ only in letter case",
+  ]);
+  // 40000 files: linear, well under a second (a scan of every earlier path per file took ~16 s)
+  const big = resign({ ...structuredClone(BASE), files: BASE.files.concat(Array.from({ length: 40_000 }, (_, i) => f(`lists/z${String(i).padStart(6, "0")}.txt`))) });
+  const t = performance.now();
+  const p = checkReleaseRecord(big);
+  assert.ok(performance.now() - t < 3000, `checkReleaseRecord took ${Math.round(performance.now() - t)} ms on 40000 files`);
+  assert.deepEqual(p, ["files[]: not sorted at lists/z000000.txt"]);
 });
 
 test("older readers fail closed: -r2's own checker refuses `base` (unknown key)", () => {

@@ -25,9 +25,12 @@
 //               the listing, its own files' SHA-256 and an `rclone check` (MD5) of the shared files
 //               against the staged dir (--r2-full: every object's SHA-256, as for a full release)
 //   5. fetch    an anonymous `lean4-wasm64 fetch`, run with the staged tgz's own tools (the reader
-//               this release ships), of the published GitHub release pinned by --id/--digest, then
-//               `verify --deep`; a re-cut by reference: its runtime (through its base's release)
-//               and its tools (--fetch-check to change it)
+//               this release ships, as preflight unpacked and checked it), of the published GitHub
+//               release pinned by --id/--digest, then `verify --deep`; a re-cut by reference: its
+//               runtime (through its base's release) and its tools (--fetch-check to change it)
+// Before any step, whatever --only is (--dry-run too), the staged dir is verified, and so is the
+// reader it ships: its tools tgz is unpacked, must be tools.package@tools.version, and its own
+// `verify` must pass the staged dir (with --base for a re-cut by reference).
 // Every step first reads the current state and does only what is missing, so a re-run after an
 // interruption (or after doing a step by hand) resumes. It never creates a second release for a
 // tag, never replaces or deletes an asset of a PUBLISHED release that has bytes (an interrupted,
@@ -43,7 +46,8 @@
 //   --release-dir <dir>   the staged release (default: ../wasm64-lean-kernel-release/<id> beside the repo)
 //   --r2 <remote:path>    the R2 prefix (default: $LEAN4_WASM64_R2 or qed64-r2:qed64-artifacts/lean4-wasm64)
 //   --only <steps>        a comma list of record,push,github,r2,fetch (default: all, in that order)
-//   --r2-quick            check R2 by listing only (names, sizes, content types), not by hashing
+//   --r2-quick            check R2 by listing only (names, sizes, content types), not by hashing (a
+//                         re-cut by reference: nor by the MD5 check of its shared objects)
 //   --r2-full             check R2 by every object's SHA-256 (a download; always so for a full release)
 //   --r2-source <s>       a re-cut by reference: base (default: copy the shared files server-side from
 //                         the base's prefix) | local (upload them from the staged dir; the base's prefix
@@ -546,7 +550,8 @@ function checkBaseRelease(o, ctx, { hash }) {
   }
   const what = `base release ${base.id} (id ${release.id}): its ${base.shared.length} shared assets and its release.json`;
   if (!unverified.length) { say(`  ${what}, each by size and SHA-256`); return; }
-  if (!hash) { say(`  ${what}, by size and SHA-256 (${unverified.length} without a GitHub digest: hashed in preflight)`); return; }
+  // a re-check: preflight hashed the ones without a digest — a dry run's preflight only reported them
+  if (!hash) { say(`  ${what}, by size and SHA-256 (${unverified.length} without a GitHub digest: ${o.dryRun ? "the real run hashes them in preflight" : "hashed in preflight"})`); return; }
   const names = `${unverified.slice(0, 8).map((u) => u.name).join(", ")}${unverified.length > 8 ? ", …" : ""}`;
   if (o.dryRun) { say(`  ${what}, by size; ${unverified.length} have no GitHub digest — the real run hashes a download of each: ${names}`); return; }
   say(`  hashing ${unverified.length} base assets GitHub has no digest for (a download)…`);
@@ -611,6 +616,33 @@ function r2CheckShared(o, ctx, prefix, label) {
   say(`  verified: those ${unhashed.length} by their SHA-256 (a download)`);
 }
 
+/**
+ * The reader this release ships: its staged tools tgz, unpacked into a temp dir (the fetch step runs
+ * it), must be tools.package@tools.version, and its own `verify` must pass the staged dir (--base for
+ * a re-cut by reference). Local and read-only, so preflight runs it — dry run included — before
+ * anything is pushed or published: a release whose own tools cannot read it is never made.
+ * → {dir, cli} | null (release.json names no tools tgz)
+ */
+function checkTools(ctx) {
+  const tools = ctx.record.tools;
+  if (!tools?.tgz) { say("  (release.json names no tools tgz: this working tree's lean4-wasm64 is the fetch check's reader)"); return null; }
+  const dir = tempDir("publish-release-tools-");
+  run("tar", ["-xzf", path.join(ctx.rel, ...tools.tgz.split("/")), "-C", dir]);
+  let pkg = null;
+  try { pkg = JSON.parse(fs.readFileSync(path.join(dir, "package", "package.json"), "utf8")); } catch { /* named below */ }
+  if (pkg?.name !== tools.package || pkg?.version !== tools.version) {
+    throw new Stop(`${tools.tgz} is not ${tools.package}@${tools.version} (its package/package.json: ${pkg ? `${pkg.name}@${pkg.version}` : "none"})`);
+  }
+  const cli = path.join(dir, "package", "cli.mjs");
+  const v = run("node", [cli, "verify", "--release", ctx.rel, ...(ctx.base ? ["--base", ctx.base.file] : [])], { allowFail: true });
+  if (v.status !== 0 || !/RELEASE VERIFIED/.test(v.stdout)) {
+    throw new Stop(`the reader ${tools.tgz} ships does not verify ${ctx.rel} (its own cli.mjs verify${ctx.base ? " --base" : ""}):\n`
+      + `${`${v.stdout ?? ""}${v.stderr ?? ""}`.trim().split("\n").slice(-12).join("\n")}`);
+  }
+  say(`  the reader it ships: ${tools.package}@${tools.version} from the staged ${tools.tgz} — its own verify${ctx.base ? " --base" : ""}: RELEASE VERIFIED`);
+  return { dir, cli };
+}
+
 // ---------- the steps ----------
 
 function preflight(o) {
@@ -646,7 +678,7 @@ function preflight(o) {
     const remote = o.r2.split(":")[0] + ":";
     if (!run("rclone", ["listremotes"]).stdout.split("\n").includes(remote)) throw new Stop(`rclone has no remote ${remote} (rclone config)`, 2);
   }
-  const ctx = { rel, record, recordText, slug, line, recordPath: `wasm64-build/releases/${o.id}.json`, base: null };
+  const ctx = { rel, record, recordText, slug, line, recordPath: `wasm64-build/releases/${o.id}.json`, base: null, tools: null };
   if (byRef) {
     // before anything reads base.id: the record's own structure (S1-S5: base.id is this id's first cut)
     const problems = checkReleaseRecord(record);
@@ -669,6 +701,7 @@ function preflight(o) {
   const v = run("node", [path.join(JS, "verify-release.mjs"), "--release", rel, ...(ctx.base ? ["--base", ctx.base.file] : [])], { allowFail: true });
   if (v.status !== 0 || !/RELEASE VERIFIED/.test(v.stdout)) throw new Stop(`verify-release failed for ${rel}:\n${(v.stdout + v.stderr).trim().split("\n").slice(-12).join("\n")}`);
   say(`  ${rel}: RELEASE VERIFIED (digest ${record.digest}), ${record.files?.length ?? "?"} recorded files`);
+  ctx.tools = checkTools(ctx); // the reader it ships must read it too: checked here, run again by the fetch step
   say(`  github ${slug}, line ${line}, kernel ${record.kernel.commit.slice(0, 10)} (patch ${record.kernel.patch})`);
   if (ctx.base) {
     const { base } = ctx;
@@ -929,25 +962,13 @@ async function stepFetch(o, ctx) {
   if (!plan) return;
   const from = `https://github.com/${ctx.slug}/releases/download/${o.id}/`;
   step(`fetch: a consumer's pinned fetch of ${from} (${plan.only ?? "every file"}${plan.deep ? ", then verify --deep" : ""})`);
-  // the reader this release ships, from its staged tgz — not this working tree's (a consumer
-  // installs that tgz first; for a re-cut by reference it is the reader that knows `base`)
-  const tools = ctx.record.tools;
-  let cli = path.join(JS, "cli.mjs");
-  if (!tools?.tgz) say("  (release.json names no tools tgz: this working tree's lean4-wasm64 reads it)");
-  else if (o.dryRun) {
-    cli = path.join("<tools>", "package", "cli.mjs");
-    say(`  would run: tar -xzf ${path.join(ctx.rel, ...tools.tgz.split("/"))} -C <tools>`);
-  } else {
-    const dir = tempDir("publish-release-tools-");
-    run("tar", ["-xzf", path.join(ctx.rel, ...tools.tgz.split("/")), "-C", dir]);
-    let pkg = null;
-    try { pkg = JSON.parse(fs.readFileSync(path.join(dir, "package", "package.json"), "utf8")); } catch { /* named below */ }
-    if (pkg?.name !== tools.package || pkg?.version !== tools.version) {
-      throw new Stop(`${tools.tgz} is not ${tools.package}@${tools.version} (its package/package.json: ${pkg ? `${pkg.name}@${pkg.version}` : "none"})`);
-    }
-    cli = path.join(dir, "package", "cli.mjs");
-    say(`  the reader: ${tools.package}@${tools.version}, unpacked from the staged ${tools.tgz}`);
-  }
+  // the reader this release ships, unpacked from its staged tgz and checked in preflight — not this
+  // working tree's (a consumer installs that tgz first; for a re-cut by reference it is the reader
+  // that knows `base`)
+  const { tools } = ctx.record;
+  const cli = ctx.tools?.cli ?? path.join(JS, "cli.mjs");
+  say(ctx.tools ? `  the reader: ${tools.package}@${tools.version}, the staged ${tools.tgz} as preflight unpacked and checked it`
+    : "  (release.json names no tools tgz: this working tree's lean4-wasm64 reads it)");
   const out = o.dryRun ? "<tmp>" : tempDir("publish-release-fetch-");
   const fetchArgs = [cli, "fetch", "--from", from, "--id", o.id, "--digest", ctx.record.digest, "--out", out, ...(plan.only ? ["--only", plan.only] : [])];
   const verifyArgs = [cli, "verify", "--release", out, "--deep", ...(ctx.base ? ["--base", ctx.base.file] : [])];

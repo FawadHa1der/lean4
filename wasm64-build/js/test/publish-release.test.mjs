@@ -1,7 +1,9 @@
 // The decisions of wasm64-build/publish-release.mjs (the owner's publish step): which release a
 // tag maps to, how assets are reconciled with the staged files, how R2 is judged, and how a re-cut
 // by reference is split from its base. Pure functions (and main's usage errors, which stop before
-// any command): no gh, git, rclone or network here.
+// any command): no gh, git, rclone or network here. The steps themselves — preflight's checks
+// before any write, the dry run, the real publish — run end to end against fakes in
+// publish-sandbox.test.mjs.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
