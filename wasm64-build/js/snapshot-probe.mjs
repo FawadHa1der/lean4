@@ -77,6 +77,9 @@ const cli = applyCliContract({
     "  LEAN4_WASM64_ARTIFACT  the artifact dir used when --artifact is absent (empty = unset)",
     "  QED64_LEAN_ARTIFACT    the older name of the same, read when LEAN4_WASM64_ARTIFACT is unset (empty = unset)",
     "  QED64_PROFILE_INIT     when set, forwarded into the wasm environment to profile the [init] replay",
+    "  LEAN4_WASM64_PTHREAD_STACK_MB=<n>  test knob: the runtime's pthread Workers get an n-MiB stack (0.68 ~ a Chrome Worker's",
+    "                         500 KiB: elaboration tasks then run on a browser's stack budget), as under node-runner",
+    "  LEAN_WASM_STACK_PROBE_SLOTS=<n>    calibration knob, forwarded: patch 0036's engine-stack probe headroom in 8-byte slots (0: off)",
     "",
     "exit codes:",
     "  0  SNAPSHOT PROBE PASS",
@@ -234,12 +237,13 @@ globalThis.Module = {
   mainScriptUrlOrBlob: leanJs,
   print: capture("stdout"),
   printErr: capture("stderr"),
-  ENV: {
-    LEAN_PATH: "/lib/lean",
-    ...(process.env.QED64_PROFILE_INIT ? { QED64_PROFILE_INIT: process.env.QED64_PROFILE_INIT } : {}),
-  },
   preRun: [
     function mount() {
+      // The wasm environment: the glue replaces any Module.ENV given above with its own object
+      // (`Module["ENV"]=ENV`), so only an assignment here reaches getenv (as in node-runner).
+      const ENV = globalThis.Module.ENV;
+      ENV.LEAN_PATH = "/lib/lean";
+      for (const k of ["QED64_PROFILE_INIT", "LEAN_WASM_STACK_PROBE_SLOTS"]) if (process.env[k]) ENV[k] = process.env[k];
       const FS = globalThis.Module.FS;
       const NODEFS = FS.filesystems.NODEFS;
       for (const d of ["/lib/lean", "/workspace", "/bin", "/snapshots"]) {
@@ -368,7 +372,22 @@ globalThis.Module = {
   },
 };
 
-globalThis.require = createRequire(leanJs);
+// LEAN4_WASM64_PTHREAD_STACK_MB=<n> (test knob, node-runner's): size the runtime's pthread Workers' stack,
+// which is where elaboration tasks run (Elab.async), as a browser's Worker would.
+{
+  const nodeRequire = createRequire(leanJs);
+  const pthreadStackMb = Number(process.env.LEAN4_WASM64_PTHREAD_STACK_MB || 0);
+  globalThis.require = !pthreadStackMb ? nodeRequire : (id) => {
+    const m = nodeRequire(id);
+    if (id !== "node:worker_threads" && id !== "worker_threads") return m;
+    class SizedWorker extends m.Worker {
+      constructor(file, options = {}) {
+        super(file, { ...options, resourceLimits: { ...(options.resourceLimits ?? {}), stackSizeMb: pthreadStackMb } });
+      }
+    }
+    return { ...m, Worker: SizedWorker };
+  };
+}
 globalThis.__filename = "/bin/lean.js";
 globalThis.__dirname = "/bin";
 vm.runInThisContext(fs.readFileSync(leanJs, "utf8"), { filename: leanJs });

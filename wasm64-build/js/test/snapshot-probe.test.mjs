@@ -72,6 +72,7 @@ M.FS = {
   write(s, buf, off, n) { s.chunks.push(Buffer.from(buf.subarray(off, off + n))); return n; },
   writeFile(p, bytes) { memfs.set(p, { chunks: [Buffer.from(bytes)] }); },
 };
+M.ENV = {}; // as the real glue does (\`var ENV={}\` … \`Module["ENV"]=ENV\`): an ENV given in the Module literal is dropped
 for (const f of M.preRun) f();
 const host = (p) => { const m = mounts.filter(([, mp]) => p === mp || p.startsWith(mp + "/")).at(-1); return m ? m[0] + p.slice(m[1].length) : null; };
 const fileOf = (p) => (memfs.has(p) ? Buffer.concat(memfs.get(p).chunks).toString() : fs.readFileSync(host(p), "utf8"));
