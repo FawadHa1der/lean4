@@ -165,7 +165,8 @@ What cannot be derived from the release directory is passed as a JSON file:
   "tools": { "package": "lean4-wasm64", "version": "…", "tgz": "tools/lean4-wasm64-….tgz" },
   "hosting": { … }, "notes": [ … ],
   "id": "optional; must equal lean-<upstreamTag>-<kernel7>[-rN]", "recut": "optional N",
-  "base": "optional { id, digest }: a re-cut by reference (with recut); release.mjs then needs --base"
+  "base": "optional { id, digest }: a re-cut by reference (with recut); release.mjs then needs --base",
+  "leanVersion": "4.34.0"
 }
 ```
 

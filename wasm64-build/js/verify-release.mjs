@@ -2,10 +2,14 @@
 // Verify a lean4-wasm64 release directory (served layout, formats/release.md):
 // recompute every digest a consumer trusts, and check the pairing rules.
 //
-//   verify-release.mjs --release <dir> [--deep] [--skip-packs] [--json <out>]
+//   verify-release.mjs --release <dir> [--deep] [--skip-packs] [--json <out>] [--base <dir|release.json>]
 //
 //   release.json  checkReleaseRecord: schema, canonical keys, self-digest, the id rule, the gate
 //                 binding, safe paths, every named path one of files[]
+//   base          a re-cut by reference (release.json `base`), with --base: checkRecutBase against
+//                 the base's release.json (itself checked, pinned by base.{id,digest}, every shared
+//                 field and every file outside tools/ the base's); without --base one info line says
+//                 it was not compared. The dir itself is checked in full either way (it is complete).
 //   SHA256SUMS    every file present with that digest; every file listed; same set as release.json files[]
 //   runtime       runtime/v1 structure + the build-id rule, every chunk, both whole-file digests,
 //                 the build id RECOMPUTED from lean.wasm's bytes, the per-build manifest copy,
@@ -27,16 +31,16 @@ import {
   RELEASE_SCHEMA, ARTIFACT_MANIFEST_FORMAT, checkRuntimeManifest, buildIdFromSha256,
   isSha256Hex, sha256File,
 } from "./artifact-id.mjs";
-import { CHUNK_URL, PART_URL, checkReleaseRecord, serializeRelease, servedPath, sha256sums } from "./release-record.mjs";
+import { CHUNK_URL, PART_URL, checkRecutBase, checkReleaseRecord, serializeRelease, servedPath, sha256sums } from "./release-record.mjs";
 
 applyCliContract({
   tool: "verify-release",
-  usage: "verify-release.mjs --release <dir> [--deep] [--skip-packs] [--json <out>]",
-  flags: { release: 1, deep: 0, "skip-packs": 0, json: 1 },
+  usage: "verify-release.mjs --release <dir> [--deep] [--skip-packs] [--json <out>] [--base <dir|release.json>]",
+  flags: { release: 1, deep: 0, "skip-packs": 0, json: 1, base: 1 },
   required: [["release"]],
   passthrough: null,
   help: [
-    "usage: verify-release.mjs --release <dir> [--deep] [--skip-packs] [--json <out>]",
+    "usage: verify-release.mjs --release <dir> [--deep] [--skip-packs] [--json <out>] [--base <dir|release.json>]",
     "Recompute every digest of a lean4-wasm64 release directory and check its pairing rules.",
     "run as: lean4-wasm64 verify   (or: node verify-release.mjs)",
     "",
@@ -45,6 +49,7 @@ applyCliContract({
     "  --deep            also verify every per-artifact digest inside each pack (streams the raw packs)",
     "  --skip-packs      runtime and records only (fast)",
     "  --json <out>      also write the check results as JSON",
+    "  --base <path>     a re-cut by reference: its base's release dir or release.json (compares the re-cut with it)",
     "  -h, --help        print this help and exit 0",
     "",
     "exit codes: 0 verified, 1 a check failed, 2 usage",
@@ -55,6 +60,8 @@ const flag = (n) => argv.includes(`--${n}`);
 const arg = (n) => { const i = argv.indexOf(`--${n}`); return i >= 0 ? argv[i + 1] : undefined; };
 const dir = path.resolve(arg("release"));
 const deep = flag("deep");
+// an empty --base (`--base "$UNSET"`) must not quietly skip the comparison it asked for
+if (flag("base") && !arg("base")) { console.error("verify-release: --base was given without a value: refusing to verify uncompared"); process.exit(2); }
 
 const results = [];
 const check = (ok, label) => {
@@ -69,15 +76,31 @@ const sha256 = (b) => createHash("sha256").update(b).digest("hex");
 const recordPath = path.join(dir, "release.json");
 if (!fs.existsSync(recordPath)) { console.error(`verify-release: ${recordPath} not found`); process.exit(1); }
 const record = readJson(recordPath);
+// --json: the base a re-cut by reference names, and whether this run compared the re-cut with it (--base)
+const baseJson = (compared) => (record.base === undefined ? null : { id: record.base?.id, digest: record.base?.digest, compared });
 check(record.schema === RELEASE_SCHEMA, `release.json schema ${record.schema}`);
 check(fs.readFileSync(recordPath, "utf8") === serializeRelease(record), "release.json is in canonical form (JSON.stringify(record, null, 2) + newline)");
 const recordProblems = checkReleaseRecord(record);
 check(recordProblems.length === 0, `release.json: id ${record.id}, kernel ${String(record.kernel?.commit).slice(0, 10)} patch ${record.kernel?.patch}, digest ${String(record.digest).slice(0, 23)}… — structure, id rule, gate binding, paths${recordProblems.length ? ` — ${recordProblems.join("; ")}` : ""}`);
 if (recordProblems.length) {
   // a malformed record cannot be walked safely: report it, check nothing it names (early, so process.exit is safe)
-  if (arg("json")) fs.writeFileSync(path.resolve(arg("json")), JSON.stringify({ release: record.id, deep, failures: results.filter((r) => !r.ok).length, results }, null, 2));
+  if (arg("json")) fs.writeFileSync(path.resolve(arg("json")), JSON.stringify({ release: record.id, deep, base: baseJson(false), failures: results.filter((r) => !r.ok).length, results }, null, 2));
   console.log(`\nRELEASE FAILED (malformed release.json) ${record.id}`);
   process.exit(1);
+}
+
+// ---------- a re-cut by reference: its base (formats/release.md, "Re-cut by reference") ----------
+if (arg("base") && !record.base) check(false, `--base was given, but ${record.id} is not a re-cut by reference (release.json names no base)`);
+if (record.base) {
+  const recut = `re-cut of ${record.base.id} (${record.base.digest.slice(0, 23)}…)`;
+  if (arg("base")) {
+    const bp = path.resolve(arg("base"));
+    const bfile = fs.existsSync(bp) && fs.statSync(bp).isDirectory() ? path.join(bp, "release.json") : bp;
+    // checkRecutBase checks the base's own record too (checkReleaseRecord), then the pin and the equality rules
+    let problems;
+    try { problems = checkRecutBase(record, readJson(bfile)); } catch (e) { problems = [`cannot read the base's release.json ${bfile}: ${e.message}`]; }
+    check(problems.length === 0, `${recut}: the base's record is the pinned one, and every file outside tools/ and every shared field is the base's${problems.length ? ` — ${problems.join("; ")}` : ""}`);
+  } else console.log(`info  ${recut}: not compared with its base (--base <its release dir or release.json> compares)`);
 }
 
 // ---------- SHA256SUMS ↔ files[] ↔ disk ----------
@@ -296,7 +319,7 @@ for (const entry of record.packs ?? []) await verifyPack(entry);
 }
 
 const failures = results.filter((r) => !r.ok).length;
-if (arg("json")) fs.writeFileSync(path.resolve(arg("json")), JSON.stringify({ release: record.id, deep, failures, results }, null, 2));
+if (arg("json")) fs.writeFileSync(path.resolve(arg("json")), JSON.stringify({ release: record.id, deep, base: baseJson(!!arg("base")), failures, results }, null, 2));
 console.log(failures === 0 ? `\nRELEASE VERIFIED ${record.id}` : `\nRELEASE FAILED (${failures}) ${record.id}`);
 // exitCode, not process.exit(): see fetch-release.mjs (Node 26.3 shutdown deadlock after heavy JIT work)
 process.exitCode = failures === 0 ? 0 : 1;

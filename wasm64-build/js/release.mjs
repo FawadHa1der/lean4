@@ -6,13 +6,18 @@
 //   <dir>/profiles/<pack>.manifest.json + its transport parts
 //   <dir>/native64/native64.tar.gz      <dir>/lists/*      <dir>/tools/lean4-wasm64-<version>.tgz
 //
-//   release.mjs --release <dir> --config <release-config.json>
+//   release.mjs --release <dir> --config <release-config.json> [--base <dir|release.json>]
 //
 // Everything derivable is derived from the directory (runtime identity, pack
 // identities and module counts, the file list); the config carries the rest
 // (formats/release.md, "release config"). Refuses — writes nothing — when a
 // pairing rule or an identity check fails: the release is the contract every
 // consumer pins, so a wrong record must not exist.
+//
+// A re-cut by reference (config.base, formats/release.md "Re-cut by reference")
+// also needs --base, the base release's dir or release.json: it must be the
+// record config.base pins (id and digest), and the record derived here must
+// equal it everywhere but tools/ (checkRecutBase), or nothing is written.
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -21,24 +26,25 @@ import {
   RELEASE_SCHEMA, ARTIFACT_MANIFEST_FORMAT, checkRuntimeManifest, parsePatchId, sha256File,
 } from "./artifact-id.mjs";
 import {
-  CHUNK_URL, PART_URL, RELEASE_ID, SAFE_SEGMENT, canonicalRelease, checkReleaseRecord, expectedReleaseId,
+  CHUNK_URL, PART_URL, RELEASE_ID, SAFE_SEGMENT, canonicalRelease, checkRecutBase, checkReleaseRecord, expectedReleaseId,
   serializeRelease, servedPath, sha256sums,
 } from "./release-record.mjs";
 
 applyCliContract({
   tool: "release",
-  usage: "release.mjs --release <dir> --config <release-config.json>",
-  flags: { release: 1, config: 1 },
+  usage: "release.mjs --release <dir> --config <release-config.json> [--base <dir|release.json>]",
+  flags: { release: 1, config: 1, base: 1 },
   required: [["release"], ["config"]],
   passthrough: null,
   help: [
-    "usage: release.mjs --release <dir> --config <release-config.json>",
+    "usage: release.mjs --release <dir> --config <release-config.json> [--base <dir|release.json>]",
     "Write release.json + SHA256SUMS for a staged release directory; refuses on any failed identity or pairing check.",
     "run as: lean4-wasm64 release   (or: node release.mjs)",
     "",
     "flags:",
     "  --release <dir>    the staged release directory (served layout) [required]",
     "  --config <file>    release config JSON (formats/release.md) [required]",
+    "  --base <path>      a re-cut by reference (config.base): the base release's dir or release.json [required with config.base]",
     "  -h, --help         print this help and exit 0",
     "",
     "exit codes: 0 written, 1 refused (reasons printed), 2 usage",
@@ -46,6 +52,11 @@ applyCliContract({
 });
 const argv = process.argv.slice(2);
 const arg = (n) => { const i = argv.indexOf(`--${n}`); return i >= 0 ? argv[i + 1] : undefined; };
+// the base given without a usable value must not fail open (`--base "$UNSET"`): a usage error, before any read
+if (argv.includes("--base") && !arg("base")) {
+  console.error("release: --base was given without a value: refusing to guess the base");
+  process.exit(2);
+}
 const dir = path.resolve(arg("release"));
 const config = JSON.parse(fs.readFileSync(path.resolve(arg("config")), "utf8"));
 const refusals = [];
@@ -64,6 +75,21 @@ const id = config.id ?? (config.kernelCommit ? expectedReleaseId(config.upstream
 const idMatch = RELEASE_ID.exec(id);
 if (!idMatch) refuse(`release id ${JSON.stringify(id)} is not lean-<tag>-<kernel7>[-rN]`);
 else if (idMatch[1] !== config.upstreamTag || idMatch[2] !== config.kernelCommit.slice(0, 7)) refuse(`release id ${id} does not name tag ${config.upstreamTag} and kernel ${config.kernelCommit?.slice(0, 7)}`);
+
+// ---------- a re-cut by reference: the base (formats/release.md, "Re-cut by reference") ----------
+// `base` is written only from config.base, and only with --base: the base's own record, pinned
+// here by id and digest, and compared field by field and file by file once files[] is hashed
+let baseRecord;
+if (config.base !== undefined && !arg("base")) refuse("config.base names a base (a re-cut by reference): pass --base <the base release's dir or release.json>");
+else if (config.base === undefined && arg("base")) refuse("--base was given, but the config names no base: only config.base (with recut) makes a re-cut by reference");
+else if (arg("base")) {
+  const bp = path.resolve(arg("base"));
+  const bfile = fs.existsSync(bp) && fs.statSync(bp).isDirectory() ? path.join(bp, "release.json") : bp;
+  try { baseRecord = readJson(bfile); } catch (e) { refuse(`--base: the base's release.json is unreadable (${e.message})`); }
+  if (baseRecord !== undefined && (baseRecord?.id !== config.base?.id || baseRecord?.digest !== config.base?.digest)) {
+    refuse(`--base ${bfile} is ${baseRecord?.id} (${baseRecord?.digest}), config.base pins ${config.base?.id} (${config.base?.digest})`);
+  }
+}
 
 // ---------- runtime ----------
 const manifestRel = "runtime/runtime-manifest.json";
@@ -190,7 +216,8 @@ for (const f of files) f.sha256 = await sha256File(path.join(dir, f.path));
 const record = canonicalRelease({
   schema: RELEASE_SCHEMA,
   id,
-  lean: { version: runtime.leanVersion, upstreamTag: config.upstreamTag },
+  base: config.base,
+  lean:{ version: runtime.leanVersion, upstreamTag: config.upstreamTag },
   kernel: {
     repo: config.kernelRepo ?? "https://github.com/FawadHa1der/lean4",
     branch: config.kernelBranch ?? "qed64-wasm64",
@@ -221,7 +248,16 @@ if (recordProblems.length) {
   console.error(`release: REFUSED — the record would break its own rules:\n  ${recordProblems.join("\n  ")}`);
   process.exit(1);
 }
+// keyed on config.base, not on a parsed base: whatever --base held, a record with `base` is compared
+if (config.base !== undefined) {
+  const baseProblems = checkRecutBase(record, baseRecord);
+  if (baseProblems.length) {
+    console.error(`release: REFUSED — not a re-cut by reference of ${config.base?.id}:\n  ${baseProblems.join("\n  ")}`);
+    process.exit(1);
+  }
+}
 fs.writeFileSync(path.join(dir, "release.json"), serializeRelease(record));
 const recordSha = await sha256File(path.join(dir, "release.json"));
 fs.writeFileSync(path.join(dir, "SHA256SUMS"), sha256sums([...files, { path: "release.json", sha256: recordSha }]));
-console.log(`release ${id}: ${files.length} files, runtime ${runtime.buildId}, ${packs.length} packs → ${path.join(dir, "release.json")} (${record.digest.slice(0, 23)}…)`);
+const byReference = record.base ? `, a re-cut by reference of ${record.base.id}` : "";
+console.log(`release ${id}: ${files.length} files, runtime ${runtime.buildId}, ${packs.length} packs${byReference} → ${path.join(dir, "release.json")} (${record.digest.slice(0, 23)}…)`);

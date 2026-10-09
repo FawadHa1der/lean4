@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 // Fetch a lean4-wasm64 release (or parts of it) and verify every byte.
 //
-//   fetch-release.mjs --from <url|dir> --out <dir> [--only <groups>] [--id <id>] [--digest sha256:<hex>] [--layout served|flat]
+//   fetch-release.mjs --from <url|dir> --out <dir> [--only <groups>] [--id <id>] [--digest sha256:<hex>] [--layout served|flat] [--base-from <url|dir>]
 //
-// --from   a base URL or a local directory holding the release:
+// --from   the release root, a URL or a local directory holding the release:
 //            served layout  https://<site>/lean4-wasm64/<id>/   or a release dir   (paths as in release.json)
 //            flat layout    https://github.com/<owner>/<repo>/releases/download/<id>/   (GitHub assets, by basename)
 //          The layout is inferred (GitHub URLs and dirs without runtime/ are flat); --layout overrides.
+// --out    where to write. For `--only all` use a fresh dir: a file another release left there
+//          (a base mirror's tools/ tgz, say) stays, and verify then refuses it as unlisted.
 // --only   comma list of: all (default: every file of the release, served layout), runtime-chunks
 //          (runtime/), a pack id (lean-core, …, lean-lib), packs, native64, lists, tools, and
 //          runtime: the ARTIFACT layout <out>/bin/lean.js, lean.wasm + extras that `run`, `gate`
@@ -14,6 +16,16 @@
 // --id     refuse unless release.json names this id.
 // --digest refuse unless release.json's digest is this one — the pin: a self-digest
 //          alone proves only consistency, so a consumer pins id AND digest.
+// --base-from  a re-cut by reference (release.json `base`; formats/release.md, "Re-cut by
+//          reference"): where its base release is, a URL or a dir in either layout (inferred).
+//          Default: the sibling <parent of --from>/<base id>/, when --from's last segment is the
+//          re-cut's id. A FLAT --from (its GitHub release holds only tools/, release.json and
+//          SHA256SUMS): release.json and tools/ come from --from, every other file from the base,
+//          routed by path (never a fallback after a miss), and the base's release.json must pass
+//          checkRecutBase (pinned by base.{id,digest}) before anything is written; a fetch that
+//          selects only tools/ needs no base. A SERVED --from (an R2 prefix, a mirror dir) is
+//          complete under the re-cut's own id: every file comes from it, and --base-from only
+//          adds the comparison.
 //
 // release.json is read first and checked structurally (release-record.mjs
 // checkReleaseRecord: the id rule, the gate binding, safe paths, …) before
@@ -34,27 +46,31 @@ import { pipeline } from "node:stream/promises";
 import { once } from "node:events";
 import { applyCliContract } from "./cli-args.mjs";
 import { RELEASE_SCHEMA, buildIdFromSha256, checkRuntimeManifest, sha256File } from "./artifact-id.mjs";
-import { CHUNK_URL, checkReleaseRecord, serializeRelease, servedPath, sha256sums } from "./release-record.mjs";
+import { CHUNK_URL, RELEASE_DIGEST, checkRecutBase, checkReleaseRecord, isRecutOwnPath, serializeRelease, servedPath, sha256sums } from "./release-record.mjs";
 
 applyCliContract({
   tool: "fetch",
-  usage: "fetch-release.mjs --from <url|dir> --out <dir> [--only <groups>] [--id <id>] [--digest sha256:<hex>] [--layout served|flat]",
-  flags: { from: 1, out: 1, only: 1, id: 1, digest: 1, layout: 1 },
+  usage: "fetch-release.mjs --from <url|dir> --out <dir> [--only <groups>] [--id <id>] [--digest sha256:<hex>] [--layout served|flat] [--base-from <url|dir>]",
+  flags: { from: 1, out: 1, only: 1, id: 1, digest: 1, layout: 1, "base-from": 1 },
   required: [["from"], ["out"]],
   passthrough: null,
   help: [
-    "usage: fetch-release.mjs --from <url|dir> --out <dir> [--only <groups>] [--id <id>] [--digest sha256:<hex>] [--layout served|flat]",
+    "usage: fetch-release.mjs --from <url|dir> --out <dir> [--only <groups>] [--id <id>] [--digest sha256:<hex>] [--layout served|flat] [--base-from <url|dir>]",
     "Fetch a lean4-wasm64 release, or parts of it, verifying every byte against release.json.",
     "run as: lean4-wasm64 fetch   (or: node fetch-release.mjs)",
     "",
     "flags:",
-    "  --from <url|dir>   release base: served layout (R2 prefix, release dir) or flat (GitHub release download URL) [required]",
-    "  --out <dir>        where to write [required]",
+    "  --from <url|dir>   release root: served layout (R2 prefix, release dir) or flat (GitHub release download URL) [required]",
+    "  --out <dir>        where to write [required]; for --only all, a fresh dir: a file another release left there",
+    "                     (a base mirror's tools/ tgz, say) stays, and verify then refuses it as unlisted",
     "  --only <groups>    all (every release file; default) | runtime-chunks | <pack id> | packs | native64 | lists | tools,",
     "                     and runtime: the artifact layout <out>/bin (lean.js, lean.wasm, extras) — never part of all",
     "  --id <id>          refuse unless release.json names this release id",
     "  --digest <d>       refuse unless release.json's digest is <d> (pin id AND digest)",
     "  --layout <l>       served | flat (default: inferred from --from)",
+    "  --base-from <src>  a re-cut by reference: where its base release is (default: the sibling <…>/<base id>/",
+    "                     of --from, when --from ends in the re-cut's id); flat --from: every file outside",
+    "                     tools/ comes from there; served --from: compares with the base only",
     "  -h, --help         print this help and exit 0",
     "",
     "exit codes: 0 fetched and verified, 1 a check failed, 2 usage",
@@ -67,34 +83,56 @@ const arg = (n, d) => {
   const i = argv.indexOf(`--${n}`);
   return i >= 0 ? argv[i + 1] : d;
 };
-// A pin given without a usable value must not fail open (`--digest "$UNSET"` in CI).
-for (const pin of ["id", "digest"]) {
+// A pin given without a usable value must not fail open (`--digest "$UNSET"` in CI), and an
+// empty --base-from must not quietly become the sibling it was meant to replace.
+for (const pin of ["id", "digest", "base-from"]) {
   if (argv.some((a) => a === `--${pin}` || a.startsWith(`--${pin}=`)) && !arg(pin)) {
-    console.error(`fetch: --${pin} was given without a value: refusing to fetch unpinned`);
+    console.error(`fetch: --${pin} was given without a value: ${pin === "base-from" ? "refusing to guess the base" : "refusing to fetch unpinned"}`);
     process.exit(2);
   }
 }
-if (arg("digest") && !/^sha256:[0-9a-f]{64}$/.test(arg("digest"))) {
+if (arg("digest") && !RELEASE_DIGEST.test(arg("digest"))) {
   console.error(`fetch: --digest must be sha256:<64 lowercase hex>, got ${JSON.stringify(arg("digest"))}`);
   process.exit(2);
 }
 const from = arg("from");
 const out = path.resolve(arg("out"));
 const only = new Set(String(arg("only", "all")).split(",").map((s) => s.trim()).filter(Boolean));
-const isUrl = /^https?:\/\//.test(from);
-const layout = arg("layout") ?? (isUrl ? (/\/releases\/download\//.test(from) ? "flat" : "served")
-  : (fs.existsSync(path.join(from, "runtime")) ? "served" : "flat"));
+const isUrlish = (src) => /^https?:\/\//.test(src);
+const inferLayout = (src) => (isUrlish(src) ? (/\/releases\/download\//.test(src) ? "flat" : "served")
+  : (fs.existsSync(path.join(src, "runtime")) ? "served" : "flat"));
+
+/**
+ * A release source: a URL or a directory (its root), in the served or the flat layout.
+ * `sibling(id)` is the release <parent of root>/<id>/ beside it: a URL sibling keeps this
+ * layout (GitHub's download dirs are all flat); a directory sibling's layout is inferred from
+ * the sibling itself (a thin flat re-cut may sit beside a served base mirror).
+ */
+function source(src, layout = inferLayout(src)) {
+  const isUrl = isUrlish(src);
+  const root = isUrl ? (src.endsWith("/") ? src : `${src}/`) : path.resolve(src);
+  const locate = (relPath) => {
+    const name = layout === "flat" ? path.posix.basename(relPath) : relPath;
+    return isUrl ? new URL(name, root).href : path.join(root, name);
+  };
+  // <…>/<id>/: the last segment names the release when the source is one release of many
+  const lastSegment = isUrl ? (URL.parse(root)?.pathname.split("/").filter(Boolean).at(-1) ?? "") : path.basename(root);
+  // only ever called with an id checkReleaseRecord accepted (RELEASE_ID: safe characters)
+  const sibling = (id) => (isUrl ? source(new URL(`../${id}/`, root).href, layout) : source(path.join(path.dirname(root), id)));
+  return { isUrl, root, layout, locate, lastSegment, sibling, label: isUrl ? root : src };
+}
+// --layout applies to --from only; a --base-from source infers its own
+const own = source(from, arg("layout"));
+const { layout } = own;
 if (!["served", "flat"].includes(layout)) { console.error("fetch: --layout must be served or flat"); process.exit(2); }
+// A re-cut by reference read from its flat (GitHub) release: every file outside tools/ is its
+// base's, routed by path, never by a fallback after a miss. Set once the base's record is checked.
+let baseSource = null;
+const sourceOf = (relPath) => (baseSource && relPath !== "release.json" && !isRecutOwnPath(relPath) ? baseSource : own);
 
-const base = isUrl ? (from.endsWith("/") ? from : `${from}/`) : path.resolve(from);
-const locate = (relPath) => {
-  const name = layout === "flat" ? path.posix.basename(relPath) : relPath;
-  return isUrl ? new URL(name, base).href : path.join(base, name);
-};
-
-async function openSource(relPath) {
-  const where = locate(relPath);
-  if (!isUrl) return fs.createReadStream(where);
+async function openSource(relPath, src = sourceOf(relPath)) {
+  const where = src.locate(relPath);
+  if (!src.isUrl) return fs.createReadStream(where);
   let lastError;
   for (let attempt = 1; attempt <= 4; attempt++) {
     try {
@@ -162,9 +200,9 @@ async function fetchVerified(relPath, expect, dest = relPath) {
   }
 }
 
-async function readText(relPath) {
+async function readText(relPath, src = undefined) {
   const chunks = [];
-  for await (const c of await openSource(relPath)) chunks.push(Buffer.from(c));
+  for await (const c of await openSource(relPath, src)) chunks.push(Buffer.from(c));
   return Buffer.concat(chunks).toString("utf8");
 }
 
@@ -173,7 +211,7 @@ let record;
 try {
   record = JSON.parse(await readText("release.json"));
 } catch (e) {
-  console.error(`fetch: cannot read release.json from ${locate("release.json")}: ${e.message}`);
+  console.error(`fetch: cannot read release.json from ${own.locate("release.json")}: ${e.message}`);
   process.exit(1);
 }
 if (record?.schema !== RELEASE_SCHEMA) { console.error(`fetch: release.json schema ${record?.schema} is not ${RELEASE_SCHEMA}`); process.exit(1); }
@@ -181,35 +219,68 @@ const recordProblems = checkReleaseRecord(record);
 if (recordProblems.length) { console.error(`fetch: release.json refused — ${recordProblems.length} problem(s):\n  ${recordProblems.join("\n  ")}`); process.exit(1); }
 if (arg("id") && record.id !== arg("id")) { console.error(`fetch: release is ${record.id}, expected ${arg("id")}`); process.exit(1); }
 if (arg("digest") && record.digest !== arg("digest")) { console.error(`fetch: release.json digest is ${record.digest}, pinned ${arg("digest")}`); process.exit(1); }
-fs.mkdirSync(out, { recursive: true });
-const recordText = serializeRelease(record);
-fs.writeFileSync(path.join(out, "release.json"), recordText);
-console.log(`release ${record.id} (${record.digest.slice(0, 23)}…): Lean ${record.lean.version}, runtime ${record.runtime.buildId}, kernel ${record.kernel.commit.slice(0, 10)} (${record.kernel.patch}) — ${layout} layout from ${isUrl ? base : from}`);
 
+// ---------- what to fetch: chosen before anything is written (a re-cut's base is needed only outside tools/) ----------
 const byPath = new Map(record.files.map((f) => [f.path, f]));
 // `all` is every release file (the served layout, a release dir); the artifact layout
 // (`runtime`: <out>/bin rebuilt from the chunks) is never implied — ask for it
 const want = (g) => only.has(g) || (g !== "runtime" && only.has("all"));
 const selected = new Set();
-const add = (p) => { if (byPath.has(p)) selected.add(p); else throw new Error(`release.json lists no ${p}`); };
+const add = (p) => selected.add(p); // every path below comes from files[]
 const packFiles = (packId) => record.files.filter((f) => f.path.startsWith(`profiles/${packId}.`)).map((f) => f.path);
 const under = (dir) => record.files.filter((f) => f.path.startsWith(`${dir}/`)).map((f) => f.path);
+const unknown = [...only].filter((g) => !["all", "runtime", "runtime-chunks", "packs", "native64", "lists", "tools"].includes(g) && !(record.packs ?? []).some((p) => p.id === g));
+if (unknown.length) { console.error(`fetch: unknown --only group(s): ${unknown.join(", ")}`); process.exit(2); }
+if (only.has("all")) record.files.forEach((f) => add(f.path)); // everything listed, whatever its group
+if (want("runtime-chunks")) under("runtime").forEach(add);
+for (const pk of record.packs ?? []) if (want("packs") || want(pk.id)) packFiles(pk.id).forEach(add);
+if (want("native64")) under("native64").forEach(add);
+if (want("lists")) under("lists").forEach(add);
+if (want("tools")) under("tools").forEach(add);
+// a group asked for by name must bring something: a release without it is not what was asked
+const groupFiles = { "runtime-chunks": under("runtime"), packs: (record.packs ?? []).flatMap((k) => packFiles(k.id)), native64: under("native64"), lists: under("lists"), tools: under("tools") };
+const empty = [...only].filter((g) => groupFiles[g] && groupFiles[g].length === 0);
+if (empty.length) { console.error(`fetch: FAILED — this release has no files for --only ${empty.join(", ")}`); console.log("\nFETCH FAILED"); process.exit(1); }
+
+// ---------- a re-cut by reference: its base (formats/release.md), before anything is written ----------
+let baseNote = "";
+if (arg("base-from") && !record.base) { console.error(`fetch: --base-from was given, but ${record.id} is not a re-cut by reference (release.json names no base)`); process.exit(1); }
+if (record.base) {
+  const recut = `re-cut of ${record.base.id} (${record.base.digest.slice(0, 23)}…)`;
+  // its flat (GitHub) release holds tools/, release.json and SHA256SUMS only: any other file is the base's
+  // (`runtime` reads the runtime manifest, the chunks and runtime/bin)
+  const needFiles = layout === "flat" && (want("runtime") || [...selected].some((p) => !isRecutOwnPath(p)));
+  const bsrc = arg("base-from") ? source(arg("base-from"))
+    : needFiles && own.lastSegment === record.id ? own.sibling(record.base.id) : null;
+  if (needFiles && !bsrc) {
+    console.error(`fetch: ${record.id} is a re-cut by reference of ${record.base.id}: every file outside tools/ is the base's, and --from (${own.label}) does not end in ${record.id}, so its sibling cannot be found — pass --base-from <the base release's download URL or dir>`);
+    process.exit(1);
+  }
+  if (bsrc) {
+    let baseRecord;
+    try {
+      baseRecord = JSON.parse(await readText("release.json", bsrc));
+    } catch (e) {
+      const hint = arg("base-from") ? "" : " (the sibling of --from: pass --base-from <the base release's download URL or dir> if the base is elsewhere)";
+      console.error(`fetch: ${record.id} is a re-cut by reference of ${record.base.id}: cannot read the base's release.json from ${bsrc.locate("release.json")}${hint}: ${e.message}`);
+      process.exit(1);
+    }
+    // checkRecutBase runs checkReleaseRecord on the base too: one call, nothing to forget
+    const problems = checkRecutBase(record, baseRecord);
+    if (problems.length) { console.error(`fetch: ${record.id} refused against its base ${record.base.id} at ${bsrc.label} — ${problems.length} problem(s):\n  ${problems.join("\n  ")}`); process.exit(1); }
+    if (needFiles) baseSource = bsrc;
+    baseNote = `; ${recut}, base checked${needFiles ? `, files outside tools/ from ${bsrc.label}` : ""}`;
+  } else {
+    baseNote = `; ${recut}, ${layout === "served" ? "served, complete under its own id" : "only tools/ selected"}: base not compared (--base-from compares)`;
+  }
+}
+fs.mkdirSync(out, { recursive: true });
+const recordText = serializeRelease(record);
+fs.writeFileSync(path.join(out, "release.json"), recordText);
+console.log(`release ${record.id} (${record.digest.slice(0, 23)}…): Lean ${record.lean.version}, runtime ${record.runtime.buildId}, kernel ${record.kernel.commit.slice(0, 10)} (${record.kernel.patch}) — ${layout} layout from ${own.label}${baseNote}`);
 
 let failures = 0;
 try {
-  if (only.has("all")) record.files.forEach((f) => add(f.path)); // everything listed, whatever its group
-  if (want("runtime-chunks")) under("runtime").forEach(add);
-  for (const pk of record.packs ?? []) if (want("packs") || want(pk.id)) packFiles(pk.id).forEach(add);
-  if (want("native64")) under("native64").forEach(add);
-  if (want("lists")) under("lists").forEach(add);
-  if (want("tools")) under("tools").forEach(add);
-  const unknown = [...only].filter((g) => !["all", "runtime", "runtime-chunks", "packs", "native64", "lists", "tools"].includes(g) && !(record.packs ?? []).some((p) => p.id === g));
-  if (unknown.length) { console.error(`fetch: unknown --only group(s): ${unknown.join(", ")}`); process.exit(2); }
-  // a group asked for by name must bring something: a release without it is not what was asked
-  const groupFiles = { "runtime-chunks": under("runtime"), packs: (record.packs ?? []).flatMap((k) => packFiles(k.id)), native64: under("native64"), lists: under("lists"), tools: under("tools") };
-  const empty = [...only].filter((g) => groupFiles[g] && groupFiles[g].length === 0);
-  if (empty.length) throw new Error(`this release has no files for --only ${empty.join(", ")}`);
-
   let fetched = 0, kept = 0;
   for (const p of [...selected].sort()) {
     const r = await fetchVerified(p, byPath.get(p));

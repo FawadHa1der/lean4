@@ -14,28 +14,45 @@
 //   3. github   needs the tag on GitHub. ONE release for the tag: a draft is created (or the
 //               existing one reused), every file uploaded by basename (skipping assets whose
 //               SHA-256 already matches), every asset verified against the staged bytes, and only
-//               then published (--verify-tag)
+//               then published (--verify-tag). A re-cut by reference uploads its own files only
+//               (tools/<tgz>, release.json, SHA256SUMS): the others are its base's assets
 //   4. r2       needs the tag on GitHub. The served layout under <r2>/<id>/: objects, then
 //               manifests + SHA256SUMS, then release.json last (js/formats/HOSTING.md), all with
 //               `copy --immutable` (an object that differs is a stop, never overwritten); then every
-//               name, size, content type and (unless --r2-quick) object SHA-256 is checked
-//   5. fetch    an anonymous `lean4-wasm64 fetch` of the published GitHub release pinned by
-//               --id/--digest, then `verify --deep` (--fetch-check runtime|none to shorten it)
+//               name, size, content type and (unless --r2-quick) object SHA-256 is checked. A re-cut
+//               by reference gets a complete prefix too: its shared files are copied server-side
+//               from <r2>/<base id>/, then its own files go up, release.json last; it is checked by
+//               the listing, its own files' SHA-256 and an `rclone check` (MD5) of the shared files
+//               against the staged dir (--r2-full: every object's SHA-256, as for a full release)
+//   5. fetch    an anonymous `lean4-wasm64 fetch`, run with the staged tgz's own tools (the reader
+//               this release ships), of the published GitHub release pinned by --id/--digest, then
+//               `verify --deep`; a re-cut by reference: its runtime (through its base's release)
+//               and its tools (--fetch-check to change it)
 // Every step first reads the current state and does only what is missing, so a re-run after an
 // interruption (or after doing a step by hand) resumes. It never creates a second release for a
 // tag, never replaces or deletes an asset of a PUBLISHED release that has bytes (an interrupted,
 // byte-less upload is replaced on any release), never force-pushes (the push is --atomic), and
 // stops with the command to fix things where a state is not one it produced. A re-cut (-rN) may
 // be recorded on a branch cut from its base's record commit; then only its tag is pushed.
+// A re-cut by reference (release.json `base`, js/formats/release.md) is checked against its base
+// before any step, whatever --only is: the base's record at its tag (canonical, checkRecutBase),
+// its published GitHub release holding every shared file (size and digest) and that record, and
+// (--r2-source base) its R2 prefix holding every shared object with the staged MD5 and that record.
 //
 // Options:
 //   --release-dir <dir>   the staged release (default: ../wasm64-lean-kernel-release/<id> beside the repo)
 //   --r2 <remote:path>    the R2 prefix (default: $LEAN4_WASM64_R2 or qed64-r2:qed64-artifacts/lean4-wasm64)
 //   --only <steps>        a comma list of record,push,github,r2,fetch (default: all, in that order)
 //   --r2-quick            check R2 by listing only (names, sizes, content types), not by hashing
-//   --fetch-check <m>     full (default: every file, ~3 GB) | runtime | none
+//   --r2-full             check R2 by every object's SHA-256 (a download; always so for a full release)
+//   --r2-source <s>       a re-cut by reference: base (default: copy the shared files server-side from
+//                         the base's prefix) | local (upload them from the staged dir; the base's prefix
+//                         is not read)
+//   --fetch-check <m>     auto (default: full; runtime for a re-cut by reference) | full (every file,
+//                         ~3 GB, then verify --deep) | runtime (a re-cut by reference: runtime,tools) | none
 //   --yes                 do not ask before pushing and publishing
 //   --dry-run             read and check everything, print the commands it would run, change nothing
+//                         (the temp files those commands name are kept)
 //   -h, --help
 // Exit codes: 0 every selected step done (PUBLISHED only when record, push, github and r2 all
 // ran; --dry-run: the plan printed); 1 a check failed or a step stopped; 2 usage, a missing tool
@@ -48,7 +65,7 @@ import readline from "node:readline";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { RELEASE_ID, releaseDigest } from "./js/release-record.mjs";
+import { RELEASE_ID, checkRecutBase, checkReleaseRecord, isRecutOwnPath, releaseDigest, serializeRelease } from "./js/release-record.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..");
@@ -84,14 +101,20 @@ export function chooseRelease(releases, tag, slug) {
  * "sha256:<hex>", possibly null). Returns {upload: [names], remove: [{id, name, why}],
  * unverified: [names], stop: reason|null}. An asset that is not "uploaded" (an interrupted upload,
  * no bytes) is removed and re-uploaded on any release; one whose bytes differ only on a DRAFT — on a
- * published release that is a stop, as is any asset the staged release does not have.
+ * published release that is a stop, as is any asset the staged release does not have (on a draft,
+ * the stop lists the command that removes each: `slug` is the repository).
  */
-export function planAssets(local, assets, isDraft) {
+export function planAssets(local, assets, isDraft, slug = "<owner>/<repo>") {
   const byName = new Map(assets.map((a) => [a.name, a]));
   const wanted = new Set(local.map((f) => f.name));
   const out = { upload: [], remove: [], unverified: [], stop: null };
-  const extra = assets.filter((a) => !wanted.has(a.name)).map((a) => a.name);
-  if (extra.length) { out.stop = `the release has assets the staged release does not: ${extra.slice(0, 8).join(", ")}${extra.length > 8 ? ", …" : ""}`; return out; }
+  const extra = assets.filter((a) => !wanted.has(a.name));
+  if (extra.length) {
+    const names = extra.map((a) => a.name);
+    out.stop = `the release has assets the staged release does not: ${names.slice(0, 8).join(", ")}${names.length > 8 ? ", …" : ""}`
+      + (isDraft ? `\n  the release is a draft: remove them, then re-run:\n${extra.map((a) => `  gh api -X DELETE repos/${slug}/releases/assets/${a.id}   # ${a.name}`).join("\n")}` : "");
+    return out;
+  }
   const bad = [];
   for (const f of local) {
     const a = byName.get(f.name);
@@ -135,18 +158,148 @@ export function checkR2Listing(local, listing) {
   return p;
 }
 
-/** The GitHub release body: the pin, then the record's notes. */
+/**
+ * The GitHub release body: the pin, then (a re-cut by reference) where its other files are, then
+ * the record's notes.
+ */
 export function releaseBody(record) {
   const pin = `Toolchain release ${record.id}. Pin: --id ${record.id} --digest ${record.digest}. Contents and digests: release.json`;
+  const own = splitFiles(record).own.filter((p) => p !== "release.json" && p !== "SHA256SUMS");
+  const ref = record.base ? `Re-cut by reference of ${record.base.id} (${record.base.digest}): this release's assets are `
+    + `${own.join(", ")}, release.json and SHA256SUMS; every other file release.json lists is an asset of ${record.base.id} `
+    + "(lean4-wasm64 fetch takes them from there)." : "";
   const notes = (record.notes ?? []).map((n) => `- ${n}`).join("\n");
-  return notes ? `${pin}\n\n${notes}\n` : `${pin}\n`;
+  return `${[pin, ref, notes].filter(Boolean).join("\n\n")}\n`;
+}
+
+// ---------- a re-cut by reference (js/formats/release.md, "Re-cut by reference") ----------
+
+/**
+ * The files this release's own GitHub release carries, and the ones it shares with its base — a
+ * re-cut by reference (release.json `base`): every file outside tools/ is an asset of the base's
+ * release. Release-relative paths. A full record owns every file. → {own: [paths], shared: [paths]}
+ */
+export function splitFiles(record) {
+  const all = (record.files ?? []).map((f) => f.path);
+  const own = record.base ? all.filter(isRecutOwnPath) : all;
+  return { own: ["release.json", "SHA256SUMS", ...own], shared: record.base ? all.filter((p) => !isRecutOwnPath(p)) : [] };
+}
+
+/** The shared paths split by the content type HOSTING.md serves them with (a server-side copy keeps each object's). */
+export const r2Lists = (shared) => ({
+  objects: shared.filter((p) => !isRecutOwnPath(p) && contentTypeOf(p) === "application/octet-stream"),
+  manifests: shared.filter((p) => !isRecutOwnPath(p) && contentTypeOf(p) === "application/json"),
+});
+
+/**
+ * The rclone argv of each R2 pass, in order (HOSTING.md); every pass is `copy --immutable`, so an
+ * object that differs is a stop, never overwritten. A full record, or `source` "local": the three
+ * passes of a release dir — objects, then manifests + SHA256SUMS, then release.json. A re-cut by
+ * reference (`basePrefix`): the shared objects (`objectsList`), then the shared manifests
+ * (`manifestsList`), copied server-side from the base's prefix (one remote: CopyObject; without -M
+ * or --header-upload each object keeps its Content-Type), then its own tools/, SHA256SUMS and
+ * release.json, last. Never the base's release.json, SHA256SUMS or tools/.
+ */
+export function r2Passes({ rel, dest, basePrefix = null, objectsList, manifestsList, source = "base" }) {
+  const common = ["--immutable", "--s3-no-check-bucket", "--checksum"];
+  const only = (filter, type) => ["copy", rel, dest, ...common, "--filter", filter, "--filter", "- *", "--header-upload", `Content-Type: ${type}`];
+  if (!basePrefix || source === "local") return [
+    ["copy", rel, dest, ...common, "--filter", "- *.json", "--filter", "- SHA256SUMS",
+      "--header-upload", "Content-Type: application/octet-stream", "--transfers", "4", "--s3-chunk-size", "64M"],
+    ["copy", rel, dest, ...common, "--filter", "- /release.json", "--filter", "+ *.json", "--filter", "+ /SHA256SUMS",
+      "--filter", "- *", "--header-upload", "Content-Type: application/json"],
+    only("+ /release.json", "application/json"),
+  ];
+  return [
+    ["copy", basePrefix, dest, ...common, "--files-from-raw", objectsList, "--transfers", "8"],
+    ["copy", basePrefix, dest, ...common, "--files-from-raw", manifestsList],
+    only("+ /tools/**", "application/octet-stream"),
+    only("+ /SHA256SUMS", "application/json"),
+    only("+ /release.json", "application/json"),
+  ];
+}
+
+/**
+ * The base's GitHub release must serve every file a re-cut by reference shares with it.
+ * shared: [{path, bytes, sha256}] (the re-cut's files[] outside tools/); baseRelease: the base
+ * tag's one release (null: none); baseAssets: its [{id, name, size, state, digest}];
+ * baseRecordText: the base's release.json as its tag holds it. Problems: no release, a draft, a
+ * shared basename (or release.json) missing, not "uploaded", of another size or another digest.
+ * An asset GitHub has no digest for goes to `unverified` ({name, sha256}: hash a download).
+ * → {problems, unverified}
+ */
+export function checkBaseAssets(shared, baseRelease, baseAssets, baseRecordText) {
+  const problems = [], unverified = [];
+  if (!baseRelease) return { problems: ["the base has no GitHub release"], unverified };
+  if (baseRelease.draft) problems.push(`the base's release (id ${baseRelease.id}) is a draft: publish the base first`);
+  const byName = new Map((baseAssets ?? []).map((a) => [a.name, a]));
+  const want = shared.map((f) => ({ name: path.posix.basename(f.path), bytes: f.bytes, sha256: f.sha256 }));
+  const text = Buffer.from(String(baseRecordText ?? ""), "utf8");
+  want.push({ name: "release.json", bytes: text.length, sha256: createHash("sha256").update(text).digest("hex") });
+  for (const w of want) {
+    const a = byName.get(w.name);
+    if (!a) problems.push(`missing: ${w.name}`);
+    else if (a.state !== "uploaded") problems.push(`${w.name}: interrupted upload (state ${a.state}, no bytes)`);
+    else if (a.size !== w.bytes) problems.push(`${w.name}: size ${a.size} ≠ ${w.bytes}`);
+    else if (!a.digest) unverified.push({ name: w.name, sha256: w.sha256 });
+    else if (a.digest !== `sha256:${w.sha256}`) problems.push(`${w.name}: digest ${String(a.digest).slice(0, 19)}… ≠ sha256:${w.sha256.slice(0, 12)}…${w.name === "release.json" ? " (not the record at the base's tag)" : ""}`);
+  }
+  return { problems, unverified };
+}
+
+/**
+ * Judge `rclone check <staged dir> <prefix> --one-way --files-from-raw <shared> --combined <file> -vv`
+ * (`log`: its log). Every shared path must be an "=" line, and no other line may appear. rclone also
+ * says "=" (and exits 0) for an object whose MD5 it could not compare (R2 stores none for it), so an
+ * "=" passes only with its debug line: "<path>: OK" (the MD5 compared) or "<path>: OK - could not
+ * check hash" — then it is returned in `unhashed`, to be hashed from a download. An "=" with neither
+ * (a log that went elsewhere, another format) or a count ("N hashes could not be checked") the log
+ * does not account for is a problem: nothing passes unproven. → {problems, unhashed}
+ */
+export function checkR2Copy(combinedText, log, shared) {
+  const problems = [];
+  const want = new Set(shared);
+  const equal = [], seen = new Set();
+  const WHAT = { "+": "missing on R2", "-": "on R2 only", "*": "differs from the staged file", "!": "could not be read or hashed" };
+  for (const line of String(combinedText ?? "").split("\n")) {
+    if (!line.trim()) continue;
+    const m = /^([=+*!-]) (.+)$/.exec(line);
+    if (!m) { problems.push(`unexpected rclone check line: ${line}`); continue; }
+    seen.add(m[2]);
+    if (m[1] === "=" && want.has(m[2])) equal.push(m[2]);
+    else problems.push(`${m[2]}: ${m[1] === "=" ? "checked, but not a shared file" : WHAT[m[1]]}`);
+  }
+  for (const p of shared) if (!seen.has(p)) problems.push(`${p}: not in the rclone check output`);
+  const text = String(log ?? "");
+  const compared = new Set(), noHash = new Set();
+  for (const [, p, none] of text.matchAll(/ DEBUG : (.+?): OK( - could not check hash)?\s*$/gm)) (none ? noHash : compared).add(p);
+  const unhashed = equal.filter((p) => noHash.has(p));
+  const unproven = equal.filter((p) => !noHash.has(p) && !compared.has(p));
+  if (unproven.length) problems.push(`rclone's log shows no hash comparison for ${unproven.length} "=" file(s): ${unproven.slice(0, 4).join(", ")}${unproven.length > 4 ? ", …" : ""}`);
+  const count = Number(/(\d+) hashes? could not be checked/.exec(text)?.[1] ?? 0);
+  if (count > unhashed.length) problems.push(`rclone could not check ${count} hash(es) and its log names ${unhashed.length}: the others cannot be told apart`);
+  return { problems, unhashed };
+}
+
+/**
+ * What the fetch step runs: null (nothing) | {only: null (every file) | "<groups>", deep: verify
+ * --deep after it}. auto: every file and verify --deep for a full release; runtime,tools for a re-cut
+ * by reference (its runtime through the hop to its base's release, its own tgz from its own).
+ * runtime: the runtime alone, plus tools for a re-cut by reference (its only own file).
+ */
+export function fetchPlan(record, mode) {
+  if (mode === "none") return null;
+  const byRef = !!record?.base;
+  if (mode === "full" || (mode === "auto" && !byRef)) return { only: null, deep: true };
+  if (mode === "runtime" || mode === "auto") return { only: byRef ? "runtime,tools" : "runtime", deep: false };
+  throw new Error(`fetch check ${JSON.stringify(mode)}: auto | full | runtime | none`);
 }
 
 // ---------- effects ----------
 
 function parseArgs(argv) {
   const o = { id: null, releaseDir: null, r2: process.env.LEAN4_WASM64_R2 || "qed64-r2:qed64-artifacts/lean4-wasm64",
-    only: STEPS, r2Quick: false, fetchCheck: "full", yes: false, dryRun: false, help: false };
+    only: STEPS, r2Quick: false, r2Full: false, r2Source: "base", fetchCheck: "auto", yes: false, dryRun: false, help: false };
   const caller = process.env.LEAN4_WASM64_CALLER_CWD || process.cwd(); // import-release.sh cds to the repo
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -161,13 +314,16 @@ function parseArgs(argv) {
       if (bad.length) throw new Error(`--only: unknown step(s) ${bad.join(", ")} (${STEPS.join(",")})`);
     }
     else if (a === "--r2-quick") o.r2Quick = true;
-    else if (a === "--fetch-check") { o.fetchCheck = val(); if (!["full", "runtime", "none"].includes(o.fetchCheck)) throw new Error("--fetch-check: full | runtime | none"); }
+    else if (a === "--r2-full") o.r2Full = true;
+    else if (a === "--r2-source") { o.r2Source = val(); if (!["base", "local"].includes(o.r2Source)) throw new Error("--r2-source: base | local"); }
+    else if (a === "--fetch-check") { o.fetchCheck = val(); if (!["auto", "full", "runtime", "none"].includes(o.fetchCheck)) throw new Error("--fetch-check: auto | full | runtime | none"); }
     else if (a === "--yes") o.yes = true;
     else if (a === "--dry-run") o.dryRun = true;
     else if (a.startsWith("-")) throw new Error(`unknown option ${a}`);
     else if (!o.id) o.id = a;
     else throw new Error(`unexpected argument ${a}`);
   }
+  if (o.r2Quick && o.r2Full) throw new Error("--r2-quick and --r2-full exclude each other");
   return o;
 }
 
@@ -197,7 +353,31 @@ const git = (...args) => run("git", ["-C", REPO, ...args]).stdout.trim();
 const gitOk = (...args) => run("git", ["-C", REPO, ...args], { allowFail: true }).status === 0;
 const gitTry = (...args) => { const r = run("git", ["-C", REPO, ...args], { allowFail: true }); return r.status === 0 ? r.stdout : null; };
 const ghJson = (endpoint) => JSON.parse(run("gh", ["api", "--paginate", "--slurp", endpoint]).stdout).flat();
+const releaseAssets = (slug, id) => ghJson(`repos/${slug}/releases/${id}/assets?per_page=100`)
+  .map((a) => ({ id: a.id, name: a.name, size: a.size, state: a.state, digest: a.digest ?? null }));
 const short = (rev) => gitTry("log", "-1", "--format=%h %s", rev)?.trim() ?? rev;
+
+/** Temp dirs of this run: removed on exit, but kept under --dry-run (the printed commands name files in them). */
+const TEMPS = [];
+function tempDir(prefix = "publish-release-") {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  TEMPS.push(d);
+  return d;
+}
+const writeList = (file, paths) => { fs.writeFileSync(file, paths.map((p) => `${p}\n`).join("")); return file; };
+
+/** `rclone lsjson -R --files-only -M` of an R2 prefix; [] while the prefix does not exist. */
+function r2Listing(prefix) {
+  const r = run("rclone", ["lsjson", "-R", "--files-only", "-M", prefix], { allowFail: true });
+  if (r.status === 0) return JSON.parse(r.stdout || "[]");
+  if (r.status === 3 && /directory not found/i.test(r.stderr)) return []; // the prefix does not exist yet
+  throw new Stop(`rclone lsjson ${prefix} failed (exit ${r.status}):\n${(r.stderr || "").trim().slice(0, 2000)}`);
+}
+/** SHA-256 of the objects under an R2 prefix, from a download (`listFile`: only those paths). → Map rel → hex */
+function r2Sha256(prefix, listFile = null) {
+  return new Map(run("rclone", ["hashsum", "sha256", "--download", "--checkers", "4", ...(listFile ? ["--files-from-raw", listFile] : []), prefix]).stdout
+    .trim().split("\n").filter(Boolean).map((l) => { const i = l.indexOf("  "); return [l.slice(i + 2), l.slice(0, i)]; }));
+}
 
 async function ask(o, question) {
   if (o.yes || o.dryRun) return true;
@@ -322,6 +502,115 @@ function requireTagged(o, ctx) {
   throw new Stop(`${problem.text}: run \`publish ${o.id} --only record,push\` first`);
 }
 
+// ---------- a re-cut by reference: its base (read-only; preflight, then re-checked in the steps) ----------
+
+/**
+ * The base's record as the base's tag holds it (the local tag, which must be origin's, else
+ * origin's, its objects fetched to FETCH_HEAD only as adoptOriginTag does) — never what a mirror or
+ * the staged dir says. It must be canonical and pass checkRecutBase with the staged record, which
+ * also checks it whole and pinned by base.{id, digest}. → {record, text, where}
+ */
+function baseRecordAtTag(o, record) {
+  const id = record.base.id;
+  const recordPath = `wasm64-build/releases/${id}.json`;
+  const local = localTagObj(id), remote = originTagObj(id);
+  if (!remote) throw new Stop(`origin has no tag ${id}: a re-cut by reference needs its base published first`);
+  if (local && local !== remote) throw new Stop(`the local tag ${id} (${local.slice(0, 10)}) is not origin's (${remote.slice(0, 10)})`);
+  let rev = `refs/tags/${id}`;
+  if (!local) { rev = originTagCommit(id); haveObject(rev, `refs/tags/${id}`); }
+  const where = `${recordPath} at ${local ? "" : "origin's "}tag ${id}`;
+  const text = gitTry("show", `${rev}:${recordPath}`);
+  if (text === null) throw new Stop(`the base's record is not at its tag: no ${where}`);
+  let base;
+  try { base = JSON.parse(text); } catch (e) { throw new Stop(`${where} is not JSON: ${e.message}`); }
+  if (serializeRelease(base) !== text) throw new Stop(`${where} is not in canonical form (serializeRelease)`);
+  const problems = checkRecutBase(record, base);
+  if (problems.length) throw new Stop(`${o.id} is not a re-cut by reference of ${where}:\n  ${problems.slice(0, 20).join("\n  ")}${problems.length > 20 ? `\n  … ${problems.length - 20} more` : ""}`);
+  return { record: base, text, where };
+}
+
+/**
+ * The base's GitHub release serves every file the re-cut shares with it, and the base's record
+ * (checkBaseAssets). `hash`: an asset GitHub has no digest for is hashed from a download (--dry-run
+ * reports it); otherwise (a re-check) only the problems count.
+ */
+function checkBaseRelease(o, ctx, { hash }) {
+  const { base, slug } = ctx;
+  const choice = chooseRelease(ghJson(`repos/${slug}/releases?per_page=100`), base.id, slug);
+  if (choice.action === "stop") throw new Stop(`the base's GitHub release: ${choice.reason}`);
+  const release = choice.release ?? null;
+  const { problems, unverified } = checkBaseAssets(base.sharedFiles, release, release ? releaseAssets(slug, release.id) : [], base.text);
+  if (problems.length) {
+    throw new Stop(`the base's GitHub release ${base.id} does not serve the files ${o.id} shares with it:\n  ${problems.slice(0, 20).join("\n  ")}`
+      + `${problems.length > 20 ? `\n  … ${problems.length - 20} more` : ""}`);
+  }
+  const what = `base release ${base.id} (id ${release.id}): its ${base.shared.length} shared assets and its release.json`;
+  if (!unverified.length) { say(`  ${what}, each by size and SHA-256`); return; }
+  if (!hash) { say(`  ${what}, by size and SHA-256 (${unverified.length} without a GitHub digest: hashed in preflight)`); return; }
+  const names = `${unverified.slice(0, 8).map((u) => u.name).join(", ")}${unverified.length > 8 ? ", …" : ""}`;
+  if (o.dryRun) { say(`  ${what}, by size; ${unverified.length} have no GitHub digest — the real run hashes a download of each: ${names}`); return; }
+  say(`  hashing ${unverified.length} base assets GitHub has no digest for (a download)…`);
+  const dir = tempDir();
+  for (const u of unverified) {
+    const file = path.join(dir, u.name);
+    run("gh", ["release", "download", base.id, "--repo", slug, "--pattern", u.name, "--output", file]);
+    const same = sha256File(file) === u.sha256;
+    fs.rmSync(file, { force: true });
+    if (!same) throw new Stop(`the base's asset ${u.name}: its bytes are not the ones release.json names`);
+  }
+  say(`  ${what}, by size and SHA-256 (${unverified.length} from a download)`);
+}
+
+/** The base's R2 prefix holds every shared object (name, size, content type) and the base's record (--r2-source base). */
+function checkBasePrefix(o, ctx) {
+  const { base } = ctx;
+  const want = new Set(base.shared);
+  const problems = checkR2Listing(base.sharedFiles.map((f) => ({ rel: f.path, size: f.bytes })), r2Listing(base.prefix).filter((x) => want.has(x.Path)));
+  if (problems.length) {
+    throw new Stop(`the base's R2 prefix ${base.prefix} cannot be copied from:\n  ${problems.slice(0, 20).join("\n  ")}${problems.length > 20 ? `\n  … ${problems.length - 20} more` : ""}\n`
+      + `  \`publish ${base.id} --only r2\` uploads what is missing there; or publish ${o.id} with --r2-source local (its shared files from the staged dir)`);
+  }
+  const cat = run("rclone", ["cat", `${base.prefix}release.json`], { allowFail: true });
+  if (cat.status !== 0) throw new Stop(`rclone cat ${base.prefix}release.json failed (exit ${cat.status}):\n${(cat.stderr || "").trim().slice(0, 1000)}`);
+  if (cat.stdout !== base.text) throw new Stop(`${base.prefix}release.json is not the base's record at its tag (${base.where})`);
+  say(`  base prefix ${base.prefix}: its ${want.size} shared objects (names, sizes, content types) and its release.json`);
+}
+
+/**
+ * The shared files on an R2 prefix are the staged bytes — the staged dir is the reference, not the
+ * base's prefix: `rclone check` compares the staged files' MD5 with the one R2 stores (nothing is
+ * downloaded); an object R2 has no MD5 for is hashed from a download (--dry-run reports it).
+ */
+function r2CheckShared(o, ctx, prefix, label) {
+  const { base } = ctx;
+  const combined = path.join(base.lists.dir, `check-${label}.txt`), logFile = path.join(base.lists.dir, `check-${label}.log`);
+  for (const f of [combined, logFile]) fs.rmSync(f, { force: true });
+  // its own log file: the debug lines that prove each comparison, wherever the environment sends rclone's log
+  const r = run("rclone", ["check", ctx.rel, prefix, "--one-way", "--files-from-raw", base.lists.shared, "--combined", combined,
+    "-vv", "--log-file", logFile], { allowFail: true });
+  const read = (f) => (fs.existsSync(f) ? fs.readFileSync(f, "utf8") : "");
+  const text = read(combined), logText = `${read(logFile)}${r.stderr || ""}`;
+  // exit 1: differences (named in the combined report); anything else is no answer
+  const { problems, unhashed } = r.status === 0 || r.status === 1 ? checkR2Copy(text, logText, base.shared) : { problems: [`rclone check exited ${r.status}`], unhashed: [] };
+  if (problems.length) {
+    const log = logText.split("\n").filter((l) => l.trim() && !/ DEBUG : /.test(l)).slice(-6).join("\n");
+    const way = label === "base" ? `publish with --r2-source local (its shared files from ${ctx.rel}, the base's prefix unread)`
+      : "--r2-full checks every object by its SHA-256 instead";
+    throw new Stop(`the shared files on ${prefix} are not the staged bytes (rclone check, exit ${r.status}):\n  ${problems.slice(0, 20).join("\n  ")}`
+      + `${problems.length > 20 ? `\n  … ${problems.length - 20} more` : ""}${log ? `\n${log}` : ""}`
+      + (problems.every((q) => /could not check .* hash|no hash comparison/.test(q)) ? `\n  ${way}` : ""));
+  }
+  const n = base.shared.length;
+  if (!unhashed.length) { say(`  rclone check (MD5, nothing downloaded): the ${n} shared files on ${prefix} are the staged bytes`); return; }
+  say(`  rclone check (MD5): ${n - unhashed.length} of the ${n} shared files on ${prefix} are the staged bytes; R2 holds no MD5 for ${unhashed.length}`);
+  const names = `${unhashed.slice(0, 8).join(", ")}${unhashed.length > 8 ? ", …" : ""}`;
+  if (o.dryRun) { say(`  (dry run: the real run hashes a download of each: ${names})`); return; }
+  const sums = r2Sha256(prefix, writeList(path.join(base.lists.dir, `unhashed-${label}.txt`), unhashed));
+  const bad = unhashed.filter((p) => sums.get(p) !== sha256File(path.join(ctx.rel, ...p.split("/"))));
+  if (bad.length) throw new Stop(`R2 bytes on ${prefix} differ from the staged release: ${bad.slice(0, 10).join(", ")}`);
+  say(`  verified: those ${unhashed.length} by their SHA-256 (a download)`);
+}
+
 // ---------- the steps ----------
 
 function preflight(o) {
@@ -336,14 +625,16 @@ function preflight(o) {
   const slug = repoSlug(record.kernel?.repo);
   if (!slug) throw new Stop(`release.json kernel.repo ${record.kernel?.repo} is not a github.com repository`);
   const line = record.kernel.branch;
-  const needs = { gh: true, git: true, rclone: o.only.includes("r2") };
+  // a re-cut by reference: its base is read (gh, and rclone unless --r2-source local) whatever --only is
+  const byRef = record.base !== undefined;
+  const needs = { gh: true, git: true, rclone: o.only.includes("r2") || (byRef && o.r2Source === "base") };
   for (const [tool, args] of [["gh", ["--version"]], ["git", ["--version"]], ["rclone", ["version"]]]) {
     if (needs[tool] && run(tool, args, { allowFail: true }).status !== 0) throw new Stop(`${tool} is not available (not on PATH, or failing)`, 2);
   }
   if (gitTry("rev-parse", "--is-shallow-repository")?.trim() === "true") {
     throw new Stop("this checkout is shallow: git fetch --unshallow --tags origin (GitHub Actions: actions/checkout with fetch-depth: 0)", 2);
   }
-  if (o.only.includes("github") || o.only.includes("r2")) { // both read the tag through gh
+  if (o.only.includes("github") || o.only.includes("r2") || byRef) { // all read through gh: the tag, the base's release
     const auth = run("gh", ["auth", "status", "--hostname", "github.com", "--active"], { allowFail: true });
     if (auth.status !== 0) throw new Stop(`gh is not logged in to github.com: ${(auth.stderr || auth.stdout).trim().split("\n").slice(0, 4).join(" / ")}`, 2);
   }
@@ -351,16 +642,45 @@ function preflight(o) {
     const push = run("gh", ["api", `repos/${slug}`, "--jq", ".permissions.push"], { allowFail: true });
     if (push.stdout.trim() !== "true") throw new Stop(`the gh account cannot push to ${slug} (no release rights)`, 2);
   }
-  if (o.only.includes("r2")) {
+  if (needs.rclone) {
     const remote = o.r2.split(":")[0] + ":";
     if (!run("rclone", ["listremotes"]).stdout.split("\n").includes(remote)) throw new Stop(`rclone has no remote ${remote} (rclone config)`, 2);
   }
+  const ctx = { rel, record, recordText, slug, line, recordPath: `wasm64-build/releases/${o.id}.json`, base: null };
+  if (byRef) {
+    // before anything reads base.id: the record's own structure (S1-S5: base.id is this id's first cut)
+    const problems = checkReleaseRecord(record);
+    if (problems.length) throw new Stop(`${rel}/release.json is malformed:\n  ${problems.slice(0, 12).join("\n  ")}`);
+    const at = baseRecordAtTag(o, record);
+    const dir = tempDir();
+    const { own, shared } = splitFiles(record);
+    const { objects, manifests } = r2Lists(shared);
+    const lists = { dir, own: writeList(path.join(dir, "own.txt"), own), shared: writeList(path.join(dir, "shared.txt"), shared),
+      objects: writeList(path.join(dir, "shared.objects"), objects), manifests: writeList(path.join(dir, "shared.manifests"), manifests) };
+    const file = path.join(dir, "base", "release.json"); // verify --base, here and in the fetch step
+    fs.mkdirSync(path.dirname(file));
+    fs.writeFileSync(file, at.text);
+    ctx.base = {
+      id: record.base.id, digest: record.base.digest, record: at.record, text: at.text, where: at.where, file,
+      prefix: `${o.r2}/${record.base.id}/`, own, shared, sharedFiles: record.files.filter((f) => !isRecutOwnPath(f.path)), lists,
+    };
+  }
   // the staged bytes are what will be published: check them whole before anything else
-  const v = run("node", [path.join(JS, "verify-release.mjs"), "--release", rel], { allowFail: true });
+  const v = run("node", [path.join(JS, "verify-release.mjs"), "--release", rel, ...(ctx.base ? ["--base", ctx.base.file] : [])], { allowFail: true });
   if (v.status !== 0 || !/RELEASE VERIFIED/.test(v.stdout)) throw new Stop(`verify-release failed for ${rel}:\n${(v.stdout + v.stderr).trim().split("\n").slice(-12).join("\n")}`);
   say(`  ${rel}: RELEASE VERIFIED (digest ${record.digest}), ${record.files?.length ?? "?"} recorded files`);
   say(`  github ${slug}, line ${line}, kernel ${record.kernel.commit.slice(0, 10)} (patch ${record.kernel.patch})`);
-  return { rel, record, recordText, slug, line, recordPath: `wasm64-build/releases/${o.id}.json` };
+  if (ctx.base) {
+    const { base } = ctx;
+    say(`  by reference of ${base.id} (${base.digest.slice(0, 23)}…): ${base.own.length} own, ${base.shared.length} shared — the base's record from ${base.where}, compared`);
+    // every read-only check of the base, before any step can push or publish anything
+    checkBaseRelease(o, ctx, { hash: true });
+    if (o.r2Source === "base") {
+      checkBasePrefix(o, ctx);
+      r2CheckShared(o, ctx, base.prefix, "base");
+    } else say(`  --r2-source local: the base's R2 prefix is not read; the shared files go up from ${rel}`);
+  }
+  return ctx;
 }
 
 async function stepRecord(o, ctx) {
@@ -484,7 +804,16 @@ async function stepPush(o, ctx) {
 async function stepGithub(o, ctx) {
   step(`github: release ${o.id} on ${ctx.slug}`);
   const tagged = requireTagged(o, ctx);
-  const files = stagedFiles(ctx.rel);
+  // a re-cut by reference: its base's release must still serve the shared files (re-checked), and
+  // only its own files go on its release
+  if (ctx.base) checkBaseRelease(o, ctx, { hash: false });
+  const own = ctx.base ? new Set(ctx.base.own) : null;
+  const files = stagedFiles(ctx.rel).filter((f) => !own || own.has(f.rel.split(path.sep).join("/")));
+  if (own) {
+    const missing = [...own].filter((p) => !files.some((f) => f.rel.split(path.sep).join("/") === p));
+    if (missing.length) throw new Stop(`the staged release lacks its own files: ${missing.join(", ")}`);
+    say(`  a re-cut by reference: its ${files.length} own files go on its release; the other ${ctx.base.shared.length} are assets of ${ctx.base.id}`);
+  }
   const dup = files.map((f) => f.name).filter((n, i, all) => all.indexOf(n) !== i);
   if (dup.length) throw new Stop(`GitHub assets are flat: these basenames repeat: ${[...new Set(dup)].join(", ")}`);
   say(`  hashing ${files.length} staged files…`);
@@ -493,7 +822,7 @@ async function stepGithub(o, ctx) {
   let choice = chooseRelease(releases(), o.id, ctx.slug);
   if (choice.action === "stop") throw new Stop(choice.reason);
   if (choice.action === "create") {
-    const notes = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "publish-release-")), "notes.md");
+    const notes = path.join(tempDir(), "notes.md");
     fs.writeFileSync(notes, releaseBody(ctx.record));
     act(o, "gh", ["release", "create", o.id, "--repo", ctx.slug, "--draft", "--verify-tag", "--title", `lean4-wasm64 ${o.id}`, "--notes-file", notes]);
     if (o.dryRun) { say(`  (then upload ${files.length} files, verify each, publish)`); return; }
@@ -502,10 +831,11 @@ async function stepGithub(o, ctx) {
   }
   let rel = choice.release;
   say(`  release id ${rel.id}: ${rel.draft ? "draft" : "published"}`);
-  const assets = () => ghJson(`repos/${ctx.slug}/releases/${rel.id}/assets?per_page=100`)
-    .map((a) => ({ id: a.id, name: a.name, size: a.size, state: a.state, digest: a.digest ?? null }));
-  let plan = planAssets(files, assets(), rel.draft);
-  if (plan.stop) throw new Stop(plan.stop);
+  const assets = () => releaseAssets(ctx.slug, rel.id);
+  let plan = planAssets(files, assets(), rel.draft, ctx.slug);
+  if (plan.stop) {
+    throw new Stop(plan.stop + (ctx.base && rel.draft ? `\n  (a re-cut by reference's release carries its ${files.length} own files only: a draft filled by the by-value fallback is emptied first)` : ""));
+  }
   for (const r of plan.remove) {
     say(`  re-uploading ${r.name} (${r.why})`);
     act(o, "gh", ["api", "-X", "DELETE", `repos/${ctx.slug}/releases/assets/${r.id}`]);
@@ -520,7 +850,7 @@ async function stepGithub(o, ctx) {
   if (o.dryRun && (plan.upload.length || plan.remove.length)) say("  (then verify each asset by its SHA-256)"); // nothing uploaded yet
   else {
     // verify: every asset uploaded, by its SHA-256 (GitHub's digest; a download when it has none)
-    plan = planAssets(files, assets(), rel.draft);
+    plan = planAssets(files, assets(), rel.draft, ctx.slug);
     if (plan.stop || plan.upload.length) throw new Stop(plan.stop ?? `still missing or broken after the upload: ${plan.upload.slice(0, 8).join(", ")}`);
     for (const name of plan.unverified) {
       const f = files.find((x) => x.name === name);
@@ -548,58 +878,91 @@ async function stepR2(o, ctx) {
   const dest = `${o.r2}/${o.id}/`;
   step(`r2: ${dest}`);
   const tagged = requireTagged(o, ctx);
-  const files = stagedFiles(ctx.rel);
-  const list = () => {
-    const r = run("rclone", ["lsjson", "-R", "--files-only", "-M", dest], { allowFail: true });
-    if (r.status === 0) return JSON.parse(r.stdout || "[]");
-    if (r.status === 3 && /directory not found/i.test(r.stderr)) return []; // the prefix does not exist yet
-    throw new Stop(`rclone lsjson ${dest} failed (exit ${r.status}):\n${(r.stderr || "").trim().slice(0, 2000)}`);
-  };
-  const before = checkR2Listing(files, list());
+  const { base } = ctx;
+  // a re-cut by reference copies its shared files from the base's prefix: re-checked here (dry run too)
+  const fromBase = !!base && o.r2Source === "base";
+  if (fromBase) checkBasePrefix(o, ctx);
+  const files = stagedFiles(ctx.rel); // complete for a re-cut by reference too: its prefix is
+  const before = checkR2Listing(files, r2Listing(dest));
   const foreign = before.filter((p) => !p.startsWith("missing on R2:"));
   if (foreign.length) throw new Stop(`R2 holds objects that differ from the staged release (never overwritten):\n  ${foreign.slice(0, 20).join("\n  ")}`);
   if (before.length === 0) say(`  already complete: ${files.length} objects, sizes and content types match`);
   else {
-    say(`  ${files.length - before.length} of ${files.length} objects present; copying the rest`);
+    say(`  ${files.length - before.length} of ${files.length} objects present; copying the rest`
+      + (fromBase ? ` (the ${base.shared.length} shared ones server-side from ${base.prefix})` : base ? " (the shared ones from the staged dir: --r2-source local)" : ""));
     if (!tagged) { say("  (would copy them once the tag is on GitHub)"); return; }
-    const common = ["--immutable", "--s3-no-check-bucket", "--checksum"];
     // objects, then manifests + SHA256SUMS, then release.json: a reader that finds release.json finds everything.
-    // All three are `copy --immutable` (copyto would replace a different release.json).
-    act(o, "rclone", ["copy", ctx.rel, dest, ...common, "--filter", "- *.json", "--filter", "- SHA256SUMS",
-      "--header-upload", "Content-Type: application/octet-stream", "--transfers", "4", "--s3-chunk-size", "64M"]);
-    act(o, "rclone", ["copy", ctx.rel, dest, ...common, "--filter", "- /release.json", "--filter", "+ *.json", "--filter", "+ /SHA256SUMS",
-      "--filter", "- *", "--header-upload", "Content-Type: application/json"]);
-    act(o, "rclone", ["copy", ctx.rel, dest, ...common, "--filter", "+ /release.json", "--filter", "- *",
-      "--header-upload", "Content-Type: application/json"]);
+    // Every pass is `copy --immutable` (copyto would replace a different release.json); never sync.
+    const passes = r2Passes({ rel: ctx.rel, dest, basePrefix: fromBase ? base.prefix : null,
+      objectsList: base?.lists.objects, manifestsList: base?.lists.manifests, source: o.r2Source });
+    for (const args of passes) act(o, "rclone", args);
   }
-  if (o.dryRun) { if (before.length === 0) say("  (dry run: the listing is checked; the SHA-256 pass is skipped)"); return; }
-  const problems = checkR2Listing(files, list());
+  if (o.dryRun) {
+    const how = o.r2Quick ? "no hashing (--r2-quick)" : !base || o.r2Full ? "the hashing is skipped: every object's SHA-256 (a download)"
+      : `the hashing is skipped: its ${base.own.length} own objects' SHA-256 (a download), then an rclone check (MD5) of the ${base.shared.length} shared ones against ${ctx.rel}`;
+    say(`  (dry run: ${before.length === 0 ? "the listing is checked" : "then the listing is checked"}; ${how})`);
+    return;
+  }
+  const problems = checkR2Listing(files, r2Listing(dest));
   if (problems.length) throw new Stop(`R2 does not match the staged release:\n  ${problems.slice(0, 20).join("\n  ")}`);
   say(`  listing: ${files.length} objects, sizes and content types match`);
   if (o.r2Quick) return;
-  say(`  hashing every R2 object (downloads ~${(files.reduce((s, f) => s + f.size, 0) / 1e9).toFixed(1)} GB)…`);
-  const sums = new Map(run("rclone", ["hashsum", "sha256", "--download", "--checkers", "4", dest]).stdout.trim().split("\n")
-    .filter(Boolean).map((l) => { const i = l.indexOf("  "); return [l.slice(i + 2), l.slice(0, i)]; }));
-  const bad = files.filter((f) => sums.get(f.rel) !== sha256File(f.path)).map((f) => f.rel);
-  if (bad.length) throw new Stop(`R2 bytes differ from the staged release: ${bad.slice(0, 10).join(", ")}`);
-  say(`  verified: every R2 object has the staged SHA-256`);
+  if (!base || o.r2Full) {
+    say(`  hashing every R2 object (downloads ~${(files.reduce((s, f) => s + f.size, 0) / 1e9).toFixed(1)} GB)…`);
+    const sums = r2Sha256(dest);
+    const bad = files.filter((f) => sums.get(f.rel) !== sha256File(f.path)).map((f) => f.rel);
+    if (bad.length) throw new Stop(`R2 bytes differ from the staged release: ${bad.slice(0, 10).join(", ")}`);
+    say(`  verified: every R2 object has the staged SHA-256`);
+    return;
+  }
+  // a re-cut by reference: its own files by SHA-256 (a ~100 KB download), the shared ones by MD5
+  // against the staged dir (whose every file the preflight verify hashed against the record)
+  const sums = r2Sha256(dest, base.lists.own);
+  const bad = base.own.filter((p) => sums.get(p) !== sha256File(path.join(ctx.rel, ...p.split("/"))));
+  if (bad.length) throw new Stop(`R2 bytes differ from the staged release: ${bad.join(", ")}`);
+  say(`  verified: its ${base.own.length} own objects have the staged SHA-256`);
+  r2CheckShared(o, ctx, dest, "dest");
 }
 
 async function stepFetch(o, ctx) {
-  if (o.fetchCheck === "none") return;
+  const plan = fetchPlan(ctx.record, o.fetchCheck);
+  if (!plan) return;
   const from = `https://github.com/${ctx.slug}/releases/download/${o.id}/`;
-  step(`fetch: a consumer's pinned fetch of ${from} (${o.fetchCheck})`);
-  const cmd = ["node", path.join(JS, "cli.mjs"), "fetch", "--from", from, "--id", o.id, "--digest", ctx.record.digest, "--out", "<tmp>",
-    ...(o.fetchCheck === "runtime" ? ["--only", "runtime"] : [])];
-  if (o.dryRun) { say(`  would run: ${cmd.join(" ")}`); return; }
-  const out = fs.mkdtempSync(path.join(os.tmpdir(), "publish-release-fetch-"));
+  step(`fetch: a consumer's pinned fetch of ${from} (${plan.only ?? "every file"}${plan.deep ? ", then verify --deep" : ""})`);
+  // the reader this release ships, from its staged tgz — not this working tree's (a consumer
+  // installs that tgz first; for a re-cut by reference it is the reader that knows `base`)
+  const tools = ctx.record.tools;
+  let cli = path.join(JS, "cli.mjs");
+  if (!tools?.tgz) say("  (release.json names no tools tgz: this working tree's lean4-wasm64 reads it)");
+  else if (o.dryRun) {
+    cli = path.join("<tools>", "package", "cli.mjs");
+    say(`  would run: tar -xzf ${path.join(ctx.rel, ...tools.tgz.split("/"))} -C <tools>`);
+  } else {
+    const dir = tempDir("publish-release-tools-");
+    run("tar", ["-xzf", path.join(ctx.rel, ...tools.tgz.split("/")), "-C", dir]);
+    let pkg = null;
+    try { pkg = JSON.parse(fs.readFileSync(path.join(dir, "package", "package.json"), "utf8")); } catch { /* named below */ }
+    if (pkg?.name !== tools.package || pkg?.version !== tools.version) {
+      throw new Stop(`${tools.tgz} is not ${tools.package}@${tools.version} (its package/package.json: ${pkg ? `${pkg.name}@${pkg.version}` : "none"})`);
+    }
+    cli = path.join(dir, "package", "cli.mjs");
+    say(`  the reader: ${tools.package}@${tools.version}, unpacked from the staged ${tools.tgz}`);
+  }
+  const out = o.dryRun ? "<tmp>" : tempDir("publish-release-fetch-");
+  const fetchArgs = [cli, "fetch", "--from", from, "--id", o.id, "--digest", ctx.record.digest, "--out", out, ...(plan.only ? ["--only", plan.only] : [])];
+  const verifyArgs = [cli, "verify", "--release", out, "--deep", ...(ctx.base ? ["--base", ctx.base.file] : [])];
+  if (o.dryRun) {
+    say(`  would run: node ${fetchArgs.join(" ")}`);
+    if (plan.deep) say(`  would run: node ${verifyArgs.join(" ")}`);
+    return;
+  }
   try {
-    run(cmd[0], cmd.slice(1).map((a) => (a === "<tmp>" ? out : a)), { capture: false });
-    if (o.fetchCheck === "full") {
-      const v = run("node", [path.join(JS, "cli.mjs"), "verify", "--release", out, "--deep"], { allowFail: true });
+    run("node", fetchArgs, { capture: false });
+    if (plan.deep) {
+      const v = run("node", verifyArgs, { allowFail: true });
       if (v.status !== 0 || !/RELEASE VERIFIED/.test(v.stdout)) throw new Stop(`verify --deep of the fetched release failed:\n${(v.stdout + v.stderr).trim().split("\n").slice(-12).join("\n")}`);
     }
-    say(`  FETCH VERIFIED${o.fetchCheck === "full" ? " + RELEASE VERIFIED (deep)" : " (runtime)"}`);
+    say(`  FETCH VERIFIED${plan.deep ? " + RELEASE VERIFIED (deep)" : ` (${plan.only})`}`);
   } finally { fs.rmSync(out, { recursive: true, force: true }); }
 }
 
@@ -619,6 +982,10 @@ export async function main(argv = process.argv.slice(2)) {
   } catch (e) {
     if (e instanceof Stop) { console.error(`\npublish-release: STOPPED — ${e.message}`); return e.code; }
     throw e;
+  } finally {
+    const temps = TEMPS.splice(0);
+    if (o.dryRun) { if (temps.length) say(`  (kept for the commands printed above: ${temps.join(", ")})`); }
+    else for (const d of temps) fs.rmSync(d, { recursive: true, force: true });
   }
 }
 

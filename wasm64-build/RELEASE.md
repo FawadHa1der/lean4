@@ -12,7 +12,7 @@ directory.
 | Release id | `lean-<upstream tag>-<kernel commit, 7 hex>[-rN]`, e.g. `lean-v4.34.0-a8817d0` |
 | Record | `release.json` (`lean4-wasm64.release/v1`, `js/formats/release.md`), committed as `wasm64-build/releases/<id>.json` |
 | Tag | the release id, an annotated tag on the commit that adds the record |
-| Where | GitHub Release `<id>` on `FawadHa1der/lean4` (flat), and R2 `qed64-artifacts/lean4-wasm64/<id>/` (served layout) |
+| Where | GitHub Release `<id>` on `FawadHa1der/lean4` (flat; a re-cut by reference holds only its tools tgz, `release.json` and `SHA256SUMS`, its other files being its base's assets), and R2 `qed64-artifacts/lean4-wasm64/<id>/` (served layout, always complete) |
 | Tools | the npm package `lean4-wasm64` (`wasm64-build/js`), version `<lean version>-<kernel7>[-rN]`, shipped in the release as `tools/lean4-wasm64-<version>.tgz` |
 
 ## What a release contains
@@ -54,24 +54,50 @@ Options: `--packs-from <dir>` copies packs a site already serves (their
 transport bytes stay valid in every cache) instead of re-packing them;
 `--match-runtime <manifest>` makes staging stop unless the release's runtime
 manifest is byte-identical to one a site serves (so nothing baked against it
-unpairs); `--note <text>` adds a release note; `--recut <n>` a tools-only re-cut
-(it needs `--match-runtime` with the base release's runtime manifest, since a
-re-cut keeps the runtime). Relative paths are the caller's.
+unpairs); `--note <text>` adds a release note; `--recut <n>` a tools-only
+re-cut: **by reference** with `--base <mirror of the base>` (below), or by value
+with `--match-runtime` (only when a re-cut by reference is refused, e.g. a
+`hosting` change). Relative paths are the caller's.
 
-A tools-only re-cut `<base>-r<n>` (package version `<v>-<k7>-r<n>`, committed):
-the base published first; `--runtime` the base's build dir, `--match-runtime
-<base>/runtime/runtime-manifest.json`, `--packs-from <base>/profiles` (every
-pack, `lean-lib` included, then comes from the base); pre-seed
-`<id>/native64/native64.tar.gz` and `<id>.native64.stamp` from the base when
-the stamp still matches; pass the base's notes again plus one for the re-cut.
-Then `SHA256SUMS` must differ from the base's only in `tools/` (and
-`release.json`). Cut it from the line when the line's gate still passes on the
-base runtime; otherwise from a branch off the base's record commit.
+A tools-only re-cut `<base>-r<n>`, by reference (decision 8; js/formats/release.md,
+"Re-cut by reference"):
+
+1. Commit the tools with package version `<v>-<k7>-r<n>` (that commit is
+   `tools.commit`; `stage-release.sh` and `publish-release.mjs` run from the
+   working tree).
+2. Have a mirror of the base, the first cut `<base>`: its own staged dir, or
+   `lean4-wasm64 fetch --from …/download/<base>/ --id <base> --digest <d> --out
+   <mirror>`. Its `release.json` must be the record at the base's tag.
+3. `wasm64-build/import-release.sh release <tag> --recut <n> --base <mirror>
+   --note "<what the tools change>"` (the base's notes are appended).
+
+Staging clones every file outside `tools/` from the mirror (copy-on-write where
+the file system has it, each clone hashed against the base's record), packs the
+tools, gates the packed tools on the mirror's runtime and `lean-lib`, writes
+the record with `base` and refuses unless it differs from the base's only in
+`id`, `base`, `gate.checks`, `tools`, `notes` and `tools/` — and unless
+`SHA256SUMS` differs only at `release.json` and the two tgz lines. It needs no
+build dir, no `GATE-PASSED` and no Docker image, and runs offline. The base is
+always the first cut. Cut it from the line, or from a branch off the base's
+record commit, as before. It also leaves `<id>.gate/`, `<id>.tools/`,
+`<id>.gate.log` and the R2 lists `<id>.r2-objects.txt` / `<id>.r2-manifests.txt`
+beside the release dir.
+
+A re-cut by value (the fallback; every file uploaded again): `--runtime` the
+base's build dir, `--match-runtime <base>/runtime/runtime-manifest.json`,
+`--packs-from <base>/profiles`; pre-seed `<id>/native64/native64.tar.gz` and
+`<id>.native64.stamp` from the base when the stamp still matches; pass the
+base's notes again plus one for the re-cut. Then `SHA256SUMS` must differ from
+the base's only in `tools/` (and `release.json`).
 
 `stage-release.sh` refuses to stage a runtime without a passing gate for that
 commit and that `lean.wasm`, a commit that is not on `qed64-wasm64` or carries
 another upstream tag, a dirty `wasm64-build/js`, a package version that does
-not name the release, or an already tagged id. It writes
+not name the release, or an already tagged id; by reference also a base that is
+not a first cut of the tag, a mirror whose record is not the tag's, a HEAD that
+does not descend from the base, a clone whose bytes are not the base's, a gate
+failure (exit 31), any drift from the base's record, and a `SHA256SUMS`
+difference outside `tools/` and `release.json`. It writes
 `../wasm64-lean-kernel-release/<id>/` and, beside it, the release config
 (`<id>.config.json`), the packs' provenance (`<id>.pack-set.json`) and the
 verification report (`<id>.verify.json`). It runs `verify-release --deep` last
@@ -98,8 +124,24 @@ asset's SHA-256, and only then publish; copy to R2 in the served order
 and verify names, sizes, content types and every object's SHA-256; finally a
 consumer's anonymous `fetch --id --digest` of the GitHub release and
 `verify --deep`. `--only record,push,github,r2,fetch` runs a subset,
-`--r2-quick` skips R2's download-hash pass, `--fetch-check runtime|none`
-shortens the last step, `--yes` skips the two questions. `stage-release.sh` also prints the manual
+`--r2-quick` skips R2's download-hash pass, `--fetch-check
+auto|full|runtime|none` sets the last step, `--yes` skips the two questions.
+
+For a re-cut by reference, `publish` first — in preflight, before any push, and
+whatever `--only` is — reads the base's record at its tag, checks that the
+base's GitHub release is published and holds every shared asset (size and
+digest), and that the base's R2 prefix holds every shared object with the right
+bytes (MD5 against the staged clones) and the base's `release.json`. It then
+uploads only the 3 own assets. R2 is a server-side copy of the shared paths
+from `lean4-wasm64/<base>/` (objects, then manifests), then the own files,
+`release.json` last; it is verified by listing, the own files' SHA-256 and an
+MD5 check of every shared object against the staged clones (objects R2 holds
+no MD5 for are download-hashed; `--r2-full` hashes everything). The fetch check
+is `runtime,tools`, run with the staged tgz's own `cli.mjs` (`--fetch-check
+full` for everything). `--r2-source local` uploads the shared files from the
+staged dir instead of copying them (the fallback if the base prefix is
+incomplete or R2's copy misbehaves); `publish <base> --only r2` also fills a
+base prefix that lacks objects. `stage-release.sh` also prints the manual
 counterparts, as a fallback without publish's checks (no resume, no SHA-256 or
 R2 verification).
 
@@ -107,7 +149,7 @@ Only `publish` pushes, uploads or publishes, and only the repository owner runs 
 once tagged: the tag, the GitHub assets and the R2 prefix are never rewritten
 (until the tag exists, re-running the staging replaces the staged dir). A
 mistake is fixed by a new release; a change to the tools alone (same runtime,
-same packs) is a re-cut `<id>-r2` (`--recut 2`).
+same packs) is a re-cut by reference `<id>-r<n>` (`--recut <n> --base <mirror>`).
 
 ## Consuming a release
 
@@ -124,7 +166,15 @@ npx lean4-wasm64 unpack --manifest <tc>/profiles/lean-lib.manifest.json --out <t
 
 `fetch` verifies everything it writes. The default `--only all` writes every
 release file and `SHA256SUMS` — a release dir `verify` re-checks end to end,
-fit to upload. `runtime` (the artifact layout `<out>/bin`) is never part of
+fit to upload (fetch into a fresh `--out`: a base's tgz left in `tools/` is a
+file the re-cut does not list).
+
+A re-cut by reference fetched from its GitHub release takes every file outside
+`tools/` from its base's release (the sibling `…/download/<base>/`, or
+`--base-from`), after checking the base's record against its own; its R2 copy
+is complete. Install the release's own tools first: its tgz is always one of
+its own assets, and tools up to 4.34.0-e1a79c1-r2 refuse a record with `base`
+(they fail closed). `runtime` (the artifact layout `<out>/bin`) is never part of
 `all`; ask for it, and keep such a dir apart from one you verify or upload.
 
 An app pins `<id>` and its digest (or reads `release.json` and pins
@@ -157,4 +207,7 @@ recorded in the release notes.
 
 Releases are kept. A build directory can be reclaimed once its runtime is
 either released or superseded and no app pins it; R2 objects of a release are
-never garbage-collected while any app's pin names the release.
+never garbage-collected while any app's pin names the release. A first cut's
+tag and GitHub assets are kept while any re-cut references it (its
+by-reference fetches read them); a re-cut's R2 prefix is a full copy,
+independent of the base's.
