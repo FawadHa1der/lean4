@@ -9,13 +9,61 @@
 import { createHash } from "node:crypto";
 import { RELEASE_SCHEMA, buildIdFromSha256, isBuildId, isSha256Hex, parsePatchId } from "./artifact-id.mjs";
 
-export const RELEASE_KEY_ORDER = [
-  "schema", "id", "lean", "kernel", "gate", "runtime", "packs", "native64",
+export const RELEASE_KEY_ORDER = Object.freeze([
+  "schema", "id", "base", "lean", "kernel", "gate", "runtime", "packs", "native64",
   "docker", "mathlib", "modules", "hosting", "tools", "notes", "files", "digest",
-];
+]);
 
 /** Release ids: lean-<upstream tag>-<kernel commit, 7 hex>[-r<N>] (N ≥ 2: a tools-only re-cut). */
 export const RELEASE_ID = /^lean-(v\d+\.\d+\.\d+(?:-rc\d+)?)-([0-9a-f]{7})(?:-r([2-9]|[1-9]\d+))?$/;
+/** A record digest, as `--digest` and `base.digest` spell it. */
+export const RELEASE_DIGEST = /^sha256:[0-9a-f]{64}$/;
+/** The first cut a re-cut id belongs to (lean-v4.34.0-e1a79c1-r3 → lean-v4.34.0-e1a79c1); null for a first cut or a non-id. */
+export const firstCutOf = (id) => {
+  const m = RELEASE_ID.exec(typeof id === "string" ? id : "");
+  return m?.[3] ? `lean-${m[1]}-${m[2]}` : null;
+};
+
+// ---------- a re-cut by reference (formats/release.md, "Re-cut by reference") ----------
+/** The only directory a re-cut by reference changes; every other file is its base's. */
+export const RECUT_OWN_DIRS = Object.freeze(["tools"]);
+export const isRecutOwnPath = (p) => typeof p === "string" && RECUT_OWN_DIRS.some((d) => p.startsWith(`${d}/`));
+/** Record fields a re-cut by reference has from its base, compared as JSON text (key order included). */
+export const RECUT_SAME_KEYS = Object.freeze(["schema", "lean", "kernel", "runtime", "packs", "native64", "docker", "mathlib", "modules", "hosting"]);
+/** gate fields that are the base's: the gate ran on the same binary (`checks` is the new tools' count). */
+export const RECUT_SAME_GATE_KEYS = Object.freeze(["passed", "commit", "wasmSha256"]);
+
+/**
+ * The by-reference rule (formats/release.md, "Equality with the base"), given the base's
+ * release.json: the base passes checkReleaseRecord, is exactly the release `base` pins (id and
+ * digest) and names no base of its own; RECUT_SAME_KEYS and the gate's binding equal the base's;
+ * tools.package is the base's and tools.version is not; and the files outside RECUT_OWN_DIRS are
+ * exactly the base's (path, bytes, sha256: none missing, none extra). Returns the problems (empty
+ * = the rule holds). Pure: the caller reads the base's record from wherever the base is.
+ */
+export function checkRecutBase(r, b) {
+  if (!r?.base) return ["release.json names no base"];
+  if (!b || typeof b !== "object" || Array.isArray(b)) return ["the base's release.json is not an object"];
+  const p = checkReleaseRecord(b).map((q) => `the base's release.json: ${q}`);
+  if (b.id !== r.base.id) p.push(`the base's release.json is ${JSON.stringify(b.id)}, the record names ${r.base.id}`);
+  if (b.digest !== r.base.digest) p.push(`the base's release.json digest is ${b.digest}, the record pins ${r.base.digest}`);
+  if (b.base !== undefined) p.push(`the base ${b.id} is itself a re-cut by reference (of ${b.base?.id}): a base is a first cut`);
+  const same = (x, y) => JSON.stringify(x) === JSON.stringify(y);
+  for (const k of RECUT_SAME_KEYS) if (!same(r[k], b[k])) p.push(`${k} differs from the base's (a re-cut by reference changes ${RECUT_OWN_DIRS.join(", ")}/ only)`);
+  for (const k of RECUT_SAME_GATE_KEYS) if (!same(r.gate?.[k], b.gate?.[k])) p.push(`gate.${k} differs from the base's`);
+  if (r.tools?.package !== b.tools?.package) p.push(`tools.package ${JSON.stringify(r.tools?.package)} is not the base's ${JSON.stringify(b.tools?.package)}`);
+  if (r.tools?.version === b.tools?.version) p.push(`tools.version ${r.tools?.version} is the base's: a re-cut ships other tools`);
+  const theirs = new Map((Array.isArray(b.files) ? b.files : []).filter((f) => !isRecutOwnPath(f?.path)).map((f) => [f.path, f]));
+  for (const f of Array.isArray(r.files) ? r.files : []) {
+    if (isRecutOwnPath(f?.path)) continue;
+    const g = theirs.get(f?.path);
+    if (!g) p.push(`files[]: ${f?.path} is not a file of the base`);
+    else if (g.bytes !== f.bytes || g.sha256 !== f.sha256) p.push(`files[]: ${f.path} is not the base's bytes`);
+    theirs.delete(f?.path);
+  }
+  for (const q of theirs.keys()) p.push(`files[]: the base's ${q} is missing`);
+  return p;
+}
 
 export function expectedReleaseId(upstreamTag, kernelCommit, recut) {
   return `lean-${upstreamTag}-${kernelCommit.slice(0, 7)}${recut ? `-r${recut}` : ""}`;
@@ -83,9 +131,11 @@ export function servedPath(url, fromRel = "") {
 /**
  * Every structural rule of a lean4-wasm64.release/v1 record that needs no file
  * bytes (formats/release.md): schema, canonical keys, self-digest, the id rule,
- * the gate binding, the build-id rule, safe paths, and that every path the
- * record names is one of its files. Returns the problems (empty = valid). Fetch
- * runs it before any I/O; verify-release and release.mjs run it too.
+ * the gate binding, the build-id rule, safe paths, that every path the record
+ * names is one of its files, and, for a re-cut by reference, the structure of
+ * `base` (the comparison with the base is checkRecutBase). Returns the problems
+ * (empty = valid). Fetch runs it before any I/O; verify-release and release.mjs
+ * run it too.
  */
 export function checkReleaseRecord(r) {
   const p = [];
@@ -138,6 +188,26 @@ export function checkReleaseRecord(r) {
   closed("docker", r.docker, ["tag", "recipeCommit", "imageId", "base"]);
   closed("mathlib", r.mathlib, ["commit", "tag"]);
   closed("tools", r.tools, ["package", "version", "tgz", "commit"]);
+  // a re-cut by reference: its structure here, needing no other record (rules S1-S5); the
+  // comparison with the base is checkRecutBase
+  if (r.base !== undefined) {
+    if (!r.base || typeof r.base !== "object" || Array.isArray(r.base)) p.push("base is not an object {id, digest}");
+    else {
+      closed("base", r.base, ["id", "digest"]);
+      const first = firstCutOf(r.id);
+      if (!first) p.push(`base: only a re-cut (lean-<tag>-<kernel7>-rN) names a base, ${JSON.stringify(r.id)} is not one`);
+      else if (r.base.id !== first) p.push(`base.id ${JSON.stringify(r.base.id)} is not ${first}: a re-cut by reference names its first cut`);
+      if (!RELEASE_DIGEST.test(r.base.digest ?? "")) p.push("base.digest is not sha256:<64 lowercase hex>");
+    }
+    if (!r.tools) p.push("a re-cut by reference carries tools: tools missing");
+    else {
+      const recut = RELEASE_ID.exec(r.id ?? "")?.[3];
+      if (r.tools.tgz !== `tools/${r.tools.package}-${r.tools.version}.tgz`) p.push(`tools.tgz ${JSON.stringify(r.tools.tgz)} is not tools/<package>-<version>.tgz`);
+      if (recut && !String(r.tools.version ?? "").endsWith(`-r${recut}`)) p.push(`tools.version ${JSON.stringify(r.tools.version)} does not end in -r${recut}, the re-cut's number`);
+    }
+    const own = (Array.isArray(r.files) ? r.files : []).filter((f) => isRecutOwnPath(f?.path)).map((f) => f.path);
+    if (own.length !== 1 || own[0] !== r.tools?.tgz) p.push(`a re-cut by reference has exactly one file under tools/, tools.tgz — got ${own.join(", ") || "none"}`);
+  }
   for (const k of Array.isArray(r.packs) ? r.packs : []) {
     closed(`packs[${k?.id}]`, k, ["id", "manifest", "release", "modules", "rawBytes", "rawSha256", "roots", "lean", "mathlib", "note"]);
     closed(`packs[${k?.id}].lean`, k?.lean, ["version", "compiler", "gitRevision"]);

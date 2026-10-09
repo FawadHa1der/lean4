@@ -6,9 +6,11 @@ is placed on that commit — the pinned tree contains its own digest root.
 
 ## Canonical form
 
-- Keys in this order: `schema`, `id`, `lean`, `kernel`, `gate`, `runtime`,
-  `packs`, `native64`, `docker`, `mathlib`, `modules`, `hosting`, `tools`,
-  `notes`, `files`, `digest`. Unknown keys are invalid.
+- Keys in this order: `schema`, `id`, `base`, `lean`, `kernel`, `gate`,
+  `runtime`, `packs`, `native64`, `docker`, `mathlib`, `modules`, `hosting`,
+  `tools`, `notes`, `files`, `digest`. `base` is optional: only a re-cut by
+  reference has it (below); a record without it has the same order and digest
+  as before `base` existed. Unknown keys are invalid.
 - The file is `JSON.stringify(record, null, 2)` followed by one newline.
 - `digest` = `"sha256:" + sha256(JSON.stringify(record without digest, null, 2))`.
   A reader recomputes it from the parsed object (`JSON.parse` keeps key order).
@@ -21,6 +23,7 @@ is placed on that commit — the pinned tree contains its own digest root.
 |---|---|---|---|
 | `schema` | string | `"lean4-wasm64.release/v1"` | — |
 | `id` | string | release id (formats/README.md rule 5) | upstream tag + kernel commit |
+| `base` | object, optional | a re-cut by reference only: `{id, digest}`, the first cut whose files it shares and that release's `release.json` digest (section "Re-cut by reference") | the cutter (`stage-release.sh --base`) |
 | `lean.version` | string | the Lean version; equals the runtime manifest's `leanVersion` | runtime manifest |
 | `lean.upstreamTag` | string | the `leanprover/lean4` tag merged into the line | the import |
 | `kernel.repo`, `kernel.branch` | string | `https://github.com/FawadHa1der/lean4`, `qed64-wasm64` | — |
@@ -63,6 +66,89 @@ is placed on that commit — the pinned tree contains its own digest root.
 | `mathlib` | optional `{commit, tag}` for Mathlib packs |
 | `note` | optional remark (e.g. a transport copied from served bytes rather than re-packed) |
 
+## Re-cut by reference
+
+A tools-only re-cut `<id>-r<N>` (formats/README.md rule 5) may be cut **by
+reference**. It names its first cut in `base` and shares every file outside
+`tools/` with it. The record stays complete: `files[]` lists every file of the
+re-cut, the base's included, so `--id <id> --digest <digest>` pins every byte.
+
+### Structure (`checkReleaseRecord`; needs no other record)
+
+When `base` is present:
+
+1. `base` is an object with exactly the keys `id` and `digest`.
+2. `id` is a re-cut, `lean-<tag>-<kernel7>-r<N>`.
+3. `base.id` is `id` without its `-r<N>`: the first cut of the same upstream tag
+   and kernel commit. A base is therefore never a re-cut and never names a
+   base of its own.
+4. `base.digest` is `sha256:` + 64 lowercase hex digits.
+5. `tools` is present; `tools.tgz` is `tools/<tools.package>-<tools.version>.tgz`
+   and `tools.version` ends in `-r<N>`; and the only file of `files[]` under
+   `tools/` is `tools.tgz`.
+
+### Equality with the base (`checkRecutBase(record, base)`; needs the base's `release.json`)
+
+1. The base's `release.json` passes every rule of this document. Its `id` is
+   `base.id` and its `digest` is `base.digest`. It has no `base`.
+2. These fields equal the base's, compared as `JSON.stringify` text (key order
+   included): `schema`, `lean`, `kernel`, `runtime`, `packs`, `native64`,
+   `docker`, `mathlib`, `modules`, `hosting`. So do `gate.passed`,
+   `gate.commit` and `gate.wasmSha256`.
+3. `tools.package` is the base's; `tools.version` is not.
+4. `files[]` outside `tools/` is exactly the base's `files[]` outside `tools/`:
+   the same paths, and for each path the same `bytes` and `sha256`. No path is
+   missing and none is extra.
+
+A re-cut by reference may therefore change only `id`, `base`, `gate.checks`
+(the count from the new tools' gate, run on the base's runtime and
+`lean-lib`), `tools`, `notes`, its `tools/` entry in `files[]`, and `digest`. A
+change to anything else needs a full release, or a re-cut by value. By
+convention, `notes` lists the re-cut's own notes first, then the base's notes
+verbatim.
+
+### Where the bytes are
+
+| Copy | Holds |
+|---|---|
+| GitHub Release `<id>-r<N>` | flat: only `tools/<tgz>`, `release.json`, `SHA256SUMS` |
+| GitHub Release `<id>` (the base) | flat: every other file of the re-cut (they are its own assets) |
+| R2 `lean4-wasm64/<id>-r<N>/` | served, complete: the shared files copied server-side from `lean4-wasm64/<id>/`, then the re-cut's own files (HOSTING.md) |
+| a mirror (`fetch --only all`) | served, complete |
+
+`SHA256SUMS` keeps its definition: every file of `files[]`, plus
+`release.json`. A re-cut by reference's `SHA256SUMS` therefore names files
+that are assets of the base's GitHub Release, not of its own.
+
+### Reading a re-cut by reference
+
+- `fetch` from a **flat** source (a GitHub release download URL, a flat dir):
+  `release.json` and `tools/*` come from `--from`; every other file comes from
+  the base. The base is at `--base-from <url|dir>`, or else at the sibling
+  `<parent of --from>/<base.id>/` when the last path segment of `--from` is the
+  re-cut's `id` (a directory sibling's layout is inferred from the sibling
+  itself). Before writing anything, fetch reads the base's `release.json`
+  there and refuses (exit 1) unless the equality rules hold; each file is then
+  verified against the re-cut's `files[]`. Files are routed by path, never by
+  falling back after a miss. A fetch that selects only `tools/` needs no base.
+- `fetch` from a **served** source (an R2 prefix, a mirror dir) reads every
+  file from `--from`: that copy is complete under the re-cut's own id.
+  `--base-from` adds the equality check.
+- `verify --release <dir>` checks a complete dir as it checks any release;
+  `--base <dir|release.json>` adds the equality check. Without `--base`, one
+  `info` line says that the base was not compared.
+- `release.mjs` writes `base` only from `config.base`; it then needs
+  `--base <the base's dir or release.json>` and refuses unless the equality
+  rules hold.
+
+### Older readers
+
+A reader written before `base` existed (lean4-wasm64 up to and including
+4.34.0-e1a79c1-r2) refuses the unknown key (`unknown keys: base`) before it
+reads any other file, so it fails closed. A consumer installs the re-cut's own
+tools first (its tgz is one of the re-cut's own GitHub assets,
+`…/download/<id>/<basename of tools.tgz>`), then reads the record with them.
+
 ## Release config (input to `release.mjs`)
 
 What cannot be derived from the release directory is passed as a JSON file:
@@ -78,7 +164,8 @@ What cannot be derived from the release directory is passed as a JSON file:
   "modules": { "essential": "lists/essential-modules.txt", "extra": "lists/extra-modules.txt" },
   "tools": { "package": "lean4-wasm64", "version": "…", "tgz": "tools/lean4-wasm64-….tgz" },
   "hosting": { … }, "notes": [ … ],
-  "id": "optional; must equal lean-<upstreamTag>-<kernel7>[-rN]", "recut": "optional N"
+  "id": "optional; must equal lean-<upstreamTag>-<kernel7>[-rN]", "recut": "optional N",
+  "base": "optional { id, digest }: a re-cut by reference (with recut); release.mjs then needs --base"
 }
 ```
 
@@ -95,4 +182,7 @@ stale part); a file is a dotfile, has an unsafe name or is not a regular file
 (a symlink is never uploaded); `runtime/bin` holds `lean.js`, `lean.wasm` or a
 `package.json` (in any letter case); or the finished record
 fails `checkReleaseRecord` (release-record.mjs) — the same structural check
-`fetch` runs before writing anything and `verify` runs first.
+`fetch` runs before writing anything and `verify` runs first; or, for a re-cut
+by reference: a `config.base` without `--base`, a `--base` without
+`config.base`, a `--base` record that is not `config.base` (id and digest), or
+a finished record that breaks the equality rules with it (`checkRecutBase`).

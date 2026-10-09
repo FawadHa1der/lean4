@@ -2,7 +2,8 @@
 
 The specification of what a lean4-wasm64 toolchain release contains and how its
 pieces identify and pair with each other. `artifact-id.mjs` implements the rules
-below; `verify-release.mjs` checks every one of them on a release directory.
+below; `verify-release.mjs` checks every one of them on a release directory (a
+re-cut by reference against its base too, given `--base`).
 
 | Document | Format id | Written by | Read by |
 |---|---|---|---|
@@ -45,7 +46,9 @@ ring) is [`../../EMBED-RUNTIME.md`](../../EMBED-RUNTIME.md); the release process
    `comparePatchIds`.
 5. **Release id.** `lean-<upstream tag>-<first 7 hex digits of the kernel
    commit>`, e.g. `lean-v4.34.0-a8817d0`; a tools-only re-cut of the same
-   runtime and packs appends `-r2`, `-r3`, …
+   runtime and packs appends `-r2`, `-r3`, … A re-cut may be cut **by
+   reference**: its record names its first cut in `base`, and every file
+   outside `tools/` is that release's (release.md, "Re-cut by reference").
 
 ## Pairing rules (what must match, and what is only recorded)
 
@@ -86,7 +89,10 @@ inside the manifests are site-absolute — `/runtime/chunks/<name>` and
 `/profiles/<name>`, nothing else: a site serves the release by mapping
 `/runtime/*` and `/profiles/*` — except its own `/profiles/index.json` — onto
 the release prefix under its own origin (HOSTING.md; `release.json`
-`hosting.siteOwned`).
+`hosting.siteOwned`). A re-cut by reference is the exception: its GitHub
+Release carries only `tools/<tgz>`, `release.json` and `SHA256SUMS`, and
+`fetch` takes its other files from the base's GitHub Release. Its R2 prefix is
+complete.
 
 ## Pinning a release
 
@@ -94,4 +100,7 @@ A record's self-digest proves only that it is consistent — anyone serving a
 release.json can recompute it. A consumer pins **id and digest** (`fetch --id
 <id> --digest sha256:<hex>`; the tag message and the GitHub release notes carry
 the digest), and everything else follows from the record: each file's sha256,
-the runtime's build id, each pack's raw digest.
+the runtime's build id, each pack's raw digest. A re-cut by reference is pinned
+the same way: its `files[]` lists every file, the base's included; `base.digest`
+pins the base's record, which a reader compares whenever it reads files from
+the base.
