@@ -61,9 +61,9 @@ check whether upstream absorbed the gates, then refresh it with
    (stdin ring), `util/shell.cpp` (no second thread under Emscripten).
 3. **Build breaks / gate failures** — fix on the import branch as ordinary
    commits on top of the merge. Never amend the merge once anyone has seen it.
-4. **Exports** — what the IR interpreter resolves by name (every boxed
-   wrapper, `@[export]` function, module initializer and constant cell;
-   `gen-exports.py` says why each is a correctness requirement) is not exported
+4. **Exports** — what the IR interpreter resolves by name (every boxed wrapper,
+   all-object function without one, `@[export]` function, module initializer
+   and constant cell; `gen-exports.py` says why each is there) is not exported
    since patch 0039: it is a table generated from the build's own C and the
    archives the link uses, cross-checked against each other (the build fails if
    they disagree, if a category falls below its floor, or if the link binds a

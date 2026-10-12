@@ -11,8 +11,9 @@ the word the legacy checks reject.
   `[symtab] hit cell l_Lean_Meta_simpExtension`.
 * G5, plain functions: `symtabProbe`'s IR calls `Lean.Name.append` (and `List.range`), all-object
   core functions without a boxed wrapper (`l_Lean_Name_append`, kind plain). With the plain
-  functions in the table the call runs native (`[symtab] hit plain l_Lean_Name_append`); without
-  them it is interpreted, after a miss on `l_Lean_Name_append___boxed` and on `l_Lean_Name_append`.
+  functions in the table (0039b) the call runs native, after a miss on `l_Lean_Name_append___boxed`
+  (`[symtab] hit plain l_Lean_Name_append`); without them (0039) it is interpreted, after a miss on
+  `l_Lean_Name_append___boxed` and on `l_Lean_Name_append`.
 * G6, timing (informational): `symtabProbe 20000`, timed with `IO.monoMsNow`.
 -/
 

@@ -4,12 +4,13 @@ Released under Apache 2.0 license as described in the file LICENSE.
 The WebAssembly runtime's native-symbol table (patch 0039, wasm64-build/PATCHES.md).
 
 The IR interpreter finds native code by name (`lookup_symbol_in_cur_exe`: boxed wrappers,
-@[export] functions, constant cells, module initializers). Natively that is dlsym over the
-dynamic symbol table (`lean` links with -rdynamic). Under Emscripten dlsym searched the wasm
-EXPORTS, so all ~106k such names were exported, and every pthread Worker's glue bound and
-re-registered each of them (~129 MiB of JS heap per Worker; QED64 HARDENING #55). Instead,
-wasm64-build/gen-exports.py writes lean_wasm_symtab.c from the build's own C: every name the
-interpreter may ask for, sorted bytewise and front-coded (a whole name heads every block of
+all-object functions without one, @[export] functions, constant cells, module initializers).
+Natively that is dlsym over the dynamic symbol table (`lean` links with -rdynamic). Under
+Emscripten dlsym searched the wasm EXPORTS, so ~106k such names were exported (not the all-object
+functions without a wrapper: those ran interpreted until 0039b), and every pthread Worker's glue
+bound and re-registered each of them (~129 MiB of JS heap per Worker; QED64 HARDENING #55).
+Instead, wasm64-build/gen-exports.py writes lean_wasm_symtab.c from the build's own C: every name
+the interpreter may ask for, sorted bytewise and front-coded (a whole name heads every block of
 `lean_wasm_symtab_block` names, each other one is [shared-prefix byte][suffix] NUL), with its kind
 and its address — a function's table index or a cell's address, both fixed at link time. It is
 linked into `lean` only (src/stdlib.make.in). This file searches it: a binary search over the

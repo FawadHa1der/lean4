@@ -979,24 +979,24 @@ if(CMAKE_SYSTEM_NAME MATCHES "Emscripten")
   # in this file.
   # `lean` links STATICALLY (patch 0039: no MAIN_MODULE). The IR interpreter
   # finds native code by name — boxed wrappers (mandatorily for body-less
-  # @[extern] decls like the IO primitives), @[export] functions, constant
-  # cells, module initializers — in a table linked into the module:
-  # lean_wasm_symtab.c, generated from this build's C by
-  # wasm64-build/gen-exports.py --symtab (build.sh step 4b) and searched by
-  # library/wasm_symtab.cpp. Until 0039, MAIN_MODULE=2 kept dlsym() working
-  # over the wasm export table instead, so ~106k names were exported, and
-  # every pthread Worker's glue bound and re-registered each of them (~129 MiB
-  # of JS heap per Worker). emscripten-exports.txt now holds only what
-  # JavaScript calls (emscripten-exports.seed.txt, the JS contract); with
-  # ERROR_ON_UNDEFINED_SYMBOLS=0 a listed name that is not defined silently
-  # leaves the export list, which the gate's S2 check catches. Other Lean
-  # functions stay callable through their IR (shipped as .ir parts), just
-  # interpreted instead of native. Nothing loads side modules (dynlib.cpp
-  # refuses), so the dynamic linking that emcc calls experimental with
-  # pthreads is gone, and with it the GOT and the per-thread dlsync; at -O3
-  # the glue's raw wasm import/export names are now minified (the
-  # Module["_lean_…"] names stay). -fPIC (above) stays: PIC objects link into a
-  # fixed-address module, as they did under MAIN_MODULE=2 (whose main module
+  # @[extern] decls like the IO primitives), all-object functions without one
+  # (0039b), @[export] functions, constant cells, module initializers — in a
+  # table linked into the module: lean_wasm_symtab.c, generated from this
+  # build's C by wasm64-build/gen-exports.py --symtab (build.sh step 4b) and
+  # searched by library/wasm_symtab.cpp. Until 0039, MAIN_MODULE=2 kept
+  # dlsym() working over the wasm export table instead, so ~106k names were
+  # exported, and every pthread Worker's glue bound and re-registered each of
+  # them (~129 MiB of JS heap per Worker). emscripten-exports.txt now holds
+  # only what JavaScript calls (emscripten-exports.seed.txt, the JS contract);
+  # with ERROR_ON_UNDEFINED_SYMBOLS=0 a listed name that is not defined
+  # silently leaves the export list, which the gate's S2 check catches. Code
+  # the module does not define (packages) and closed terms (file-local in the
+  # C) stay callable through their IR, interpreted. Nothing loads side modules
+  # (dynlib.cpp refuses), so the dynamic linking that emcc calls experimental
+  # with pthreads is gone, and with it the GOT and the per-thread dlsync; at
+  # -O3 the glue's raw wasm import/export names are now minified (the
+  # Module["_lean_…"] names stay). -fPIC (above) stays: PIC objects link into
+  # a fixed-address module, as they did under MAIN_MODULE=2 (whose main module
   # was not relocatable either), and dropping it would change every object.
   # ALLOW_TABLE_GROWTH=1 keeps what MAIN_MODULE set. --emit-symbol-map writes
   # bin/lean.js.symbols (index:name of every function), the crash-triage map

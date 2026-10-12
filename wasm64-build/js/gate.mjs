@@ -15,8 +15,8 @@
 //  0039 (static checks first, the rest folded into the runs above): the JavaScript export contract
 //     and the glue surface hosts reach into (S2, S6: every runtime), no generated export and a
 //     statically linked module (S1), the native-symbol table intact (G2), core initializers and
-//     constant cells found in it (G3, G4), plain core functions (G5), no lookup lost (G7).
-//     Skipped, with a note, on a runtime before 0039.
+//     constant cells found in it (G3, G4), plain core functions run native (G5, 0039b), no lookup
+//     lost (G7). Skipped, with a note, on a runtime before 0039.
 // Every check prints ok or FAIL; exits nonzero if any failed.
 //
 // Usage: node gate.mjs --artifact <dir> [--baseline-exports <lean.wasm or name list>]
@@ -196,9 +196,10 @@ const baseline = (() => {
   if (w.ok) return new Set(w.exports.keys());
   return new Set(bytes.toString("utf8").split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#")));
 })();
-// Patch 0039b puts the plain functions into the table: G5 then requires Lean.Name.append to run
-// native; until then it reports which way the call went.
-const EXPECT_PLAIN_NATIVE = false;
+// Patch 0039b put the plain functions into the table: G2 requires plain entries and G5 requires
+// Lean.Name.append to run native. False gates a table built without them (gen-exports.py
+// INCLUDE_PLAIN = False, 0039's, for an A/B): G5 then only reports which way the call went.
+const EXPECT_PLAIN_NATIVE = true;
 
 // The runtime's counters (LEAN4_WASM64_RTSTATS=1): node-runner answers a printed line containing
 // `[rtstats?]` with `[rtstats] <json>` right after it (runtime-knobs.mjs runtimeStats).
@@ -299,7 +300,8 @@ if (is0039) {
     if (st.status !== 0 || st.cachedStatus !== 0) problems.push(`self-check status ${st.status} (cached ${st.cachedStatus}), not 0`);
     if (sum !== st.count) problems.push(`its kinds add up to ${sum}, not its ${st.count} entries`);
     for (const k of ["boxed", "export", "cell", "init", "init_rt", "init_meta"]) if (!(st.kinds[k] > 0)) problems.push(`no ${k} entry`);
-    if (EXPECT_PLAIN_NATIVE ? !(st.kinds.plain > 0) : st.kinds.plain !== 0) problems.push(`${st.kinds.plain} plain entries`);
+    if (EXPECT_PLAIN_NATIVE ? !(st.kinds.plain > 0) : st.kinds.plain !== 0)
+      problems.push(EXPECT_PLAIN_NATIVE ? "no plain entry (0039b: gen-exports.py INCLUDE_PLAIN)" : `${st.kinds.plain} plain entries, with EXPECT_PLAIN_NATIVE off`);
     if (manifest) {
       if (st.count !== manifest.count) problems.push(`${st.count} entries, the manifest ${manifest.count}`);
       for (const [k, n] of Object.entries(manifest.counts ?? {})) if (st.kinds[k] !== n) problems.push(`${k} ${st.kinds[k]}, the manifest ${n}`);
@@ -369,7 +371,7 @@ if (is0039) {
   const append = hitAs("l_Lean_Name_append");
   const g5out = /^SYMTAB G5 x0\.x1\.x2$/m.test(legacyOut);
   if (EXPECT_PLAIN_NATIVE) {
-    gate(append === "plain" && g5out, "[0039] G5 interpreted code calls a plain core function natively (Lean.Name.append)",
+    gate(append === "plain" && g5out, "[0039b] G5 interpreted code calls a plain core function natively (Lean.Name.append)",
       `${append ? `hit ${append}` : "not found: interpreted"}${g5out ? "" : "; the probe's output is wrong"}`);
   } else {
     gate(g5out, "[0039] G5 interpreted code calling plain core functions computes the right value", g5out ? "" : "the probe's output is wrong");

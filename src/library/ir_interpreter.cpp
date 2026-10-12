@@ -22,9 +22,10 @@ slots by adding the current base pointer to the variable index. Further stacks a
 stack metadata. The interpreted IR is taken directly from the elab_environment. Whenever possible, we try to switch to native
 code by checking for the mangled symbol via dlsym/GetProcAddress (on WebAssembly: a table linked into the module, see
 `wasm_symtab.cpp`), which is also how we can call external functions
-(which only works if the file declaring them has already been compiled). We always call the "boxed" versions of native
-functions, which have a (relatively) homogeneous ABI that we can use without runtime code generation; see also
-`call/lookup_symbol` below.
+(which only works if the file declaring them has already been compiled). We call the "boxed" versions of native
+functions where they exist, which have a (relatively) homogeneous ABI that we can use without runtime code generation;
+a function without one takes only owned objects and returns an object (`requiresBoxedVersion`), the same ABI, so we
+call it directly (on WebAssembly since patch 0039b); see also `call/lookup_symbol` below.
 
 */
 #include <string>
@@ -1085,7 +1086,8 @@ public:
             // First allocate a closure with zero fixed parameters. This is slightly wasteful in the under-application
             // case, but simpler to handle.
             if (e.m_native.m_addr) {
-                // `lookup_symbol` always prefers the boxed version for compiled functions, so nothing to do here
+                // `lookup_symbol` always prefers the boxed version for compiled functions, and one without a boxed
+                // version takes only owned objects, so nothing to do here
                 r = alloc_closure(e.m_native.m_addr, arity, 0);
             } else {
                 // `lookup_symbol` does not prefer the boxed version for interpreted functions, so check manually.

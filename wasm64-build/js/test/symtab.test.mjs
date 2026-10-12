@@ -58,6 +58,7 @@ function fixtureTree() {
 }
 const TABLE = {
   boxed: ["l_Foo_baz___boxed", "l_Lean_MVarId_intro1___00__boxed", ...gens],
+  plain: ["l_Foo_bar"],
   export: ["lean_my_export"],
   cell: ["l_Foo_cell", "l_Foo_ground", "l_Foo_flag", `l_${LONG}x`, `l_${LONG}y`],
   init: ["Init", "Std", "Lean", "Init_Core"].map((m) => `initialize_${m}`),
@@ -68,7 +69,7 @@ const KINDS = ["boxed", "plain", "export", "cell", "init", "init_rt", "init_meta
 /** nm's output for the fixture's symbols (`extra`: more lines), and a fake nm that prints the file it is given. */
 function fakeArchives(dir, extra = []) {
   const lines = [...Object.entries(TABLE).flatMap(([k, ns]) => ns.map((n) => `00000000 ${k === "cell" ? "D" : "T"} ${n}`)),
-    "00000000 T l_Foo_bar", "00000000 T l_Foo_baz", "00000000 T l_Lean_MVarId_intro1__", ...extra];
+    "00000000 T l_Foo_baz", "00000000 T l_Lean_MVarId_intro1__", ...extra];
   const libs = ["libInit.a", "libStd.a", "libLean.a"].map((l, i) => {
     const p = path.join(dir, l);
     write(p, `\n${l}(Core.c.o.export):\n${lines.filter((_, j) => j % 3 === i).join("\n")}\n`);
@@ -120,15 +121,15 @@ test("gen-exports.py: the table's selection, kinds, front coding and manifest; t
   const r = gen(f, ["--symtab", path.join(out, "t.c"), "--symtab-manifest", path.join(out, "t.json"), "--archives", ...libs, "--nm", nm, "--no-floors"]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.match(r.stdout, /the archives \(\d+ symbols, .*fake-nm\) and the C agree/);
-  assert.match(r.stdout, /plain functions left out: 1/);
+  assert.match(r.stdout, /plain functions in the table: 1/);
   assert.match(r.stdout, /SEED NAMES NO LONGER DEFINED ANYWHERE IN src\/ — dropped \(1\):\n  _lean_gone/);
   const tu = fs.readFileSync(path.join(out, "t.c"), "utf8");
   const m = JSON.parse(fs.readFileSync(path.join(out, "t.json"), "utf8"));
   const want = Object.fromEntries(KINDS.map((k) => [k, (TABLE[k] ?? []).length]));
   assert.deepEqual(m.counts, want);
   assert.equal(m.count, Object.values(want).reduce((a, b) => a + b));
-  assert.equal(m.include_plain, false);
-  assert.equal(m.plain_candidates, 1); // l_Foo_bar; l_Foo_baz and l_Lean_MVarId_intro1__ have wrappers
+  assert.equal(m.include_plain, true);
+  assert.equal(m.plain_candidates, 1); // l_Foo_bar (0039b: in the table); l_Foo_baz and l_Lean_MVarId_intro1__ have wrappers
   assert.equal(m.source, "archives");
   assert.equal(m.archives_agree, true);
   assert.equal(m.modules, 4);
@@ -150,7 +151,9 @@ test("gen-exports.py: the table's selection, kinds, front coding and manifest; t
   assert.match(tu, /^extern const lean_object\* l_Foo_ground;$/m);
   assert.match(tu, /^extern uint8_t l_Foo_flag;$/m);
   assert.match(tu, /^lean_object\* runtime_initialize_Init_Core\(uint8_t\);$/m);
-  assert.doesNotMatch(tu, /l_Foo_bar\b|l_Foo_baz\(|l_Other_external|l_Lean_MVarId_intro1__\(/); // plain, unboxed, foreign: out
+  // a plain function by its prototype (not its definition line); unboxed ones with a wrapper and foreign ones stay out
+  assert.match(tu, /^LEAN_EXPORT lean_object\* l_Foo_bar\(lean_object\*, lean_object\*\);$/m);
+  assert.doesNotMatch(tu, /l_Foo_bar\(lean_object\* x_1|l_Foo_baz\(|l_Other_external|l_Lean_MVarId_intro1__\(/);
   assert.match(tu, /^#include <stdint.h>$/m);
   assert.doesNotMatch(tu, /lean\.h/);
   // the export list: the seed's names, comments gone, the vanished one dropped
@@ -180,7 +183,7 @@ test("gen-exports.py: the table's selection, kinds, front coding and manifest; t
   assert.match(c.stdout, /CHECK FAILED: the export list on disk is not this tree's \(\+0 -1\)/);
 });
 
-test("gen-exports.py fails closed: archives that disagree with the C, an nm that cannot read them, floors, a missing prototype, --slim", { skip: noPython }, () => {
+test("gen-exports.py fails closed: archives that disagree with the C, an nm that cannot read them, floors, a plain function that is not all-object, a missing prototype, --slim", { skip: noPython }, () => {
   const f = fixtureTree();
   const outs = (dir) => ["--symtab", path.join(dir, "t.c"), "--symtab-manifest", path.join(dir, "t.json")];
   const nothingWritten = (dir) => {
@@ -228,10 +231,28 @@ test("gen-exports.py fails closed: archives that disagree with the C, an nm that
   // B2: the real floors refuse a tree this small
   r = gen(f, outs(path.join(f.root, "o7")));
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /below its floors \(B2\) — nothing written: boxed 42 < 80000; export 1 < 100; cell 5 < 7000; initializers 4\/4\/4 for 4 C files/);
+  assert.match(r.stderr, /below its floors \(B2\) — nothing written: boxed 42 < 80000; plain 1 < 25000; export 1 < 100; cell 5 < 7000; initializers 4\/4\/4 for 4 C files/);
   nothingWritten(path.join(f.root, "o7"));
-  // a selected function whose prototype the C does not have on one line
   const core = path.join(f.temp, "Init", "Core.c");
+  // a plain function (no wrapper) that does not take 1 to 16 objects and return one: a scalar in its
+  // signature means a missed wrapper, and the interpreter would call it with boxed values
+  const coreText = fs.readFileSync(core, "utf8");
+  for (const [name, proto] of [["l_Foo_scalar", "LEAN_EXPORT uint8_t l_Foo_scalar(lean_object*);"],
+    ["l_Foo_usize", "LEAN_EXPORT lean_object* l_Foo_usize(size_t, lean_object*);"],
+    ["l_Foo_wide", `LEAN_EXPORT lean_object* l_Foo_wide(${Array(17).fill("lean_object*").join(", ")});`]]) {
+    fs.writeFileSync(core, `${coreText}${proto}\n`);
+    r = gen(f, [...outs(path.join(f.root, "o10")), "--no-floors"]);
+    assert.equal(r.status, 1, name);
+    assert.match(r.stderr, new RegExp(`plain function ${name} \\(.*Core\\.c\\) does not take 1 to 16 objects and return one`));
+    nothingWritten(path.join(f.root, "o10"));
+  }
+  fs.writeFileSync(core, `${coreText}LEAN_EXPORT lean_object* l_Foo_sixteen(${Array(16).fill("lean_object*").join(", ")});\n`);
+  r = gen(f, [...outs(path.join(f.root, "o11")), "--no-floors"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(fs.readFileSync(path.join(f.root, "o11", "t.c"), "utf8"), /^  \(void\*\)l_Foo_sixteen,$/m);
+  fs.writeFileSync(core, coreText);
+  fs.rmSync(path.join(f.src, "emscripten-exports.txt"));
+  // a selected function whose prototype the C does not have on one line
   fs.writeFileSync(core, fs.readFileSync(core, "utf8").replace("LEAN_EXPORT lean_object* lean_my_export(lean_object*);", "LEAN_EXPORT lean_object* lean_my_export(lean_object* x) {"));
   r = gen(f, [...outs(path.join(f.root, "o8")), "--no-floors"]);
   assert.equal(r.status, 1);

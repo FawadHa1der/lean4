@@ -607,9 +607,10 @@ through JavaScript (`Object.keys(…).indexOf` over the exports, under the dynam
   with scalar parameters — are not "plain".
 - **The plain functions stay out** (`INCLUDE_PLAIN = False`): the 29,538 all-object `l_*`
   functions without a boxed wrapper, which the interpreter would call natively once in the table,
-  are their own measured step (0039b). This patch resolves exactly what r3 resolved: every name r3
-  exported for the interpreter is in the table but `initialize_libuv` (no Lean module names it),
-  plus `lake_environment_add` (an `@[export]` the old seed lacked) and the 6 wrappers above.
+  are their own measured step (0039b, below). This patch resolves exactly what r3 resolved:
+  every name r3 exported for the interpreter is in the table but `initialize_libuv` (no Lean
+  module names it), plus `lake_environment_add` (an `@[export]` the old seed lacked) and the 6
+  wrappers above.
 - **The lookup** (`src/library/wasm_symtab.cpp`): a binary search over the block heads, then at
   most one block's decodes, in C — no lock (the data is immutable), no JavaScript, no
   initialization, safe from any thread; ~330 ns a hit and ~210 ns a miss on the host over the full
@@ -664,7 +665,7 @@ probe's `SYMTAB` line: a fresh self-check, the kinds and FNV against the build's
 made), G3 (no Init/Std/Lean initializer missed in the legacy and `module` runs, no replay), G4
 (`Lean.versionString` and `Lean.Meta.simpExtension` read from their cells), G5 (a function calling
 plain core functions computes its value; whether `Lean.Name.append` ran native is reported, and
-required once 0039b adds the plain functions), G6 (timing, informational), G7 (no lookup in any
+required since 0039b adds the plain functions), G6 (timing, informational), G7 (no lookup in any
 run missed a `lean_*` name; with `--baseline-exports <r3's lean.wasm>`, none missed a name r3
 exported). `js/probes/symtab.lean` rides on the legacy run. `js/exports-audit.mjs` lists what
 consumer trees touch against the contract and S6: over QED64 (worker, pipeline, lib, tests,
@@ -691,3 +692,68 @@ snapshot init-replay timings against r3; the stack margins above; the B3 allowli
 
 For hosts: the contract and every `Module["_x"]` name are as before. Do not reach a raw
 `wasmExports["x"]` (minified now); expect `Dynlib.load` to fail; rebake snapshots.
+
+## Unreleased: 0039b — wasm: all-object core functions run native from interpreted code
+
+(The heading becomes `## 0039b — … (<commit>)` with the gate's numbers when a release records it,
+as for 0039.)
+
+0039's table holds what r3 resolved. One kind of name was never there: an `l_*` function without a
+boxed wrapper. `lookup_symbol` probes the wrapper first and then the plain stem, and natively
+`dlsym` finds the stem (`lean` links with `-rdynamic`), so native `lean`'s interpreter calls the
+compiled function. On wasm none was ever exported (all ~119k plain `l_*` functions would have
+added ~18 MB of wasm), so interpreted code — package code, `#eval`, the `[init]` replay of
+package modules — interpreted every such core function it called, from the shipped `.ir`.
+
+- **The table holds them** (`gen-exports.py` `INCLUDE_PLAIN = True`), kind `plain`.
+  `requiresBoxedVersion` (LCNF `ExplicitBoxing`) is false exactly when a function has parameters
+  none of which is scalar, borrowed or void, no scalar result, is not `extern` and has at most 16
+  parameters: each plain function takes owned objects and returns one, the ABI `call` (`curry`),
+  `PAp` and `call_boxed` (closures) already use for a wrapper, and with no borrowed parameter
+  `call`'s fix-up for wrappers does not apply. No interpreter code changes (two comments do). The
+  generator refuses a plain entry whose prototype is not `lean_object* f(lean_object*, …)` with 1
+  to 16 parameters — a wrapper the classification missed, as the `_00__boxed` ones once were — and
+  B2 gains a plain floor (25,000).
+- **On v4.34.0** (the 0037 tree): 29,538 plain functions (the design's 29,550 counted the 6
+  `_00__boxed` wrappers and their 6 unboxed siblings, which 0039 classifies correctly), every
+  prototype all-object with 1 to 16 parameters; 135,337 entries (boxed 90,208, plain 29,538,
+  export 228, cell 8,295, initializers 3 × 2,356), names 4,825,216 bytes front-coded (14,273,595
+  raw), FNV `04f6ca09e96eac38`. The 47.8 MB TU compiles for wasm64 in 1.6 s (538 MB RSS) without
+  a warning; its object's data grows from 4.98 to 6.08 MB and its element segment from 0.28 to
+  0.36 MB; each of its 127,042 function references has the signature of its definition in the
+  archives. On the host every name resolves to its own entry, ~290 ns a hit, ~105 ns a miss.
+
+What changes for interpreted code:
+
+- **Speed.** Its calls into these functions are native, as with native `lean`: init replay and
+  package compiles should get faster (to be measured: G6, the persistent compile and snapshot
+  replay timings).
+- **Heartbeats and cancellation** (review N3). Every interpreted call runs `check_system`, which
+  counts one heartbeat and checks for an interrupt; a native callee does neither. Interpreted
+  code that calls core functions spends fewer heartbeats (`maxHeartbeats` outcomes and
+  `count_heartbeats` can move at the margin), and inside a core function a cancellation is
+  noticed only where its compiled code checks for one — both as with native `lean`.
+- **Stack** (review B2). A native frame takes far less engine stack than the interpreter's
+  `eval_body` → `call` recursion, so interpreted recursion through core functions gains headroom.
+  But the table takes the address of 29,538 more functions, so wasm-opt can no longer inline one
+  into its only caller and drop it: a native path can gain a frame. 0036's guard is unchanged
+  (no edit to `stackinfo.cpp`, `interrupt.cpp`, `CoreM.lean`, the probe or the stack sizes);
+  `stack-margin.mjs` records r3 vs 0039 vs 0039b here, with the code growth (estimated at most
+  4.8 MB).
+- **Snapshots.** A partial application of such a function made by interpreted code is a closure
+  over its native address now, not an interpreter stub carrying the declaration, so snapshot bytes
+  differ (they are rebaked for the new build id anyway).
+- **Pairing with an import's oleans.** A runtime-only release requires that the stdlib's
+  generated C changed no function other code reaches by name (0036 added names to
+  `Lean/CoreM.c`; 0037 renumbered only private specializations of `Lean/Shell.c`). The rule now
+  covers these functions too: before, a changed one ran from the oleans' IR.
+
+**Gate**: `EXPECT_PLAIN_NATIVE = true` in `js/gate.mjs` (the switch that goes with
+`INCLUDE_PLAIN`): G2 requires plain entries in the running table (and the build manifest's counts),
+G5 requires `[symtab] hit plain l_Lean_Name_append` and `x0.x1.x2` from `symtabProbe 3`; G6 times
+`symtabProbe 20000` (informational: r3 and 0039 interpret `Lean.Name.append`, 0039b calls it
+natively). Every other check must pass unchanged; a moved heartbeat limit in their output is a
+finding to explain (above), not to recalibrate away.
+
+**To be measured on the first build**: the code section against 0039, the stack margins, G6, the
+persistent compile and init replay timings against r3 and 0039, QED64's compiler battery.

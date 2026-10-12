@@ -26,7 +26,10 @@ Two outputs, both from the build's own compiled Init/Std/Lean (patch 0039):
              second probe when a decl has no boxed wrapper.
      plain   every l_* function WITHOUT a boxed wrapper: all-object, owned arguments, at most
              16 of them (requiresBoxedVersion is false), so the interpreter may call it as it
-             calls a boxed wrapper. In the table only when INCLUDE_PLAIN is set (below).
+             calls a boxed wrapper. lookup_symbol's second probe; with it interpreted code calls
+             every core function natively, as native `lean` (-rdynamic) does. In the table
+             since 0039b (INCLUDE_PLAIN, below); each prototype must show that shape, or nothing
+             is written (a misclassified name, like the `_00__boxed` ones once, is never called).
    l_* functions that HAVE a boxed wrapper are never asked for and stay out.
 
    Declarations are copied from the defining C file's own LEAN_EXPORT line, so every signature
@@ -55,7 +58,8 @@ History: through Lean 4.33 a committed list (`emscripten-exports.wanted.txt`) wa
 never picked up names our own patches introduced and missed v4.34.0's 5,812 new boxed
 wrappers. Patch 0032 generated the list from the C instead: seed + boxed + init + cell, about
 106k exports that every Worker's glue bound and the dynamic linker re-registered (~129 MiB of
-JS heap per Worker). Patch 0039 moved those names into the table. The slim (iPhone WebKit)
+JS heap per Worker). Patch 0039 moved those names into the table, and 0039b added the plain
+functions without a wrapper, which no export list had held. The slim (iPhone WebKit)
 list (`--slim`) is retired with it: the per-export glue cost it avoided is gone, Safari has no
 Memory64, and nothing consumed bin-slim.
 
@@ -80,17 +84,23 @@ import shutil
 import subprocess
 import sys
 
-GENERATOR = "gen-exports/0039"
-# Patch 0039 ships the table WITHOUT the plain functions (r3's resolvable set: boxed, init,
-# cell, export); turning this on is its own measured step (stack margins, compile time).
-INCLUDE_PLAIN = False
+GENERATOR = "gen-exports/0039b"
+# Patch 0039 shipped the table without the plain functions (r3's resolvable set: boxed, init,
+# cell, export); 0039b adds them, its own measured step (stack margins, compile time). False
+# rebuilds 0039's table, for an A/B; the gate's EXPECT_PLAIN_NATIVE (js/gate.mjs) goes with it.
+INCLUDE_PLAIN = True
 BLOCK = 16             # front coding restarts every BLOCK names (a whole name heads each block)
 MAXLEN = 4096          # the longest name the runtime's decoder takes (wasm_symtab.cpp)
 KIND = {"boxed": 0, "plain": 1, "export": 2, "cell": 3, "init": 4, "init_rt": 5, "init_meta": 6}
 # B2: a scan that found far fewer names than v4.34.0 has is broken, not small
-# (v4.34.0: boxed 90,208, export 228, cell 8,295, 2,356 modules)
-FLOORS = {"boxed": 80000, "export": 100, "cell": 7000}
+# (v4.34.0: boxed 90,208, plain 29,538, export 228, cell 8,295, 2,356 modules)
+FLOORS = {"boxed": 80000, "plain": 25000, "export": 100, "cell": 7000}
+if not INCLUDE_PLAIN:
+    del FLOORS["plain"]
 MIN_MODULES = 2000
+# A plain function's prototype: owned objects in (1 to closureMaxArgs = 16 of them), an object
+# out, the shape the interpreter calls (`curry`, closures) and requiresBoxedVersion promises.
+ALL_OBJECT = re.compile(r"LEAN_EXPORT lean_object\* [A-Za-z_][A-Za-z0-9_]*\(lean_object\*(?:, lean_object\*){0,15}\);")
 ROOTS = ("Init", "Std", "Lean")
 INIT_PREFIXES = ("initialize_", "runtime_initialize_", "meta_initialize_")
 
@@ -277,6 +287,9 @@ for name, kind in c_kind.items():
         kind = "plain"
     if c_decl[name] is None:
         fail(f"no one-line prototype for function {name} ({c_where[name]})")
+    if kind == "plain" and not ALL_OBJECT.fullmatch(c_decl[name]):
+        fail(f"plain function {name} ({c_where[name]}) does not take 1 to 16 objects and return one, the shape "
+             f"the interpreter calls: {c_decl[name]}\n  a boxed wrapper the classification missed (is_boxed)?")
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
         fail(f"{name!r} is not a C identifier")
     if len(name) > MAXLEN:
@@ -292,8 +305,6 @@ low = [f"{k} {counts[k]} < {v}" for k, v in FLOORS.items() if counts[k] < v]
 if modules < MIN_MODULES or counts["init_rt"] != modules or counts["init_meta"] != modules or modules != c_files:
     low.append(f"initializers {counts['init']}/{counts['init_rt']}/{counts['init_meta']} for {c_files} C files "
                f"(want one of each kind per module, at least {MIN_MODULES} modules)")
-if INCLUDE_PLAIN and counts["plain"] == 0:
-    low.append("no plain function, with INCLUDE_PLAIN")
 if low:
     fail("the selection is below its floors (B2) — nothing written: " + "; ".join(low))
 
