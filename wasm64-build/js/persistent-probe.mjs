@@ -15,7 +15,7 @@ import path from "node:path";
 import vm from "node:vm";
 import { createRequire } from "node:module";
 import { applyCliContract, ensureStackSize } from "./cli-args.mjs";
-import { forwardWasmEnv, poolModuleKeys } from "./runtime-knobs.mjs";
+import { forwardWasmEnv, poolModuleKeys, symtabStats } from "./runtime-knobs.mjs";
 
 // First, before the contract prints anything: replaces this process (same PID) when
 // started without --stack-size, so every line below is printed once.
@@ -48,8 +48,11 @@ const cli = applyCliContract({
     "  -h, --help        print this help and exit 0, before any side effect",
     "",
     "env: LEAN4_WASM64_PTHREAD_POOL=<n> is Module.pthreadPoolSize, the pthread Workers created at load (0..64, default 24;",
-    "     kernel patch 0038); LEAN_WASM_PARKED_DEDICATED, LEAN_WASM_PARKED_IDLE_MS, LEAN_WASM_STD_SURPLUS_EXIT and",
-    "     LEAN_WASM_STACK_PROBE_SLOTS are copied into the runtime's environment (EMBED-RUNTIME.md §3.1)",
+    "     kernel patch 0038); LEAN_WASM_PARKED_DEDICATED, LEAN_WASM_PARKED_IDLE_MS, LEAN_WASM_STD_SURPLUS_EXIT,",
+    "     LEAN_WASM_STACK_PROBE_SLOTS and LEAN_WASM_SYMTAB_TRACE are copied into the runtime's environment (EMBED-RUNTIME.md §3.1)",
+    "",
+    "output: the default run prints `SYMTAB {json}` before PASS on a runtime with the native-symbol table (kernel",
+    "     patch 0039): a fresh self-check (status 0 = intact), the entries by kind, the FNV, the lookups made",
     "",
     "exit codes: 0 PERSISTENT PROBE PASS (or CASES DONE), 1 PERSISTENT PROBE FAIL or an unreadable --cases file, 2 no artifact, 3 the runtime aborted",
   ].join("\n"),
@@ -226,6 +229,11 @@ globalThis.Module = {
       const r4 = compile("example : True := trivial\n", "/workspace/d.lean");
       console.log(`tag=${r4.tag} elapsed=${r4.elapsed.toFixed(0)}ms errors=${r4.errors.length}`);
       if (r4.tag !== 0 || r4.errors.length !== 0) throw new Error("compile 4 failed");
+
+      // The native-symbol table (kernel patch 0039; the gate's G2): a fresh self-check, its entries
+      // by kind and FNV, and the lookups these compiles made. A runtime before 0039 prints nothing.
+      const symtab = symtabStats(M);
+      if (symtab) console.log("SYMTAB " + JSON.stringify(symtab));
 
       console.log("PERSISTENT PROBE PASS");
       process.exit(0);

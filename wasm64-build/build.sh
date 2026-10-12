@@ -38,18 +38,30 @@ echo "=== [4/5] stage1 libraries ==="
 # stop describing it here — not before, so a failed configure keeps a good build's records
 rm -f "$BUILD_DIR/GATE-PASSED" "$BUILD_DIR/BUILT-COMMIT"
 run "make -C /build/stage1 libuv leanrt leanrt_initial-exec leancpp leanshell kernel library -j12"
-# The stdlib compile (.lean -> lib/temp/*.c) must precede the export scan:
-# without it the generator reads the PREVIOUS build's C and a name that a
-# commit deleted could still be exported.
+# The stdlib compile (.lean -> lib/temp/*.c and the archives) must precede the
+# table and export scan (4b): without it the generator reads the PREVIOUS
+# build's C and archives.
 run "make -C /build/stage1 make_stdlib -j12"
-echo "=== [4b/5] exports generated from the compiled C ==="
-# final = seed + (wanted & defined): a specialization upstream renamed drops
-# out of the export list (the interpreter interprets it) instead of failing
-# the link. See gen-exports.py; src/emscripten-exports.txt is gitignored.
-python3 "$REPO/wasm64-build/gen-exports.py" "$BUILD_DIR/build/stage1/lib/temp" "$REPO/src"
+echo "=== [4b/5] the native-symbol table and the export list, from the compiled C ==="
+# Patch 0039. lib/temp/lean_wasm_symtab.c: every name the IR interpreter may resolve, linked into
+# `lean` (its manifest beside it), selected from the archives the link uses and cross-checked
+# against the C (B1). gen-exports.py fails closed: an nm that cannot read the wasm archives stops
+# the build (QED64_NM names one; default llvm-nm on PATH, else nm — Apple's is LLVM's).
+# src/emscripten-exports.txt (gitignored): the JavaScript contract, src/emscripten-exports.seed.txt.
+# Each is rewritten only when it changes, so an unchanged one does not relink. See gen-exports.py.
+STAGE1_TEMP="$BUILD_DIR/build/stage1/lib/temp"; STAGE1_LIBS="$BUILD_DIR/build/stage1/lib/lean"
+python3 "$REPO/wasm64-build/gen-exports.py" "$STAGE1_TEMP" "$REPO/src" \
+  --symtab "$STAGE1_TEMP/lean_wasm_symtab.c" --symtab-manifest "$STAGE1_TEMP/lean_wasm_symtab.json" \
+  --archives "$STAGE1_LIBS/libInit.a" "$STAGE1_LIBS/libStd.a" "$STAGE1_LIBS/libLean.a" --nm "${QED64_NM:-auto}"
 echo "=== [5/5] final lean link ==="
-run "make -C /build/stage1 leaninitialize lean -j12"
+# the make output is kept: the link check (B3) reads it
+run "make -C /build/stage1 leaninitialize lean -j12" 2>&1 | tee "$BUILD_DIR/make-lean.log"
 ls -la "$BUILD_DIR/build/stage1/bin/" | grep -E "lean\.(js|wasm)"
+# B3 (patch 0039): no table entry may be bound to wasm-ld's signature-mismatch stub or left
+# undefined, and the link's other undefined symbols are compared with the allowlist. The symbol
+# map it reads, bin/lean.js.symbols, stays in the build tree (the crash-triage map; not released).
+python3 "$REPO/wasm64-build/check-link.py" "$BUILD_DIR/make-lean.log" "$BUILD_DIR/build/stage1/bin" \
+  "$STAGE1_TEMP/lean_wasm_symtab.c" "$REPO/wasm64-build/link-undefined-allowlist.txt"
 # docs or tools may be committed during a long build; the sources may not move
 EMBEDDED="$(sed -n 's/^#define LEAN_GITHASH "\([0-9a-f]*\)".*/\1/p' "$BUILD_DIR/build/stage1/githash.h" 2>/dev/null || true)"
 if [ -n "$START_COMMIT" ] && clean_sources && git -C "$REPO" diff --quiet "$START_COMMIT" HEAD -- "${SRC_PATHS[@]}" \

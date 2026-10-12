@@ -335,8 +335,9 @@ if [ -n "$MATCH_RUNTIME" ]; then
   say "runtime manifest byte-identical to $MATCH_RUNTIME"
 fi
 mkdir -p "$REL/runtime/bin"
+# lean.js.symbols (0039's --emit-symbol-map, the crash-triage map) stays in the build tree
 for f in "$R/build/stage1/bin/"*; do
-  case "$(basename "$f")" in lean.js|lean.wasm|package.json) ;; *) cp -p "$f" "$REL/runtime/bin/" ;; esac
+  case "$(basename "$f")" in lean.js|lean.wasm|package.json|lean.js.symbols) ;; *) cp -p "$f" "$REL/runtime/bin/" ;; esac
 done
 
 # ---------- packs ----------

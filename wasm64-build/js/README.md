@@ -58,7 +58,7 @@ reference with its base.
 | `verify` | verify a release directory |
 | `release` | write `release.json` + `SHA256SUMS` for a staged release directory |
 | `run` | run the wasm64 Lean CLI under Node (`--artifact <dir> [--lib <dir>] [--work <dir>] [--exit-with-parent [--parent-pid <pid>]] [--] <lean args>`): Lean's arguments start after `--` or at the first token that is not one of these flags; a repeated flag keeps its first value (a WARNING); `--work` is created only once the artifact checks pass. Lean's cwd is `/` (QED64's runner layout, so bakes are byte-identical to its): name files `/work/<file>`; `LEAN4_WASM64_CWD=work` keeps the older layout where relative paths land in `--work`; `--exit-with-parent [--parent-pid <pid>]` (runner flags, not Lean's) exits once the process that started it is gone; `--parent-pid` is the pid of the process that spawns `node-runner.mjs` itself (so `node <package>/node-runner.mjs`, not `lean4-wasm64 run` or npx, which add a process); the bake passes both, with its own pid |
-| `gate` | the release gate on a runtime (`--artifact <dir>`) |
+| `gate` | the release gate on a runtime (`--artifact <dir>`; `--baseline-exports <lean.wasm or list>`: an earlier runtime's exports, none of which a native-symbol lookup may miss) |
 | `probe` | the persistent-path probe (`lean_wasm_compile`); `--cases <a.lean,…> [--passes n]` compiles each file n times, one `CASE {json}` line per compile (the gate's 0037 checks); an unknown flag or a stray argument is a WARNING |
 | `bake` | bake an environment snapshot (`--lib <tree> --work <dir> --out <dir>` required; `--artifact <dir>`, else `LEAN4_WASM64_ARTIFACT`, else `QED64_LEAN_ARTIFACT`, required too; `--name`, `--probe`, `--reserve`, `--roots`/`--label`/`--initial-bytes`, `--entry-fields <json object>`, `--reap-quiet-ms`/`--reap-stable-ms`, `--allow-legacy-imports`, `--runner`): runs the runner (default: this package's `node-runner.mjs`) on `/work/probe.lean` with `--incr-header-save`, reaps its kept-alive exit, gzips the `.snap` to the content-addressed `<name>.<digest16>.snapz` and upserts `index.json` and its per-build copy `index.<buildId>.json` under `index.json.lock` (`formats/snapshot-index.md`; QED64's bake takes the same lock). **No lock is ever taken over**: a held `index.json.lock` is waited for at most 120 s, then the bake exits 1 naming it and its holder, with `unindexed entry <json>` (the `.snapz` kept, neither index touched); one bake per `--work`: `<work>/.bake.lock` holds the bake's pid and then its runner's, and a held one refuses the bake at once (exit 2, nothing changed). Remove a lock only once no bake uses its directory; a rerun then finishes. The runner's environment is exactly `PATH`, `HOME`, `TMPDIR`, `LEAN_COMPACTOR_RESERVE`, `QED64_ALLOW_LEGACY_IMPORTS=1` when asked for and `QED64_PROFILE_INIT` when non-empty. The probe's header is read as Lean reads it (one Lean rejects is refused, exit 2). Exit 0 baked, 1 the job failed (every refusal after the runner started), 2 refused before any side effect, 128+n a signal it received (passed to the runner; no index write; a `.snapz` already written is kept and its entry printed). Stop a bake with SIGTERM, which it passes to its runner and which releases its locks; a SIGKILL leaves `<work>/.bake.lock` behind (and `<out>/index.json.lock` when it lands during the index write); the package's runner, started with `--exit-with-parent --parent-pid <bake pid>`, exits by itself, another `--runner` keeps running until stopped. A closed stdout never stops a bake; a bake that crashes with its runner running kills it and keeps `.bake.lock` |
 | `snapshot-probe` | load a baked `.snap` through the worker's export (`--via-mem`: the browser's path) and compile a probe on it (`(--snap <file> \| --fresh-import) --lib <tree> (--probe-file <file> \| --probe <source>)`): `SNAPSHOT PROBE PASS` / `SNAPSHOT PROBE FAIL: …`; a watchdog thread SIGKILLs the probe past `--watchdog-ms` |
@@ -75,11 +75,24 @@ The runtime's knobs (`runtime-knobs.mjs`; EMBED-RUNTIME.md §3.6): `run`, `probe
 and `snapshot-probe` pass `LEAN4_WASM64_PTHREAD_POOL=<n>` as
 `Module.pthreadPoolSize` (the pthread Workers created at load, 0..64, default 24;
 kernel patch 0038 on) and copy `LEAN_WASM_PARKED_DEDICATED`,
-`LEAN_WASM_PARKED_IDLE_MS`, `LEAN_WASM_STD_SURPLUS_EXIT` and
-`LEAN_WASM_STACK_PROBE_SLOTS` into the runtime's environment. Under `run`,
-`LEAN4_WASM64_RTSTATS=1` answers every printed line containing `[rtstats?]` with
-`[rtstats] <json>`: the pool, task-manager and engine-guard counters (`null`
-where the runtime predates them).
+`LEAN_WASM_PARKED_IDLE_MS`, `LEAN_WASM_STD_SURPLUS_EXIT`,
+`LEAN_WASM_STACK_PROBE_SLOTS` and `LEAN_WASM_SYMTAB_TRACE` into the runtime's
+environment. Under `run`, `LEAN4_WASM64_RTSTATS=1` answers every printed line
+containing `[rtstats?]` with `[rtstats] <json>`: the pool, task-manager and
+engine-guard counters (`null` where the runtime predates them).
+`LEAN_WASM_SYMTAB_TRACE` (kernel patch 0039) prints the runtime's native-symbol
+lookups on stderr, as `[symtab] miss - <name>` and `[symtab] hit <kind> <name>`:
+`miss`, `hit` or `all`, each optionally `:<prefix>,<prefix>…`, clauses joined by
+`;` (`miss:;hit:l_Lean_versionString` = every miss and that name's hits); anything
+else is refused with one warning and traces nothing. `probe` prints the table's
+self-check and counters as `SYMTAB {json}` (`runtime-knobs.mjs` `symtabStats`).
+
+Two tools are not commands: `exports-audit.mjs [--glue <lean.js>] <dir>…` lists
+what consumer trees' JavaScript touches on the runtime (exports, glue globals,
+`PThread`/`TTY`/`FS` members) and fails on any name the export contract and the
+gate's glue checks do not cover (`runtime-contract.mjs`; run it over every app
+before a release that changes either); `runtime-contract.mjs` is the contract
+itself, as the gate checks it on a runtime's files (S1, S2, S6).
 `lean4-wasm64 bake` and `lean4-wasm64 snapshot-probe` replace the dispatcher
 (`process.execve`), so the tool runs in the PID its caller started — a caller
 that SIGKILLs or measures that PID gets the tool itself; where execve cannot

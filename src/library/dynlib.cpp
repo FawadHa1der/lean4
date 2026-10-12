@@ -13,7 +13,7 @@ Author: Leonardo de Moura, Mac Malone
 
 #ifdef LEAN_WINDOWS
 #include <windows.h>
-#else
+#elif !defined(LEAN_EMSCRIPTEN)
 #include <dlfcn.h>
 #endif
 
@@ -27,6 +27,8 @@ static void dynlib_finalizer(void * h) {
     // The same decision was made in Rust's libloading.
 #ifdef LEAN_WINDOWS
     FreeLibrary(static_cast<HMODULE>(h));
+#elif defined(LEAN_EMSCRIPTEN)
+    (void)h; // never reached: no Dynlib is ever created there (lean_dynlib_load)
 #else
     dlclose(h);
 #endif
@@ -50,7 +52,7 @@ static inline obj_res wrap_dynlib(HMODULE h) {
 static inline HMODULE dynlib_handle(b_obj_arg dynlib) {
     return static_cast<HMODULE>(lean_get_external_data(dynlib));
 }
-#else
+#elif !defined(LEAN_EMSCRIPTEN)
 static inline obj_res wrap_dynlib(void * h) {
     return alloc_external(g_dynlib_external_class, h);
 }
@@ -59,9 +61,11 @@ static inline void * dynlib_handle(b_obj_arg dynlib) {
 }
 #endif
 
+#ifndef LEAN_EMSCRIPTEN
 static inline obj_res wrap_symbol(void * sym) {
     return alloc_external(g_dynlib_symbol_external_class, sym);
 }
+#endif
 static inline void * symbol_ptr(b_obj_arg sym) {
     return lean_get_external_data(sym);
 }
@@ -75,6 +79,12 @@ extern "C" LEAN_EXPORT obj_res lean_dynlib_load(b_obj_arg path) {
             << "error loading library " << string_cstr(path) << ": " << GetLastError()).str());
     }
     return io_result_mk_ok(wrap_dynlib(h));
+#elif defined(LEAN_EMSCRIPTEN)
+    // The WebAssembly runtime is one statically linked module (patch 0039): there are no side
+    // modules to load, and Emscripten's dlopen/dlsym stubs (or their absence) are no contract.
+    // --load-dynlib, --plugin and `Lean.loadDynlib` fail here, with a Lean error.
+    return io_result_mk_error((sstream()
+        << "error loading library " << string_cstr(path) << ": dynamic libraries are not supported by the WebAssembly runtime").str());
 #else
     // Both dynlibs and plugins are loaded with RTLD_GLOBAL.
     // This ensures the interpreter has access to plugin definitions that are also
@@ -100,6 +110,10 @@ extern "C" LEAN_EXPORT obj_res lean_dynlib_get(b_obj_arg dynlib, b_obj_arg name)
     } else {
         return mk_option_none();
     }
+#elif defined(LEAN_EMSCRIPTEN)
+    // unreachable: lean_dynlib_load never returns a Dynlib here
+    (void)dynlib; (void)name;
+    return mk_option_none();
 #else
     // The address of a valid Linux symbol can be NULL.
     // Thus, this is the recommended way to validate a symbol.

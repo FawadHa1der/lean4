@@ -186,9 +186,11 @@ $(OUTBIN)/lake$(EXE): ${LIB}/temp/LakeMain.*o.export $(OUTLIB)/libLake_shared$(S
 lake: $(OUTBIN)/lake$(EXE)
 
 # LEAN_EXE_LINK_DEPS: the link's other inputs (Emscripten: its JS library and export list; see src/CMakeLists.txt)
-$(OUTBIN)/lean$(EXE): $(OUTLIB)/libInit_shared$(SO) $(OUTLIB)/libleanshared_2$(SO) $(OUTLIB)/libleanshared_1$(SO) $(OUTLIB)/libleanshared$(SO) ${LIB}/temp/libleanmain.a ${LEAN_EXE_LINK_DEPS}
+# LEAN_WASM_SYMTAB: Emscripten only, the native-symbol table (lean_wasm_symtab.c, gen-exports.py --symtab),
+# compiled by this link and by no other
+$(OUTBIN)/lean$(EXE): $(OUTLIB)/libInit_shared$(SO) $(OUTLIB)/libleanshared_2$(SO) $(OUTLIB)/libleanshared_1$(SO) $(OUTLIB)/libleanshared$(SO) ${LIB}/temp/libleanmain.a ${LEAN_EXE_LINK_DEPS} ${LEAN_WASM_SYMTAB}
 	$(link-preamble)
-	$(LEANC_SH) ${LIB}/temp/libleanmain.a ${CMAKE_EXE_LINKER_FLAGS_MAKE} ${LEAN_EXE_LINKER_FLAGS} ${LEANC_OPTS} -o $@
+	$(LEANC_SH) ${LIB}/temp/libleanmain.a ${LEAN_WASM_SYMTAB} ${CMAKE_EXE_LINKER_FLAGS_MAKE} ${LEAN_EXE_LINKER_FLAGS} ${LEANC_OPTS} -o $@
 
 lean: $(OUTBIN)/lean$(EXE)
 

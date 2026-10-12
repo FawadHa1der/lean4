@@ -165,7 +165,12 @@ cmd_build() {
   if grep -qE "^make.*Error [0-9]" "$log"; then die "make reported errors — $log" 30; fi
   # build.sh records BUILT-COMMIT only for a build of clean, unmoving sources
   [ -f "$bd/BUILT-COMMIT" ] || die "the sources were dirty or moved during the build: no BUILT-COMMIT — commit and rebuild" 30
-  python3 "$REPO/wasm64-build/gen-exports.py" "$bd/build/stage1/lib/temp" "$REPO/src" --check
+  # the export list and the native-symbol table (0039) the build linked are this tree's: a fresh
+  # selection, with the same nm cross-check, must match the build's manifest (exit 1 otherwise)
+  local temp="$bd/build/stage1/lib/temp" libs="$bd/build/stage1/lib/lean"
+  python3 "$REPO/wasm64-build/gen-exports.py" "$temp" "$REPO/src" --check --symtab-manifest "$temp/lean_wasm_symtab.json" \
+    --archives "$libs/libInit.a" "$libs/libStd.a" "$libs/libLean.a" --nm "${QED64_NM:-auto}" \
+    || die "the build's export list or native-symbol table is not this tree's (gen-exports.py --check above) — rebuild" 30
   say "built $(git rev-parse --short HEAD): buildId wasm64-$(shasum -a 256 "$bd/build/stage1/bin/lean.wasm" | cut -c1-16)"
 }
 

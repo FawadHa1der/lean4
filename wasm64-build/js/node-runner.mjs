@@ -78,8 +78,9 @@ const cli = applyCliContract({
     "     0.68 reproduces a Chrome Worker's 500 KiB (deep recursion tests)",
     "     LEAN4_WASM64_PTHREAD_POOL=<n> is Module.pthreadPoolSize: the pthread Workers created at load (0..64, default 24;",
     "     kernel patch 0038 on, earlier runtimes ignore it)",
-    "     LEAN_WASM_PARKED_DEDICATED, LEAN_WASM_PARKED_IDLE_MS, LEAN_WASM_STD_SURPLUS_EXIT, LEAN_WASM_STACK_PROBE_SLOTS are",
-    "     copied into the runtime's environment (EMBED-RUNTIME.md §3.1)",
+    "     LEAN_WASM_PARKED_DEDICATED, LEAN_WASM_PARKED_IDLE_MS, LEAN_WASM_STD_SURPLUS_EXIT, LEAN_WASM_STACK_PROBE_SLOTS and",
+    "     LEAN_WASM_SYMTAB_TRACE are copied into the runtime's environment (EMBED-RUNTIME.md §3.1); LEAN_WASM_SYMTAB_TRACE",
+    "     (kernel patch 0039) prints native-symbol lookups on stderr: miss|hit|all[:prefix,…], clauses joined by ';'",
     "     LEAN4_WASM64_RTSTATS=1 answers every printed line containing [rtstats?] with a line [rtstats] <json>: the pool,",
     "     task-manager and engine-guard counters (runtime-knobs.mjs runtimeStats); QED64_COUNT_PTHREADS=1 answers",
     "     [pthreads?] with [pthreads] created=<n>",
@@ -301,8 +302,8 @@ globalThis.Module = {
       }
       // The runtime's own knobs (runtime-knobs.mjs): dedicated-thread parking (0035, off by
       // default, qed64 L9; the gate opts in to exercise it), a parked thread's idle exit and the
-      // exit of surplus standard workers (0038, off by default), and the engine-stack probe's
-      // headroom (0036, for calibration; 0 disables it).
+      // exit of surplus standard workers (0038, off by default), the engine-stack probe's
+      // headroom (0036, for calibration; 0 disables it) and the native-symbol trace (0039).
       forwardWasmEnv(globalThis.Module.ENV);
     },
   ],

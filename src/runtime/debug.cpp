@@ -163,6 +163,8 @@ extern "C" LEAN_EXPORT void lean_notify_assert(const char * fileName, int line, 
 // Emscripten link, which leaves a required-but-unresolved GOT entry that
 // emsdk 6's loader crashes on (its undefined-symbol reporter dereferences
 // the missing binding). There are no modules to walk — report none.
+// Since patch 0039 the runtime links statically (no MAIN_MODULE, no GOT): a
+// reference still resolves here, and with none the linker drops the stub.
 extern "C" LEAN_EXPORT int dl_iterate_phdr(int (*)(void *, unsigned long, void *), void *) {
     return 0;
 }

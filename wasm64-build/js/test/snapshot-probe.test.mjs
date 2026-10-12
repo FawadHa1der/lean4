@@ -134,7 +134,8 @@ fs.writeFileSync(preload, 'if (process.env.PROBE_PID_LOG) require("node:fs").app
 
 const CLEARED = ["LEAN4_WASM64_ARTIFACT", "QED64_LEAN_ARTIFACT", "QED64_LIB_TREE", "QED64_PROFILE_INIT", "NODE_OPTIONS", "FAKE_LEAN_MODE", "FAKE_TRACE", "FAKE_EXIT_DELAY_MS",
   // the runtime knobs the probe forwards (runtime-knobs.mjs): the env the fake sees is the test's own
-  "LEAN4_WASM64_PTHREAD_POOL", "LEAN_WASM_PARKED_DEDICATED", "LEAN_WASM_PARKED_IDLE_MS", "LEAN_WASM_STD_SURPLUS_EXIT", "LEAN_WASM_STACK_PROBE_SLOTS"];
+  "LEAN4_WASM64_PTHREAD_POOL", "LEAN_WASM_PARKED_DEDICATED", "LEAN_WASM_PARKED_IDLE_MS", "LEAN_WASM_STD_SURPLUS_EXIT", "LEAN_WASM_STACK_PROBE_SLOTS",
+  "LEAN_WASM_SYMTAB_TRACE"];
 /** A fresh case dir: its own TMPDIR (the probe's scratch lands there) and PID log. */
 function caseDir() {
   const d = fs.mkdtempSync(path.join(root, "case-"));

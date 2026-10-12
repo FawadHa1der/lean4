@@ -1,16 +1,18 @@
 # The lean4-wasm64 package (wasm64-build/js): unit tests and package contents.
 # Branch-scoped to the wasm64 line and to wasm64-build/ changes (and the runtime's
-# pool-size JS library, which the unit tests evaluate); minutes, not the hours of
-# Lean's own CI. Node built-ins only: no install step.
+# pool-size JS library, which the unit tests evaluate, and the JS export contract,
+# which they compare with the gate's copy); minutes, not the hours of Lean's own CI.
+# Node built-ins only: no install step (the native-symbol table's generator tests
+# run python3, which the runner has).
 name: lean4-wasm64 package
 
 on:
   push:
     branches: [qed64-wasm64]
-    paths: ["wasm64-build/**", "src/emscripten-pthread-pool.js", ".github/workflows/lean4-wasm64-js.yml"]
+    paths: ["wasm64-build/**", "src/emscripten-pthread-pool.js", "src/emscripten-exports.seed.txt", ".github/workflows/lean4-wasm64-js.yml"]
   pull_request:
     branches: [qed64-wasm64]
-    paths: ["wasm64-build/**", "src/emscripten-pthread-pool.js", ".github/workflows/lean4-wasm64-js.yml"]
+    paths: ["wasm64-build/**", "src/emscripten-pthread-pool.js", "src/emscripten-exports.seed.txt", ".github/workflows/lean4-wasm64-js.yml"]
   workflow_dispatch:
 
 permissions:
@@ -26,12 +28,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # the package, and what test/runtime-knobs.test.mjs reads of the runtime's link
+          # the package, what test/runtime-knobs.test.mjs reads of the runtime's link, and the
+          # JS export contract test/symtab.test.mjs compares with runtime-contract.mjs
           sparse-checkout: |
             /wasm64-build/
             /src/emscripten-pthread-pool.js
             /src/CMakeLists.txt
             /src/stdlib.make.in
+            /src/emscripten-exports.seed.txt
           sparse-checkout-cone-mode: false
       - uses: actions/setup-node@v4
         with:
@@ -49,6 +53,7 @@ jobs:
           node -e '
             const files = JSON.parse(require("fs").readFileSync("/tmp/pack.json", "utf8"))[0].files.map((f) => f.path);
             const need = ["cli.mjs", "node-runner.mjs", "gate.mjs", "fetch-release.mjs", "verify-release.mjs", "release.mjs", "pack-set.mjs", "packs.json", "formats/README.md", "formats/HOSTING.md", "probes/task-storm.lean", "probes/thread-knobs.lean", "runtime-knobs.mjs",
+              "probes/symtab.lean", "runtime-contract.mjs", "exports-audit.mjs",
               "bake-snapshot.mjs", "snapshot-probe.mjs", "snapshot-index.mjs", "snapshot-index.d.mts", "formats/snapshot-index.md", "LICENSE"];
             const missing = need.filter((n) => !files.includes(n));
             const tests = files.filter((f) => f.startsWith("test/"));

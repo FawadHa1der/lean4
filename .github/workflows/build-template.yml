@@ -357,32 +357,9 @@ jobs:
             export NODE_OPTIONS="--max-old-space-size=8192"
           fi
           make -C build/$TARGET_STAGE install
-      - name: Link slim (iOS) wasm variant
-        if: matrix.wasm
-        run: |
-          # Second binary from the same build tree: everything except the
-          # ~88k boxed wrappers. Boxed exports keep external-package resident
-          # imports browser-safe but cost ~450 bytes of glue each — the slim
-          # variant trades those imports (the app falls back to one-shot runs)
-          # for a binary small enough for iPhone WebKit's tab memory budget.
-          # Snapshots are function-table-paired: the app must bake and serve a
-          # separate init snapshot for this binary.
-          # Ships as bin-slim/lean.{js,wasm} — same filenames as the main
-          # binary so the glue's internal wasm reference and the workers'
-          # hardcoded lean.js stay valid; deployments select the variant by
-          # path prefix, not by filename.
-          # The slim list is NOT "main minus all ___boxed": the
-          # extern/@[export] boxed stems must stay (body-less externs have no
-          # IR to fall back on) — only the wholesale boxed-wrapper set goes.
-          # Generated from this build's C (wasm64-build/gen-exports.py --slim):
-          # a committed list goes stale with every upstream import.
-          export NODE_OPTIONS="--max-old-space-size=8192"
-          python3 wasm64-build/gen-exports.py build/$TARGET_STAGE/lib/temp src --check --slim linkkit/emscripten-exports.txt
-          bash docker-wasm/relink-local.sh linkkit /tmp/slim-out -O3
-          dir=$(echo lean-*-*)
-          mkdir -p "$dir/bin-slim"
-          cp /tmp/slim-out/lean.js /tmp/slim-out/lean.wasm "$dir/bin-slim/"
-          ls -la "$dir"/bin-slim/
+      # (The "Link slim (iOS) wasm variant" step, bin-slim/, is retired: wasm64 patch 0039 replaced
+      # the per-export glue it existed to avoid with an in-module native-symbol table, Safari has no
+      # Memory64 for this runtime, and nothing consumed bin-slim. wasm64-build/PATCHES.md, 0039.)
       - name: Check Binaries
         run: ${{ matrix.binary-check }} lean-*/bin/* || true
       - name: Count binary symbols

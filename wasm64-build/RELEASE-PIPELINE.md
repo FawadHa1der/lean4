@@ -61,13 +61,24 @@ check whether upstream absorbed the gates, then refresh it with
    (stdin ring), `util/shell.cpp` (no second thread under Emscripten).
 3. **Build breaks / gate failures** — fix on the import branch as ordinary
    commits on top of the merge. Never amend the merge once anyone has seen it.
-4. **Exports** — the export list is generated from the build's own C (every
-   boxed wrapper, module initializer and constant cell; `gen-exports.py` says
-   why each is a correctness requirement), so new upstream modules are covered
-   without anyone remembering to. What needs a human is the *seed*: when
-   upstream removes an `@[export lean_*]`, the generator drops the name loudly
-   instead of failing the link — confirm no JS/worker caller used it, then
-   delete it from `src/emscripten-exports.seed.txt` (v4.34.0 removed 23).
+4. **Exports** — what the IR interpreter resolves by name (every boxed
+   wrapper, `@[export]` function, module initializer and constant cell;
+   `gen-exports.py` says why each is a correctness requirement) is not exported
+   since patch 0039: it is a table generated from the build's own C and the
+   archives the link uses, cross-checked against each other (the build fails if
+   they disagree, if a category falls below its floor, or if the link binds a
+   table entry to a signature-mismatch stub or leaves it undefined —
+   `check-link.py`). New upstream modules are covered without anyone
+   remembering to. What needs a human is the *JavaScript contract*,
+   `src/emscripten-exports.seed.txt`: the names hosts call, one per line with
+   its callers. When upstream removes an `@[export lean_*]` the generator drops
+   the name loudly instead of failing the link — confirm no JS/worker caller
+   used it, then delete it from the seed; adding a name means a host calls it.
+   Before a release that changes the seed or the glue, run
+   `node wasm64-build/js/exports-audit.mjs --glue <the new lean.js> <consumer
+   trees>` over QED64, lean4game, the widgets showcase and the proof sheets: it
+   must report every name covered. The first 0039 link also calibrates
+   `link-undefined-allowlist.txt` (its header says how).
 5. **Library ports** — game patches in lean4game were validated against one
    Mathlib commit; expect a re-port pass per bump. Moved modules are the usual
    churn: rewrite imports to the new names rather than rely on shims (the

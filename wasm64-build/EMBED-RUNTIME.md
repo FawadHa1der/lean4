@@ -22,12 +22,13 @@ Layers, so a host knows what it may rely on:
 | | |
 |---|---|
 | Target | `wasm64-unknown-emscripten`: Memory64, shared memory, pthreads, `-sPROXY_TO_PTHREAD=1` (`main` runs on a pthread) |
-| Memory import | `env.memory`: `WebAssembly.Memory({shared: true, address: "i64", initial: ≥ 2048n, maximum: ≤ 262144n})` pages (128 MiB … 16 GiB). Without a host `wasmMemory` the glue creates `{initial: INITIAL_MEMORY ‖ 128 MiB, maximum: 262144n}`. The runtime manifest records these values (`memory`). |
+| Memory import | `WebAssembly.Memory({shared: true, address: "i64", initial: ≥ 2048n, maximum: ≤ 262144n})` pages (128 MiB … 16 GiB), passed as `Module.wasmMemory`; the glue puts it in the import object itself (its module and field names are minified since 0039, `env.memory` before). Without a host `wasmMemory` the glue creates `{initial: INITIAL_MEMORY ‖ 128 MiB, maximum: 262144n}`. The runtime manifest records these values (`memory`). |
 | Threads | a pool of `Module.pthreadPoolSize` pthread Workers (0..64, default 24; 0038) created at load, growing on demand; 16 MiB main/application stack, 8 MiB per pthread (§3.6) |
 | Exit | `-sEXIT_RUNTIME=1` with the keepalive patch 0020 in the build image (§5) |
 | Filesystems | MEMFS (root), NODEFS, WORKERFS |
 | Runtime methods | `callMain, FS, ENV, ccall, getValue, setValue, UTF8ToString, stringToNewUTF8` |
-| Exports | `src/emscripten-exports.txt`: the hand-kept seed (`src/emscripten-exports.seed.txt`) plus every boxed wrapper, module initializer and constant cell generated from the build's own C (`gen-exports.py`). Other Lean code runs through the shipped `.ir` (interpreted). |
+| Exports | The JavaScript contract and nothing else (0039): `src/emscripten-exports.seed.txt`, the entry points of §2 plus the Emscripten built-ins hosts reach (§5). Lean's own native code is not exported: the IR interpreter finds boxed wrappers, `@[export]` functions, constant cells and module initializers in a table linked into the module (`gen-exports.py --symtab`, `library/wasm_symtab.cpp`; until 0039 they were ~106k exports). Other Lean code runs through the shipped `.ir` (interpreted). |
+| Linking | Static since 0039 (no `MAIN_MODULE`: no `dylink.0` section, no GOT, no side modules — `Dynlib.load` fails with an IO error). At -O3 the raw wasm import and export names are minified (`a`, `b`, …): reach an export through the glue's `Module["_x"]`, never `wasmExports["x"]`. `bin/lean.js.symbols` in the build tree maps every function index to its name (crash triage; not released). |
 | Olean trust | githash check compiled off; the SHA-256 manifests and the pack ↔ runtime `leanVersion` rule are the trust root (`js/formats/README.md`) |
 
 The CMake default maximum is 12 GiB; released runtimes are configured by
@@ -53,6 +54,8 @@ may import any memory whose maximum is ≤ that.
 | Export | Signature (JS) | Returns | Since |
 |---|---|---|---|
 | `_lean_initialize_runtime_module`, `_lean_initialize`, `_lean_io_mark_end_initialization`, `_lean_init_task_manager` | `()` | — | upstream |
+| `_lean_init_task_manager_using(n)` | `(u32)` | — : the task manager with `n` standard workers instead of the hardware concurrency | upstream |
+| `_lean_io_result_show_error(res)` | `(i64)` | — : prints an `IO` error result | upstream |
 | `_lean_enable_initializer_execution` | `()` | `BaseIO Unit` (ignore) | upstream |
 | `_lean_init_search_path` | `()` | `IO Unit` — check the tag | upstream |
 | `_lean_mk_string(cstr)` | `(i64)` | a Lean `String` (owned) | upstream |
@@ -66,10 +69,18 @@ may import any memory whose maximum is ≤ that.
 | `_lean_wasm_task_manager_stat(key)` | `(u32)` | `f64`: 0 standard workers live, 1 their cap, 2 the most ever live, 3 surplus exits, 4 parked threads, 5 idle exits of parked threads (§3.6); -1 for another key or before the task manager exists | 0038 |
 | `_lean_wasm_engine_probes()` | `()` | `f64`: questions the engine-stack guard asked since start-up (§6) | 0038 |
 | `_lean_wasm_engine_guard_trips(site)` | `(u32)` | `f64`: its refusals at site 0 (the kernel) or 1 (`Core.checkSystem`); 0 for another site | 0038 |
+| `_lean_wasm_symtab_stats(key)` | `(u32)` | `f64`: the native-symbol table's gauges: 0..6 lookups that found an entry of kind boxed, plain, export, cell, init, init_rt, init_meta; 7 lookups that found none; 8 its entries; 9..15 its entries by kind; 16 its self-check's status (0 intact); 17, 18 the high and low 32 bits of the FNV-1a-64 the check decoded (the build's `lib/temp/lean_wasm_symtab.json` has the same); -1 for another key. Keys 9..18 run the self-check once (a few ms) | 0039 |
+| `_lean_wasm_symtab_selfcheck(counts, fnv)` | `(i64, i64)` | `u32`: a full decode of the table now (names strictly increasing, kinds in range, every address set, the FNV equal to the generator's): 0 intact, else the first defect (1 empty, 2 a name too long, 3 a block off its offset, 4 out of order, 5 a kind out of range, 6 a null address, 7 another FNV). `counts` (7 × u64) and `fnv` (u64) may be `0n` | 0039 |
 | `callMain(args)` | `string[]` | runs `lean_main` on the application pthread | — |
 
 The 0038 counters are lock-free: a host may call them from its main JS thread at any time, also
-while Lean threads hold the task manager's lock (which that thread must never wait for).
+while Lean threads hold the task manager's lock (which that thread must never wait for). So are the
+0039 table's: the table is immutable link-time data, and a lookup takes no lock and calls no
+JavaScript.
+
+Since 0039 the module also binds on `Module` the three Emscripten built-ins hosts reach
+([GLUE], §5): `__emscripten_proxy_main` (what `callMain` runs), `__emscripten_check_mailbox` and
+`_pthread_self`. They stay top-level glue bindings as well, which is how QED64 reaches them.
 
 `_mem` loads: `ptr` is a `_malloc`ed buffer holding a whole `.snap` file of
 `size` bytes; on success it becomes the loaded region's memory (never free or
@@ -121,6 +132,7 @@ mutating `Module.ENV` in `preRun`. Two readers see them:
 | `LEAN_WASM_STD_SURPLUS_EXIT` | C, at task-manager creation | `1`: a standard worker exits while more of them live than the cap, as after a burst of `Task.get` in pool tasks; **default unset: they stay** (0038, §3.6) |
 | `LEAN_COMPACTOR_RESERVE` | C | bytes reserved up front when saving a snapshot (`--incr-header-save`); a doubling buffer needs old + new at once (bakes use 3.5 GiB) |
 | `LEAN_WASM_STACK_PROBE_SLOTS` | C, once | headroom (in 8-byte argument slots, default 16384 = 128 KiB) the engine-stack probe demands (§6); 0 disables it — for calibration only (0036) |
+| `LEAN_WASM_SYMTAB_TRACE` | C, at the first native-symbol lookup | diagnosis only (0039): print the IR interpreter's lookups in the native-symbol table on stderr, `[symtab] miss - <name>` and `[symtab] hit <kind> <name>`. `miss`, `hit` or `all`, each optionally `:<prefix>,<prefix>…` (only names with one of these prefixes), clauses joined by `;`: `miss:;hit:l_Lean_versionString`. Unset or empty: off; anything else: off, with one warning. A miss is normal: every lookup of a function without a boxed wrapper first misses the wrapper, and package code (`lp_…`) is never native |
 | `LEAN_NAT_MAX_SIZE`, `LEAN_STACK_SIZE_KB` | C | upstream semantics (the latter on the `main` path only) |
 | `LEAN_IMPORT_WORKERS` | Lean | parallel region reads of a snapshot with dependency files; not on the in-memory path |
 | `LEAN_NUM_THREADS`, `LEAN_MAIN_USE_THREAD`, `LEAN_ABORT_ON_PANIC`, `LEAN_BACKTRACE*` | C | **inert on Emscripten** — not knobs |
@@ -241,8 +253,8 @@ renderer's one pointer-compression cage (§6).
   [GLUE] count the Workers.
 - **Node**: `node-runner.mjs`, `persistent-probe.mjs` and `snapshot-probe.mjs` take
   `LEAN4_WASM64_PTHREAD_POOL=<n>` for `Module.pthreadPoolSize` and copy `LEAN_WASM_PARKED_DEDICATED`,
-  `LEAN_WASM_PARKED_IDLE_MS`, `LEAN_WASM_STD_SURPLUS_EXIT` and `LEAN_WASM_STACK_PROBE_SLOTS` into
-  `Module.ENV`; with `LEAN4_WASM64_RTSTATS=1`, node-runner answers a printed line containing
+  `LEAN_WASM_PARKED_IDLE_MS`, `LEAN_WASM_STD_SURPLUS_EXIT`, `LEAN_WASM_STACK_PROBE_SLOTS` and (0039)
+  `LEAN_WASM_SYMTAB_TRACE` into `Module.ENV`; with `LEAN4_WASM64_RTSTATS=1`, node-runner answers a printed line containing
   `[rtstats?]` with `[rtstats] <json>` of these gauges and the guard's counters
   (`js/runtime-knobs.mjs`).
 
@@ -292,6 +304,22 @@ its Worker).
   postMessage notifications (`waitAsyncPolyfilled = true` in `preRun`) and
   kicks `__emscripten_check_mailbox()` from a 1 s timer. Kernel patch 0035
   narrows the trigger; it does not remove it.
+- **The [GLUE] surface the gate checks** (its S6, `js/runtime-contract.mjs`, on every runtime since
+  0039 linked statically and its glue is generated anew): a classic script that adopts the host's
+  `Module`; pthread Workers named `"em-pthread"`; the runtime methods of §1 and the `Module` keys of
+  §3.1; a top-level `wasmMemory` that adopts `Module.wasmMemory`; `FS` (`mkdirTree`, `makedev`,
+  `WORKERFS`, `NODEFS`); `TTY` with `ttys[…].ops.put_char` called per byte; `PThread`
+  (`unusedWorkers`, `pthreads`, `allocateUnusedWorker`, `getNewWorker`, `returnWorkerToPool`,
+  called as `PThread.x()`); `proxiedFunctionTable` with `_proc_exit` at `[0]` and
+  `exitOnMainThread` at `[1]`; `waitAsyncPolyfilled`; `checkMailbox` holding a keepalive (0020)
+  and calling `__emscripten_check_mailbox()`; `__emscripten_thread_mailbox_await` with a literal
+  `pthread_ptr+N`; top-level `_pthread_self` and `__emscripten_check_mailbox`; `callMain` running
+  `_emscripten_proxy_main`; `runtimeKeepalivePush`; `ABORT`; `class ExitStatus`; the thrown string
+  `"unwind"`; a pthread Worker's `onerror` rethrowing; a top-level `spawnThread` the glue calls by
+  name (node-runner's `QED64_COUNT_PTHREADS`). Test probes' reach-ins (`cleanupThread`,
+  `proxiedJSCallArgs`, `EXITSTATUS`, `runtimeKeepaliveCounter`, `runtimeExited`,
+  `ENVIRONMENT_IS_PTHREAD`) are reported, not required. `js/exports-audit.mjs` lists what a
+  consumer tree touches against this list and the export contract.
 
 ## 6. Placement and engines
 
@@ -312,9 +340,13 @@ node-runner knob `LEAN4_WASM64_PTHREAD_STACK_MB=0.68` gives the pthreads Chrome'
 
 - Browser: a classic **DedicatedWorker** (`importScripts`, nested Workers for
   pthreads; a SharedWorker cannot host it), cross-origin isolated (HOSTING.md),
-  desktop Chrome/Edge 133+ or Firefox 134+ (Safari has no Memory64). Each
-  pthread Worker costs ~129 MiB of JS heap against one 4 GiB pointer-compression
-  cage per renderer: about 30 isolates is the ceiling.
+  desktop Chrome/Edge 133+ or Firefox 134+ (Safari has no Memory64). Every
+  pthread Worker is a JS isolate against one 4 GiB pointer-compression cage per
+  renderer. Until 0039 each cost ~129 MiB of JS heap (the 49 MB glue and the
+  per-export bookkeeping of ~106k exports; QED64 HARDENING #55): about 30
+  isolates was the ceiling. Since 0039 the glue is under 1 MiB and binds a few
+  dozen exports: the cost per Worker is to be measured (the trimmed-glue
+  experiment measured ~30 MiB; PATCHES.md 0039 records the number).
 - Node ≥ 24 (Memory64 without a flag), `node --stack-size=8192`, and
   `bin/package.json` = `{ "type": "commonjs" }` beside `lean.js` (pthreads
   re-load `lean.js` as a CommonJS script; under a `"type": "module"` package

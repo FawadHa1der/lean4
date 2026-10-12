@@ -14,6 +14,11 @@
 # diff against the real rule captured in the kit's stdlib.make.txt.
 # Requires emsdk active (`emcc` on PATH) at the SAME version as CI
 # (.github/workflows/build-template.yml, setup-emsdk step).
+# NOTE: these flags are the link before wasm64 patch 0039 (MAIN_MODULE=2, an export
+# list the IR interpreter's dlsym searched). The wasm64 `lean` link is static since,
+# and takes the generated native-symbol table (lean_wasm_symtab.c,
+# wasm64-build/gen-exports.py --symtab) as an input; it is built by
+# wasm64-build/build.sh. CI's slim step, this script's other user, is retired.
 set -euo pipefail
 
 KIT=${1:?usage: relink-local.sh <linkkit-dir> <out-dir> [extra emcc flags...]}

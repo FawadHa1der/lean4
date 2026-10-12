@@ -26,9 +26,9 @@ test("poolModuleKeys: LEAN4_WASM64_PTHREAD_POOL is Module.pthreadPoolSize, passe
   for (const v of ["8", "-3", "abc", "0", " 4 "]) assert.deepEqual(poolModuleKeys({ LEAN4_WASM64_PTHREAD_POOL: v }), { pthreadPoolSize: v });
 });
 
-test("forwardWasmEnv copies the four LEAN_WASM_* knobs when non-empty, and nothing else", () => {
+test("forwardWasmEnv copies the five LEAN_WASM_* knobs when non-empty, and nothing else", () => {
   assert.deepEqual([...FORWARDED_WASM_ENV],
-    ["LEAN_WASM_PARKED_DEDICATED", "LEAN_WASM_PARKED_IDLE_MS", "LEAN_WASM_STD_SURPLUS_EXIT", "LEAN_WASM_STACK_PROBE_SLOTS"]);
+    ["LEAN_WASM_PARKED_DEDICATED", "LEAN_WASM_PARKED_IDLE_MS", "LEAN_WASM_STD_SURPLUS_EXIT", "LEAN_WASM_STACK_PROBE_SLOTS", "LEAN_WASM_SYMTAB_TRACE"]);
   const ENV = { LEAN_PATH: "/lib/lean", LEAN_WASM_PARKED_IDLE_MS: "kept" };
   const host = { LEAN_WASM_PARKED_DEDICATED: "4", LEAN_WASM_PARKED_IDLE_MS: "", LEAN_WASM_STD_SURPLUS_EXIT: "1", QED64_PROFILE_INIT: "1", LEAN_WASM_OTHER: "x" };
   assert.equal(forwardWasmEnv(ENV, host), ENV);
@@ -220,5 +220,5 @@ test("the lean link names the library and sizes the pool with its variable (src/
   assert.match(cmake, /-sPTHREAD_POOL_SIZE=leanPthreadPoolTarget --js-library=\$\{LEAN_SOURCE_DIR\}\/emscripten-pthread-pool\.js/);
   assert.doesNotMatch(cmake, /-sPTHREAD_POOL_SIZE=\d/);
   assert.match(cmake, /set\(LEAN_EXE_LINK_DEPS "\$\{LEAN_SOURCE_DIR\}\/emscripten-pthread-pool\.js /);
-  assert.match(fs.readFileSync(path.join(SRC, "stdlib.make.in"), "utf8"), /^\$\(OUTBIN\)\/lean\$\(EXE\): .* \$\{LEAN_EXE_LINK_DEPS\}$/m);
+  assert.match(fs.readFileSync(path.join(SRC, "stdlib.make.in"), "utf8"), /^\$\(OUTBIN\)\/lean\$\(EXE\): .* \$\{LEAN_EXE_LINK_DEPS\}( |$)/m);
 });

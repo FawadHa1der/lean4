@@ -12,15 +12,23 @@
 //  0038 (folded into the runs above, no runtime of its own): the glue's pool size from
 //     Module.pthreadPoolSize, the opt-in exits of surplus standard workers and idle parked
 //     threads, the engine-guard counters. Skipped, with a note, on a runtime before 0038.
+//  0039 (static checks first, the rest folded into the runs above): the JavaScript export contract
+//     and the glue surface hosts reach into (S2, S6: every runtime), no generated export and a
+//     statically linked module (S1), the native-symbol table intact (G2), core initializers and
+//     constant cells found in it (G3, G4), plain core functions (G5), no lookup lost (G7).
+//     Skipped, with a note, on a runtime before 0039.
 // Every check prints ok or FAIL; exits nonzero if any failed.
 //
-// Usage: node gate.mjs --artifact <dir>   (lean4-wasm64 gate --artifact <dir>)
+// Usage: node gate.mjs --artifact <dir> [--baseline-exports <lean.wasm or name list>]
+//   --baseline-exports: an earlier runtime's export names (its lean.wasm, read for them, or a list,
+//   one per line): G7 then also fails on a lookup that missed one of them.
 
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseSeed, readWasm, staticChecks } from "./runtime-contract.mjs";
 
 // The runner harnesses live alongside this gate (self-contained build dir).
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -29,7 +37,7 @@ function arg(name, fallback) {
   return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
 }
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
-  console.log("usage: gate.mjs --artifact <dir>\nThe release gate: every check must print ok. run as: lean4-wasm64 gate   (or: node --stack-size=8192 gate.mjs)\nexit codes: 0 GATE PASSED, 1 a check failed, 2 usage");
+  console.log("usage: gate.mjs --artifact <dir> [--baseline-exports <lean.wasm or name list>]\nThe release gate: every check must print ok. run as: lean4-wasm64 gate   (or: node --stack-size=8192 gate.mjs)\n--baseline-exports: an earlier runtime's export names (its lean.wasm, or one name per line): no lookup may miss one (0039's G7)\nexit codes: 0 GATE PASSED, 1 a check failed, 2 usage");
   process.exit(0);
 }
 if (!arg("artifact")) {
@@ -39,6 +47,10 @@ if (!arg("artifact")) {
 const artifact = path.resolve(arg("artifact"));
 if (!fs.existsSync(path.join(artifact, "bin/lean.js"))) {
   console.error(`gate: ${artifact}/bin/lean.js not found`);
+  process.exit(2);
+}
+if (arg("baseline-exports") && !fs.existsSync(arg("baseline-exports"))) {
+  console.error(`gate: --baseline-exports ${arg("baseline-exports")} not found`);
   process.exit(2);
 }
 const runner = path.join(root, "node-runner.mjs");
@@ -70,7 +82,19 @@ for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
 const PINNED = {
   LEAN4_WASM64_CWD: "", LEAN4_WASM64_PTHREAD_STACK_MB: "", LEAN4_WASM64_PTHREAD_POOL: "", LEAN4_WASM64_RTSTATS: "",
   LEAN_WASM_STACK_PROBE_SLOTS: "", LEAN_WASM_PARKED_DEDICATED: "", LEAN_WASM_PARKED_IDLE_MS: "", LEAN_WASM_STD_SURPLUS_EXIT: "",
+  LEAN_WASM_SYMTAB_TRACE: "",
 };
+// 0039's G7: every run traces the native-symbol lookups that miss a `lean_*` name (none may: the
+// interpreter never asks for a C runtime function by name) unless a check traces more. Runtimes
+// before 0039 ignore the variable.
+const TRACE_LEAN = { LEAN_WASM_SYMTAB_TRACE: "miss:lean_" };
+/** The `[symtab] …` lines of a run's stderr (persistent-probe prefixes them with `[lean:stderr] `). */
+const symtabLines = (stderr) => String(stderr).split("\n").flatMap((l) => {
+  const m = /\[symtab\] (miss -|hit \S+) (\S+)\s*$/.exec(l);
+  return m ? [{ hit: m[1] !== "miss -", kind: m[1].startsWith("hit ") ? m[1].slice(4) : null, name: m[2] }] : [];
+});
+const missedLean = []; // [run, name]: G7
+const noteMisses = (label, stderr) => { for (const t of symtabLines(stderr)) if (!t.hit && t.name.startsWith("lean_")) missedLean.push([label, t.name]); };
 function runChild(args, timeoutMs, env = {}) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, args, { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...PINNED, ...env } });
@@ -89,8 +113,8 @@ function runChild(args, timeoutMs, env = {}) {
       // stderr always reaches the gate's log (ABORT, panics, probe diagnostics); a clean
       // exit is judged by stdout, anything else by both streams
       process.stderr.write(stderr);
-      if (code === 0) resolve({ stdout, status: 0, timedOut });
-      else resolve({ stdout: `${stdout}\n${stderr}`, status: code ?? (timedOut ? 124 : 1), timedOut });
+      if (code === 0) resolve({ stdout, stderr, status: 0, timedOut });
+      else resolve({ stdout: `${stdout}\n${stderr}`, stderr, status: code ?? (timedOut ? 124 : 1), timedOut });
     });
   });
 }
@@ -107,11 +131,15 @@ async function runLean(source, label, env = {}, leanFlags = []) {
   // `rfl` elaborates, the process is killed by the timeout. The CLI checks below
   // are therefore judged by OUTPUT; a timeout is reported, not failed.
   try {
-    return await runChild([STACK, runner, "--artifact", artifact, "--work", work, "--", ...leanFlags, "/work/input.lean"], 240_000, env);
+    const r = await runChild([STACK, runner, "--artifact", artifact, "--work", work, "--", ...leanFlags, "/work/input.lean"], 240_000, { ...TRACE_LEAN, ...env });
+    noteMisses(label, r.stderr);
+    return r;
   } finally {
     rmTemp(work);
   }
 }
+// the runtime's diagnostic lines, which no check judges ([symtab]: 0039's lookup trace)
+const stripDebug = (s) => s.replace(/\[(DEBUG:PROGRESS|WASM (DEBUG|LSP|PROFILE|INIT)|symtab)\][^\n]*(?:\n|$)/g, "");
 let failures = 0;
 const gate = (ok, label, extra = "") => {
   console.log(`${ok ? " ok " : "FAIL"}  ${label}${extra ? ` — ${extra}` : ""}`);
@@ -140,6 +168,37 @@ if (is0038) {
 } else {
   skip0038("the glue's pool size and the counter exports");
 }
+
+// PATCH 0039, STATIC (runtime-contract.mjs). S2 and S6 hold for every runtime: the exports hosts
+// call, bound on Module to function exports (raw wasm names are minified since 0039, so they are
+// checked through the glue's own bindings), and the glue internals QED64's worker and node-runner
+// reach into. S1, from 0039 on: no generated Lean name exported, a small glue, a statically linked
+// module. From the repository (import-release.sh gate-dir) S2 also checks src/emscripten-exports.seed.txt.
+const seedFile = path.join(root, "..", "..", "src", "emscripten-exports.seed.txt");
+const seed = fs.existsSync(seedFile) ? parseSeed(fs.readFileSync(seedFile, "utf8")) : null;
+const statics = (() => {
+  let wasmBytes;
+  try { wasmBytes = fs.readFileSync(path.join(artifact, "bin/lean.wasm")); } catch { wasmBytes = new Uint8Array(0); }
+  return staticChecks({ glue, wasmBytes, seed });
+})();
+const is0039 = statics.level === "0039";
+for (const r of statics.results) {
+  if (r.note) console.log(`note  ${r.label}`);
+  else gate(r.ok, r.label, r.extra);
+}
+const skip0039 = (label) => console.log(`note  [0039] ${label}: skipped (a runtime before 0039)`);
+// G7's optional baseline: an earlier runtime's exports, every name its interpreter could resolve
+const baselineArg = arg("baseline-exports");
+const baseline = (() => {
+  if (!baselineArg) return null;
+  const bytes = fs.readFileSync(path.resolve(baselineArg));
+  const w = readWasm(bytes);
+  if (w.ok) return new Set(w.exports.keys());
+  return new Set(bytes.toString("utf8").split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#")));
+})();
+// Patch 0039b puts the plain functions into the table: G5 then requires Lean.Name.append to run
+// native; until then it reports which way the call went.
+const EXPECT_PLAIN_NATIVE = false;
 
 // The runtime's counters (LEAN4_WASM64_RTSTATS=1): node-runner answers a printed line containing
 // `[rtstats?]` with `[rtstats] <json>` right after it (runtime-knobs.mjs runtimeStats).
@@ -196,8 +255,12 @@ function judgeKnobs(out, on, tag) {
 const smokePool = { LEAN4_WASM64_PTHREAD_POOL: "-3", ...RTSTATS };
 const smoke = await runLean("#eval System.Platform.numBits\nexample : (2 + 2 : Nat) = 4 := by rfl\n" + ASK, "smoke", smokePool);
 poolTargets.push(["-3", 0, askedStats(smoke.stdout, "ASK")]);
-gate(/^64$/m.test(smoke.stdout) && !/error/i.test(smoke.stdout.replace(/\[DEBUG:PROGRESS\][^\n]*\n/g, "")),
+gate(/^64$/m.test(smoke.stdout) && !/error/i.test(stripDebug(smoke.stdout)),
   "numBits=64 + rfl proof (judged by output)", smoke.timedOut ? "CLI kept alive after main, killed by the timeout (patch 0020; expected)" : `exit ${smoke.status}`);
+// QED64's contract: callMain reaches main only through _emscripten_proxy_main, and a stock MAIN_MODULE
+// glue returned silently when it could not resolve it. The CLI printing anything at all means main ran.
+gate(/^64$/m.test(smoke.stdout), "callMain ran main (the one-shot CLI printed #eval's 64)",
+  /^64$/m.test(smoke.stdout) ? "" : "no output: main never ran (is _emscripten_proxy_main exported and callMain's entry function bound?)");
 
 // THREAD KNOBS ON (0038, G5/G6) ride on the false proof: probes/thread-knobs.lean after it, with
 // the standard-worker cap at 2 (--threads=2), surplus standard workers exiting, and parked
@@ -210,11 +273,46 @@ judgeKnobs(bad.stdout, true, "knobs on");
 // The parse defect lives in the PERSISTENT path (lean_wasm_compile); the
 // one-shot CLI has always reported parse errors. Drive the persistent probe
 // and require its garbage compile to surface diagnostics.
-const probe = await runChild([STACK, path.join(root, "persistent-probe.mjs"), "--artifact", artifact], 600_000);
+const probe = await runChild([STACK, path.join(root, "persistent-probe.mjs"), "--artifact", artifact], 600_000, TRACE_LEAN);
+noteMisses("persistent", probe.stderr);
 const probeOut = probe.stdout;
 const probeStatus = probe.status;
 gate(probeStatus === 0 && probeOut.includes("PERSISTENT PROBE PASS"), "persistent path: init, resident reuse, error reporting, survival");
 const parseFixed = probeOut.includes("runtime defect is FIXED");
+
+// G2 (0039): the native-symbol table is intact in the running module and in use. The probe prints
+// `SYMTAB {json}` after its compiles (runtime-knobs.mjs symtabStats): a fresh self-check (a full
+// decode: order, kinds, addresses, FNV), the entries by kind, the lookups. Against the build's own
+// manifest when the artifact is a build tree (lib/temp/lean_wasm_symtab.json: gate-dir).
+if (is0039) {
+  const m = /^SYMTAB (\{.*\})$/m.exec(probeOut);
+  let st = null;
+  try { st = m ? JSON.parse(m[1]) : null; } catch { st = null; }
+  const manifestFile = path.join(artifact, "lib/temp/lean_wasm_symtab.json");
+  let manifest = null;
+  try { manifest = JSON.parse(fs.readFileSync(manifestFile, "utf8")); } catch { manifest = null; }
+  const problems = [];
+  if (!st) problems.push("no SYMTAB line from the persistent probe");
+  else {
+    const sum = Object.values(st.kinds).reduce((a, n) => a + n, 0);
+    const hits = Object.values(st.hits).reduce((a, n) => a + n, 0);
+    if (st.status !== 0 || st.cachedStatus !== 0) problems.push(`self-check status ${st.status} (cached ${st.cachedStatus}), not 0`);
+    if (sum !== st.count) problems.push(`its kinds add up to ${sum}, not its ${st.count} entries`);
+    for (const k of ["boxed", "export", "cell", "init", "init_rt", "init_meta"]) if (!(st.kinds[k] > 0)) problems.push(`no ${k} entry`);
+    if (EXPECT_PLAIN_NATIVE ? !(st.kinds.plain > 0) : st.kinds.plain !== 0) problems.push(`${st.kinds.plain} plain entries`);
+    if (manifest) {
+      if (st.count !== manifest.count) problems.push(`${st.count} entries, the manifest ${manifest.count}`);
+      for (const [k, n] of Object.entries(manifest.counts ?? {})) if (st.kinds[k] !== n) problems.push(`${k} ${st.kinds[k]}, the manifest ${n}`);
+      if (st.fnv !== manifest.fnv1a64) problems.push(`fnv ${st.fnv}, the manifest ${manifest.fnv1a64}`);
+    }
+    if (hits === 0) problems.push("no lookup found an entry");
+  }
+  gate(problems.length === 0, `[0039] G2 the native-symbol table is intact (self-check, kinds${manifest ? ", the build's manifest" : ""}) and in use`,
+    problems.length ? problems.join("; ")
+      : `${st.count} entries, fnv ${st.fnv}; found ${Object.entries(st.hits).filter(([, n]) => n).map(([k, n]) => `${k} ${n}`).join(", ")}; ${st.misses} not found`);
+} else {
+  skip0039("G2 the native-symbol table");
+}
 
 // MODULE-SEMANTICS GATES (qed64 HARDENING #51): the environment's own facts for a
 // user file, not its messages. On Emscripten every import happens at
@@ -224,10 +322,13 @@ const parseFixed = probeOut.includes("runtime defect is FIXED");
 // three legacy probes run as ONE file (they all `import Lean`); the `module`
 // file runs alone. Probe sources: probes/*.lean next to this file (from qed64
 // tests/adversarial/kernel-probes).
-const stripDebug = (s) => s.replace(/\[(DEBUG:PROGRESS|WASM (DEBUG|LSP|PROFILE|INIT))\][^\n]*\n/g, "");
 const legacySrc = "import Lean\n" + ["is-module.lean", "private-default.lean", "rpc-attr.lean"]
   .map((f) => readProbe(f).replace(/^import Lean\n/m, "")).join("\n");
-const legacy = await runLean(legacySrc + ASK, "legacy", { LEAN4_WASM64_PTHREAD_POOL: "4", ...RTSTATS });
+// 0039 rides on this run too (G3, G4, G5, G6, G7): probes/symtab.lean after the legacy probes, and the
+// runtime traces every lookup that found nothing plus those that found the probe's names.
+const SYMTAB_HITS = ["l_Lean_versionString", "l_Lean_Meta_simpExtension", "l_Lean_Name_append"];
+const legacy = await runLean(legacySrc + ASK + "\n" + readProbe("symtab.lean"), "legacy",
+  { LEAN4_WASM64_PTHREAD_POOL: "4", ...RTSTATS, LEAN_WASM_SYMTAB_TRACE: `miss:;hit:${SYMTAB_HITS.join(",")}` });
 poolTargets.push(["4", 4, askedStats(legacy.stdout, "ASK")]);
 const legacyOut = stripDebug(legacy.stdout);
 gate(/isModule=false/.test(legacyOut) && !/isModule=true/.test(legacyOut), "legacy file: env.header.isModule = false",
@@ -239,10 +340,56 @@ gate(/main=work\.input\b/.test(legacyOut), "the one-shot CLI runs at VFS cwd / (
   (/main=\S+/.exec(legacyOut) ?? ["no main= line"])[0]);
 gate(!/error/i.test(legacyOut), "legacy file: @[server_rpc_method] / attribute [tactic] / @[app_unexpander] on plain defs accepted",
   /error/i.test(legacyOut) ? legacyOut.split("\n").find((l) => /error/i.test(l))?.slice(0, 160) : "");
-const moduleFile = await runLean(readProbe("module-file.lean"));
+const moduleFile = await runLean(readProbe("module-file.lean"), "module", { LEAN_WASM_SYMTAB_TRACE: "miss:" });
 const moduleOut = stripDebug(moduleFile.stdout);
 gate(/isModule=true/.test(moduleOut) && !/error/i.test(moduleOut), "`module` file: env.header.isModule = true",
   moduleFile.timedOut ? "CLI kept alive (expected)" : `exit ${moduleFile.status}`);
+
+// THE NATIVE-SYMBOL TABLE AT WORK (0039), from the two runs above: every lookup that found nothing,
+// and the hits on probes/symtab.lean's names, traced on stderr.
+if (is0039) {
+  const legacyTrace = symtabLines(legacy.stderr), moduleTrace = symtabLines(moduleFile.stderr);
+  const traced = legacyTrace.some((t) => !t.hit) && moduleTrace.some((t) => !t.hit);
+  // G3: Init/Std/Lean's module initializers (initialize_ in the legacy file, runtime_/meta_initialize_
+  // in the module) are all native: a miss would replay their [init] decls interpreted
+  const CORE_INIT = /^(runtime_|meta_)?initialize_(Init|Std|Lean)(_|$)/;
+  const initMisses = [...legacyTrace, ...moduleTrace].filter((t) => !t.hit && CORE_INIT.test(t.name)).map((t) => t.name);
+  const replayed = /already (exists|been initialized)/.test(legacy.stdout + moduleFile.stdout);
+  gate(traced && initMisses.length === 0 && !replayed,
+    "[0039] G3 Init/Std/Lean's module initializers are found in the table (legacy and `module` files: no initializer miss, no replay)",
+    !traced ? "no lookup was traced: LEAN_WASM_SYMTAB_TRACE did not reach the runtime"
+      : initMisses.length ? `${initMisses.length} missed, e.g. ${initMisses.slice(0, 3).join(", ")}` : replayed ? "an initializer ran twice" : "");
+  // G4: interpreted code reads constants from their native cells
+  const hitAs = (name) => legacyTrace.find((t) => t.hit && t.name === name)?.kind ?? null;
+  const cells = ["l_Lean_versionString", "l_Lean_Meta_simpExtension"].map((n) => [n, hitAs(n)]);
+  const g4out = /^SYMTAB G4 versionString \S/m.test(legacyOut) && /^SYMTAB G4 simpExtension has Nat\.add_zero: true$/m.test(legacyOut);
+  gate(cells.every(([, k]) => k === "cell") && g4out, "[0039] G4 interpreted code reads constants from their native cells (versionString, simpExtension)",
+    cells.map(([n, k]) => `${n}: ${k ? `hit ${k}` : "not found"}`).join(", ") + (g4out ? "" : "; the probe's output is missing"));
+  // G5: an interpreted function calling plain (all-object, unboxed) core functions
+  const append = hitAs("l_Lean_Name_append");
+  const g5out = /^SYMTAB G5 x0\.x1\.x2$/m.test(legacyOut);
+  if (EXPECT_PLAIN_NATIVE) {
+    gate(append === "plain" && g5out, "[0039] G5 interpreted code calls a plain core function natively (Lean.Name.append)",
+      `${append ? `hit ${append}` : "not found: interpreted"}${g5out ? "" : "; the probe's output is wrong"}`);
+  } else {
+    gate(g5out, "[0039] G5 interpreted code calling plain core functions computes the right value", g5out ? "" : "the probe's output is wrong");
+    console.log(`note  [0039] G5 Lean.Name.append ran ${append ? `native (hit ${append})` : "interpreted (plain functions are not in the table)"}`);
+  }
+  // G6 (informational): the same function 20,000 times
+  console.log(`note  [0039] G6 symtabProbe 20000: ${(/^SYMTAB G6 parts=(\d+) ms=(\d+)$/m.exec(legacyOut) ?? [, "?", "?"]).slice(1).join(" parts, ")} ms`);
+  // G7: every lookup that found nothing asked for a name no earlier runtime could resolve either
+  // (the `lean_*` half of G7 is judged over every run, at the end)
+  const misses = [...new Set([...legacyTrace, ...moduleTrace].filter((t) => !t.hit).map((t) => t.name))];
+  if (baseline) {
+    const lost = misses.filter((n) => baseline.has(n));
+    gate(traced && lost.length === 0, `[0039] G7 no lookup missed a name the baseline runtime exported (${misses.length} distinct misses)`,
+      lost.length ? `missed: ${lost.slice(0, 5).join(", ")}${lost.length > 5 ? ", …" : ""}` : "");
+  } else {
+    console.log(`note  [0039] G7 ${misses.length} distinct lookups found nothing; no --baseline-exports to compare them with`);
+  }
+} else {
+  skip0039("G3-G7 the native-symbol table at work");
+}
 
 // TASK-MANAGER STORM (patch 0035). Every shape of task traffic the language
 // server produces, at volume (probes/task-storm.lean): a forAsync
@@ -336,7 +483,8 @@ try {
     files.push(twin);
   }
   asyncRun = await runChild([STACK, path.join(root, "persistent-probe.mjs"), "--artifact", artifact,
-    "--cases", files.join(","), "--passes", "2"], 900_000);
+    "--cases", files.join(","), "--passes", "2"], 900_000, TRACE_LEAN);
+  noteMisses("async cases", asyncRun.stderr);
 } finally {
   rmTemp(twinDir);
 }
@@ -454,6 +602,16 @@ gate(!!reErr && !!reOk && reErr.scalar === 1 && reErr.diags.some((d) => d.severi
 console.log(`note  [0037] mixed-mode linting (option scoped by \`in\`; informational): ${shown(caseOf("async-mixed-lint"))}`);
 gate(parseFixed, "THE PARSE GATE: lean_wasm_compile reports parser diagnostics",
   parseFixed ? "" : "persistent shell still swallows parse errors");
+
+// G7 (0039), over every run: no lookup missed a `lean_*` name. The interpreter's keys are Lean
+// names (boxed wrappers, @[export] names, cells, initializers); the C runtime's lean_* functions
+// left the export list with 0039 and must never have been one.
+if (is0039) {
+  gate(missedLean.length === 0, "[0039] G7 no lookup in any run missed a lean_* name",
+    missedLean.slice(0, 5).map(([run, n]) => `${run}: ${n}`).join(", "));
+} else {
+  skip0039("G7 the lean_* lookups");
+}
 
 console.log(failures === 0 ? "\nGATE PASSED" : `\nGATE FAILED (${failures})`);
 // exitCode, not process.exit(): see fetch-release.mjs (shutdown deadlock after heavy JIT work)

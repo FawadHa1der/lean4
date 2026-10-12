@@ -21,7 +21,20 @@ Requires Docker (image builds from `../docker-wasm64`, emsdk 6.0.5) and
 
 The gate must pass before any artifact is used: numBits=64, proof smoke,
 error smoke, module-semantics probes, the task storm, and THE PARSE GATE
-(garbage input must diagnose, not succeed).
+(garbage input must diagnose, not succeed). Since patch 0039 it also checks the
+runtime's files against the JavaScript export contract and the glue internals
+hosts reach into, and the native-symbol table at work.
+
+The link writes `build/stage1/bin/lean.js.symbols` (`index:name` of every wasm
+function), which stays in the build tree: since 0039 the module exports only the
+JavaScript contract and its raw export names are minified, so a
+`wasm-function[N]` in a trace or a profile is named from this map (with
+`EMSCRIPTEN_DEBUG=ON`'s `--profiling-funcs` the binary carries the names
+itself). `LEAN_WASM_SYMTAB_TRACE` (EMBED-RUNTIME.md §3.1) prints the IR
+interpreter's native-symbol lookups, e.g. `LEAN_WASM_SYMTAB_TRACE=miss:
+lean4-wasm64 run …` for every name it did not find natively.
+`stack-margin.mjs` measures, through the host lock, the smallest pthread stack
+each deep-recursion proof needs on a runtime (to compare runtimes).
 
 Outputs: `build/stage1/bin/lean.{js,wasm}` (the browser runtime) and its
 `lib/lean`. `native64.sh` builds the same commit as a native linux compiler

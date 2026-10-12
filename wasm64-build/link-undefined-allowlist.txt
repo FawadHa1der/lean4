@@ -1,0 +1,15 @@
+# The undefined symbols the `lean` link may report (patch 0039's link check B3, check-link.py).
+#
+# The link runs with ERROR_ON_UNDEFINED_SYMBOLS=0 (our libuv build does not define every symbol;
+# src/CMakeLists.txt): an undefined function becomes a JS stub that aborts ("missing function")
+# only when it is called. Since 0039 links statically, every reference the native-symbol table
+# makes is live code, so a symbol that newly turns up undefined is a function that would abort at
+# its first call. check-link.py fails the build on a table entry that is undefined and on any
+# `signature mismatch`, whatever this file says, and compares every other undefined symbol with
+# the names below: it prints the new and the vanished ones.
+#
+# NOT CALIBRATED YET: this list is to be filled from the first 0039 link (make-lean.log in the
+# build dir; check-link.py prints the names). Until the line `# calibrated-from: <build>` is
+# present, a difference is only printed; with it, a new undefined symbol fails the build too.
+#
+# One name per line, `#` comments.

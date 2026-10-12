@@ -23,7 +23,7 @@ verdict in its commit message. Summary:
 | 0014 | **Snapshot-load stage timings + streamed init progress**: every load reports region-read vs `[init]`-replay split (plus top-10 module timings when replay >5 s), and streams `[WASM INIT] i/n module` per module so hosts can render live progress through the blocking call | diagnostic; the numbers justify upstream work on initializer execution |
 | 0015 | Multi-arch emsdk base image (drops the -arm64 pin so amd64 hosts build natively) | build hygiene |
 | 0016 | **Replay-control flags on `lean_wasm_load_snapshot_mem`** (bit 0 = run the `[init]` replay; extension states come from the region, the replay rebuilds process-side registrations) | fork-shaped control surface; useful to any embedder |
-| 0017 | **Interpreter dlsym probes gated on the wasm export table**: `lookup_symbol_in_cur_exe` consults a one-time `Set` of export names before calling dlsym | **as-is** for the Emscripten target — turns a 173 s pathology into ~1 s (below) |
+| 0017 | **Interpreter dlsym probes gated on the wasm export table**: `lookup_symbol_in_cur_exe` consults a one-time `Set` of export names before calling dlsym | **as-is** for the Emscripten target — turns a 173 s pathology into ~1 s (below). **Superseded by 0039** (an in-module table, no dlsym, no JS) |
 | 0018 | **Host-pumped LSP file worker** (`lean_wasm_lsp_init` / `lean_wasm_lsp_send`): drive a single-file server session one message at a time when a blocking stdin is impossible (WASM event-loop hosts); forces `server.reportDelayMs := 0` (timed sleeps on dedicated pthreads do not wake under this build) | experimental (branch `feature/lean4web-frontend`); the embedding shape mirrors the watchdog contract |
 | 0019 | **24 preallocated pthread workers, 8 MiB thread stacks**: every `ServerTask` is `prio := .dedicated`, and synchronous `pthread_create` under Emscripten can only claim preallocated workers | needed by any wasm host running the language server |
 | 0020 | **Keepalive-guard emscripten's `$checkMailbox`** (build-image patch to emsdk 6.0.5): mailbox servicing ran through `callUserCallback`→`maybeExit`, which `_exit()`s an EXIT_RUNTIME=1 runtime with no keepalives — terminating the pthread blocked in `emscripten_proxy_sync` right after its proxied op executed. Reproduced in 30 lines of pure C on stock wasm32 | **upstream emscripten PR ready** — see docs/EMSDK-BUG-REPORT.md |
@@ -113,12 +113,17 @@ re-derived on any future base revision.
    `udp_wait_readable`, `udp_cancel_recv`) that `lean_always_assert(false)`;
    they close the link, they are NOT network support.
 9. `src/emscripten-exports.txt` — regenerate for the 64-bit symbol universe.
+   Since 0039 it is the JavaScript contract only (`src/emscripten-exports.seed.txt`);
+   what the IR interpreter resolves by name is the generated in-module table
+   (`lean_wasm_symtab.c`), which must be linked into `lean` and nothing else.
 
 ## Explicitly unchanged
 
 - JS-exception mode stays (`-sDISABLE_EXCEPTION_CATCHING=0`);
   `-fwasm-exceptions` is a known miscompile on this tree under emsdk 6.
-- `MAIN_MODULE=2` + explicit exports stays (the interpreter's dlsym contract).
+- ~~`MAIN_MODULE=2` + explicit exports stays (the interpreter's dlsym contract).~~
+  Replaced by 0039: a static link, the native-symbol table for the interpreter,
+  and exports that are the JavaScript contract.
 - `USE_GMP=OFF` stays: the olean header's GMP flag must match between the
   artifact producer and this runtime.
 
@@ -279,7 +284,8 @@ changed in the series itself:
 - **The slim (iPhone) list is generated too** (`gen-exports.py --slim`): seed +
   initializers + cells + only the boxed wrappers with no unboxed body. The
   committed `emscripten-exports-slim.txt` had 123 stale names after the import
-  and is deleted; CI's slim relink calls the generator.
+  and is deleted; CI's slim relink calls the generator. (Retired with its CI
+  step by 0039.)
 - **Merge audit** (34 agents, every both-sides file + four cross-file systems,
   each finding adversarially verified): no lost hunk, no orphaned hook — the
   resident resolver is still on the only header path, legacy-import tolerance
@@ -566,3 +572,122 @@ For hosts: a pool of other than 24 moves thresholds keyed to it, such as QED64's
 (`lib/edit-coalescer.ts` holds while fewer than 6 pool Workers are free, "6 of the runtime's 24");
 the two exits are for a host that has measured its reload behaviour with them (EMBED-RUNTIME.md
 §3.1, §3.6).
+
+## Unreleased: 0039 — wasm: native symbols through an in-module table; static link; exports = the JS contract
+
+(The heading becomes `## 0039 — … (<commit>)` with the gate's numbers when a release records it,
+as for 0038.)
+
+The IR interpreter finds native code by name (`lookup_symbol_in_cur_exe`): a decl's boxed wrapper,
+its `@[export]` name, a constant cell, a module initializer. Natively that is `dlsym` over the
+dynamic symbol table (`lean` links with `-rdynamic`). On wasm `dlsym` searched the module's
+EXPORTS, under `-sMAIN_MODULE=2`, so `gen-exports.py` exported every such name: 106,368 exports.
+Each cost JavaScript in every Worker, main runtime and pthreads alike: a 49 MB glue
+(`assignWasmExports` alone 37 MB), the dynamic linker's per-export bookkeeping and table growth
+(`updateGOT`), ~129 MiB of JS heap per isolate (qed64 HARDENING #55; a renderer's 4 GiB
+pointer-compression cage held about 30), a 2.4 s boot in Node. And every `dlsym` hit went
+through JavaScript (`Object.keys(…).indexOf` over the exports, under the dynamic linker's lock).
+
+- **The table.** `gen-exports.py --symtab` writes `lib/temp/lean_wasm_symtab.c` from the build's
+  own C: every name the interpreter may ask for, sorted bytewise and front-coded (a whole name
+  heads each block of 16, then `[shared-prefix byte][suffix] NUL`), with its kind and its address
+  (a function pointer — a table index — or a cell's address, both fixed at link time), and the
+  declarations copied from each defining file's own `LEAN_EXPORT` prototype, so every signature is
+  exact. The selection comes from the archives the link uses (`--archives`, read with an nm that
+  reads wasm objects), cross-checked against the C (B1: any difference stops the build), with
+  per-kind floors (B2); the outputs are rewritten only when they change, with a manifest (count,
+  kinds, FNV-1a-64 over `name NUL kind`, sha256 of the names). On the v4.34.0 tree (the 0037
+  build, whose binary is r3's): boxed 90,208, export 228, cell 8,295, initializers 3 × 2,356 —
+  105,799 entries, names 3,999,813 bytes front-coded (11,415,120 raw), the longest 1,554, FNV
+  `b02d6ef8a9143ae4`; host clang compiles it for wasm64 in 1.3 s without a warning, and each of its
+  97,504 function references has the signature of its definition in the archives (checked
+  against the objects' own types). `mkMangledBoxedName` names the wrapper of a stem ending in
+  `__` `…_00__boxed`, which the old classification missed: those 6 wrappers are boxed entries now
+  (r3 exported none of them, so their decls ran interpreted), and their unboxed siblings — one
+  with scalar parameters — are not "plain".
+- **The plain functions stay out** (`INCLUDE_PLAIN = False`): the 29,538 all-object `l_*`
+  functions without a boxed wrapper, which the interpreter would call natively once in the table,
+  are their own measured step (0039b). This patch resolves exactly what r3 resolved: every name r3
+  exported for the interpreter is in the table but `initialize_libuv` (no Lean module names it),
+  plus `lake_environment_add` (an `@[export]` the old seed lacked) and the 6 wrappers above.
+- **The lookup** (`src/library/wasm_symtab.cpp`): a binary search over the block heads, then at
+  most one block's decodes, in C — no lock (the data is immutable), no JavaScript, no
+  initialization, safe from any thread; ~330 ns a hit and ~210 ns a miss on the host over the full
+  table. `lookup_symbol_in_cur_exe` calls it under `LEAN_EMSCRIPTEN`, with no fallback; 0017's
+  EM_JS export `Set` is deleted. `initialize_ir_interpreter` asserts the table is not empty.
+  Relaxed counters by kind; `LEAN_WASM_SYMTAB_TRACE` (`miss|hit|all[:prefix,…]`, clauses joined by
+  `;`, strictly parsed: anything else traces nothing, with one warning) prints lookups on stderr.
+  Exports `lean_wasm_symtab_stats(key)` (doubles, lock-free; EMBED-RUNTIME.md §2) and
+  `lean_wasm_symtab_selfcheck(counts, fnv)` (a full decode: order, kinds, addresses, FNV).
+- **The link is static** (no `-sMAIN_MODULE=2`). Nothing loads side modules, so the dynamic
+  linking emcc calls experimental with pthreads goes, with its GOT, its per-thread `dlsync` and
+  `dylink.0`; a missing table is a link error. `lean_dynlib_load` returns an IO error under
+  `LEAN_EMSCRIPTEN` before any `dlopen` (`--load-dynlib`, `--plugin`, `Lean.loadDynlib`).
+  `-sALLOW_TABLE_GROWTH=1` keeps what MAIN_MODULE set; `--emit-symbol-map` writes
+  `bin/lean.js.symbols` (`index:name` of every function: the crash-triage map now that functions
+  have no export names), which stays in the build tree (`stage-release.sh` leaves it out). At -O3
+  the raw wasm import and export names are now minified; `Module["_x"]` names do not change.
+  `-fPIC` stays: PIC objects already linked into MAIN_MODULE=2's fixed-address module, and
+  dropping it changes every object (a cold build) for a gain to be measured separately. The table
+  is an input and a prerequisite of the `lean` rule alone (`src/stdlib.make.in`): the linker flags
+  are shared by every executable rule.
+- **The export list is the JavaScript contract**, `src/emscripten-exports.seed.txt`, one name per
+  line with its callers (QED64's runtime-touch contract): the 17 Lean/C entry points QED64 calls,
+  `_main`, `_lean_wasm_reset`, the 0038 and 0039 gauges, and the three Emscripten built-ins hosts
+  reach (`__emscripten_proxy_main`, `__emscripten_check_mailbox`, `_pthread_self`, now also bound
+  on `Module`): 27 names. 749 names left it: 221 `@[export]` names (table entries now), 527 C++
+  `lean_*` functions no JavaScript calls (the interpreter's keys are never C names: an
+  `@[extern]` decl is reached through its boxed wrapper), and `initialize_libuv`. The generator's
+  "runtime API defined but not in the seed" report is retired: "every `lean_*` C symbol is
+  exported" serves nothing any more. `EXPORTED_RUNTIME_METHODS` is unchanged (QED64's contract
+  needs `callMain`, `FS`, `ENV`, `getValue`, `stringToNewUTF8`; `ccall`, `setValue`,
+  `UTF8ToString` stay).
+- **The slim (iPhone) variant is retired**: CI's "Link slim (iOS) wasm variant" step and
+  `gen-exports.py --slim`. The per-export glue it avoided is gone, Safari has no Memory64, nothing
+  consumed `bin-slim`.
+
+**Build checks** (`build.sh`): B1 and B2 in the generator (step 4b; `QED64_NM` names the nm);
+B3 after the link (`check-link.py`): a `signature mismatch` in the link log or a
+`signature_mismatch:` function in `lean.js.symbols`, or a table entry left undefined, fails the
+build; other undefined symbols are compared with `link-undefined-allowlist.txt`, which the first
+0039 link calibrates (until it says `# calibrated-from:`, differences are printed, not failed).
+`import-release.sh build`'s `gen-exports.py --check` recomputes the selection and fails (exit 1)
+when it differs from the build's manifest or the export list on disk.
+
+**Gate**, folded into the existing runs (still 11 runtimes; on a runtime before 0039 every 0039
+check is skipped with a note): static S1 (no generated name bound on `Module`, `lean.js` under
+1 MiB, no `dylink.0`, no GOT import, few exports, no trace of 0017), S2 (every contract name bound
+on `Module` to a function export, through the glue's own bindings; from the repository with the
+seed, packaged with `js/runtime-contract.mjs`'s copy), S6 (the [GLUE] surface QED64's worker and
+node-runner reach into, EMBED-RUNTIME.md §5), and that `callMain` ran `main`; G2 (the persistent
+probe's `SYMTAB` line: a fresh self-check, the kinds and FNV against the build's manifest, lookups
+made), G3 (no Init/Std/Lean initializer missed in the legacy and `module` runs, no replay), G4
+(`Lean.versionString` and `Lean.Meta.simpExtension` read from their cells), G5 (a function calling
+plain core functions computes its value; whether `Lean.Name.append` ran native is reported, and
+required once 0039b adds the plain functions), G6 (timing, informational), G7 (no lookup in any
+run missed a `lean_*` name; with `--baseline-exports <r3's lean.wasm>`, none missed a name r3
+exported). `js/probes/symtab.lean` rides on the legacy run. `js/exports-audit.mjs` lists what
+consumer trees touch against the contract and S6: over QED64 (worker, pipeline, lib, tests,
+embedding) and lean4game (client, served worker, relay) it reports every name covered; over the
+widgets showcase and the proof sheets, one glue global S6 did not list,
+`ENVIRONMENT_IS_PTHREAD` (the showcase's UX probes, typeof-guarded), now reported as a test
+reach-in.
+
+**Snapshots**: every table index and static address moves, so every `.snap` is rebaked for the
+new build id (as for any build). Init replay should get cheaper: `runModInitCore` lookups (2.4k–4.7k
+per import with extensions) no longer cross into JavaScript.
+
+**Explicitly unchanged**: 0036's engine-stack guard (no edit to `stackinfo.cpp`,
+`interrupt.cpp`, `CoreM.lean`, the probe, its slots or the stack sizes). The link can still move
+native frame sizes — 537 C++ functions are no longer exported and may now be inlined
+(`lean_wasm_native_stack_ok` among them) — so `stack-margin.mjs` measures, per deep-recursion
+probe (Fin 40 `decide`, nested `have`, a `<;>` chain, `decide +kernel`), the smallest pthread
+stack it survives and passes with; record r3 vs 0039 here.
+
+**To be measured on the first build** (not done: no runtime was built for this commit): `lean.js`,
+`lean.wasm` and section sizes; the per-Worker JS heap and renderer RSS (QED64's HARDENING #55
+method; EMBED-RUNTIME.md §6 says "to be measured"); Node boot and RSS; persistent compile and
+snapshot init-replay timings against r3; the stack margins above; the B3 allowlist.
+
+For hosts: the contract and every `Module["_x"]` name are as before. Do not reach a raw
+`wasmExports["x"]` (minified now); expect `Dynlib.load` to fail; rebake snapshots.
