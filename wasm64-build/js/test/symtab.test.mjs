@@ -424,25 +424,50 @@ test("the static checks fail what hosts would miss: an unbound or non-function e
   assert.equal(byLabel(results, /statically linked module/).ok, false);
 });
 
+// a runtime of this line before 0039: a MAIN_MODULE (dylink.0, GOT imports) whose glue holds 0017's export-set gate
+const OLD_GATE = "function qed64_symbol_exists(sym){if(!Module.qed64ExportSet){Module.qed64ExportSet=new Set(Object.keys(wasmExports))}return Module.qed64ExportSet.has(sym)}";
+const DYNAMIC = { customs: ["dylink.0"], imports: [["a", "b", 2], ["a", "c", 0], ["GOT.mem", "__heap_base", 3], ["GOT.func", "f", 3]] };
+const olderRuntime = (names, extraGlue = "") => runtimeOf(names, `${OLD_GATE}\n${extraGlue}`, DYNAMIC);
+
 test("an older runtime is held to what it promised: S1 skipped, S2 without the 0038/0039 names, S6 in full; the repository seed only from 0039", () => {
   const base = CONTRACT.filter((c) => c.patch === null).map((c) => c.name);
   // before 0039 the glue binds the built-ins to globals only, not on Module (r3: `_pthread_self=wasmExports["pthread_self"]`)
   const builtins = 'function more(wasmExports){_pthread_self=wasmExports["pthread_self"];__emscripten_check_mailbox=wasmExports["_emscripten_check_mailbox"]}';
-  let { level, results } = staticChecks(runtimeOf(base, builtins));
+  let { level, results } = staticChecks(olderRuntime(base, builtins));
   assert.equal(level, "base");
   assert.equal(byLabel(results, /S1 skipped/).note, true);
   assert.equal(byLabel(results, /^S2/).ok, true, byLabel(results, /^S2/).extra);
   assert.equal(byLabel(results, /^S6 the \[GLUE\]/).ok, true);
-  ({ results } = staticChecks({ ...runtimeOf(base, builtins), seed: ["_lean_extra_from_the_seed"] }));
+  ({ results } = staticChecks({ ...olderRuntime(base, builtins), seed: ["_lean_extra_from_the_seed"] }));
   assert.equal(byLabel(results, /^S2/).ok, true); // the seed binds a 0039 runtime only
-  ({ results } = staticChecks(runtimeOf(base)));
+  ({ results } = staticChecks(olderRuntime(base)));
   assert.match(byLabel(results, /^S6 the \[GLUE\]/).extra, /_pthread_self, __emscripten_check_mailbox/); // no binding at all
   const with0038 = [...base, "_lean_wasm_task_manager_stat", "_lean_wasm_engine_probes", "_lean_wasm_engine_guard_trips"];
-  ({ level } = staticChecks(runtimeOf(with0038)));
+  ({ level } = staticChecks(olderRuntime(with0038)));
   assert.equal(level, "0038");
   assert.deepEqual(requiredExports("0038"), with0038);
   ({ results } = staticChecks({ ...runtimeOf(), seed: ["_lean_extra_from_the_seed"] }));
   assert.match(byLabel(results, /^S2/).extra, /_lean_extra_from_the_seed not bound on Module/);
+});
+
+test("a 0039 runtime whose glue lost _lean_wasm_symtab_stats is still 0039 (its static module, or its glue without 0017's gate, says so): S2 fails on the name", () => {
+  const all = CONTRACT.map((c) => c.name);
+  const lost = all.filter((n) => n !== "_lean_wasm_symtab_stats");
+  let { level, results } = staticChecks({ ...runtimeOf(lost), seed: all });
+  assert.equal(level, "0039");
+  assert.equal(byLabel(results, /S1 no generated Lean name/).ok, true); // S1 ran
+  assert.match(byLabel(results, /^S2/).label, new RegExp(`${all.length} names .*with the repository's seed`));
+  assert.match(byLabel(results, /^S2/).extra, /_lean_wasm_symtab_stats not bound on Module/);
+  // a dynamically linked module, but a glue with 0038's names and without 0017's gate: 0039, and S1 fails the link
+  ({ level, results } = staticChecks(runtimeOf(lost, "", DYNAMIC)));
+  assert.equal(level, "0039");
+  assert.equal(byLabel(results, /statically linked module/).ok, false);
+  // the same with 0017's gate is a 0038 runtime; without lean.wasm the glue alone decides
+  assert.equal(staticChecks(runtimeOf(lost, OLD_GATE, DYNAMIC)).level, "0038");
+  assert.equal(contractLevel(runtimeOf(lost).glue), "0039");
+  assert.equal(contractLevel(runtimeOf(lost).glue + OLD_GATE), "0038");
+  assert.equal(contractLevel(runtimeOf(lost).glue + OLD_GATE, readWasm(runtimeOf(lost).wasmBytes)), "0039"); // static wins
+  assert.equal(contractLevel(OLD_GATE, readWasm(Buffer.from("not wasm"))), "base");
 });
 
 test("runtime-contract.mjs's copy of the contract is src/emscripten-exports.seed.txt", (t) => {
@@ -490,9 +515,24 @@ test("exports-audit: every runtime name a consumer touches is in the contract or
   r = run("--glue", glue, tree);
   assert.equal(r.status, 0, r.stdout);
   assert.match(r.stdout, /AUDIT: every name is covered/);
+  // a chain is read at every link: Module, then the glue global behind it
+  write(glue, 'var Module=typeof Module!="undefined"?Module:{};var someGlueVar=1;var HEAPU8;var someInternal;');
+  fs.writeFileSync(path.join(tree, "workers", "lean.worker.js"),
+    "const b = globalThis.Module.HEAPU8?.buffer; self.Module.someInternal(); window.Module?.checkMailbox; M._lean_wasm_compile(a, b);");
+  r = run("--glue", glue, "--json", tree);
+  assert.equal(r.status, 1, r.stdout);
+  const chained = JSON.parse(r.stdout);
+  assert.deepEqual(chained.unguarded.map((u) => u.name), ["HEAPU8", "someInternal"]);
+  assert.deepEqual(chained.guarded.map((u) => u.name), ["checkMailbox", "Module"]);
   assert.equal(run().status, 2);
   assert.equal(run("--nope", tree).status, 2);
   assert.equal(run(path.join(root, "absent")).status, 2);
+  for (const flag of ["--glue", "--seed"]) {
+    r = run(flag, path.join(root, "no-such-file.js"), tree);
+    assert.equal(r.status, 2, `${flag}: ${r.stderr}`);
+    assert.match(r.stderr, /no-such-file\.js not found/);
+    assert.doesNotMatch(r.stderr, /\n\s+at /); // a usage error, not a stack trace
+  }
   assert.equal(run("--help").status, 0);
 });
 

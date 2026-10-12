@@ -48,8 +48,12 @@ echo "=== [4b/5] the native-symbol table and the export list, from the compiled 
 # against the C (B1). gen-exports.py fails closed: an nm that cannot read the wasm archives stops
 # the build (QED64_NM names one; default llvm-nm on PATH, else nm — Apple's is LLVM's).
 # src/emscripten-exports.txt (gitignored): the JavaScript contract, src/emscripten-exports.seed.txt.
-# Each is rewritten only when it changes, so an unchanged one does not relink. See gen-exports.py.
+# Each is rewritten only when it changes, so the link depends on it truly (the link still runs on
+# every build: the dummy libleanshared targets touch their files each time). See gen-exports.py.
 STAGE1_TEMP="$BUILD_DIR/build/stage1/lib/temp"; STAGE1_LIBS="$BUILD_DIR/build/stage1/lib/lean"
+# The generator runs here, on the host, and writes into lib/temp, which make created in the
+# container: Docker Desktop maps the bind mount to this user; rootful Docker on Linux leaves it root's.
+[ -w "$STAGE1_TEMP" ] || { echo "build.sh: $STAGE1_TEMP is not writable by $(id -un) (made in the container as another user, e.g. root under rootful Docker on Linux): the table cannot be written there. Use Docker Desktop or rootless Docker, or chown the build tree to $(id -un)" >&2; exit 1; }
 python3 "$REPO/wasm64-build/gen-exports.py" "$STAGE1_TEMP" "$REPO/src" \
   --symtab "$STAGE1_TEMP/lean_wasm_symtab.c" --symtab-manifest "$STAGE1_TEMP/lean_wasm_symtab.json" \
   --archives "$STAGE1_LIBS/libInit.a" "$STAGE1_LIBS/libStd.a" "$STAGE1_LIBS/libLean.a" --nm "${QED64_NM:-auto}"

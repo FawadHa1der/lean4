@@ -229,11 +229,12 @@ function judgeKnobs(out, on, tag) {
   });
   const nest = samples.filter((x) => x.phase === "nest"), burst = samples.filter((x) => x.phase === "burst");
   const n = nest.at(-1)?.tm, b = burst.at(-1)?.tm;
-  const std = n ? `live ${n.liveStd}, cap ${n.stdCap}, peak ${n.liveStdPeak}, surplus exits ${n.stdSurplusExits}` : "no sample";
+  const std = n ? `live ${n.liveStd}, cap ${n.stdCap}, peak ${n.liveStdPeak}, surplus exits ${n.stdSurplusExits}${n.stdSpawns == null ? "" : `, ${n.stdSpawns} started`}` : "no sample";
   const mostParked = burst.length ? Math.max(...burst.map((x) => x.tm.parked)) : null;
   if (!on) {
-    gate(!!n && n.stdSurplusExits === 0 && n.liveStd === n.liveStdPeak,
-      `[0038] [${tag}] after a Task.get burst every standard worker stays (LEAN_WASM_STD_SURPLUS_EXIT unset)`, std);
+    // past the cap (--threads=2): with the burst inside the cap, "every worker stays" would hold whatever the runtime did
+    gate(!!n && n.liveStdPeak > n.stdCap && n.stdSurplusExits === 0 && n.liveStd === n.liveStdPeak,
+      `[0038] [${tag}] after a Task.get burst past the cap every standard worker stays (LEAN_WASM_STD_SURPLUS_EXIT unset)`, std);
     gate(!!b && mostParked === 0 && b.parkedIdleExits === 0,
       `[0038] [${tag}] after a burst of dedicated tasks no thread parks or leaves idle (parking unset)`,
       b ? `parked at most ${mostParked}, idle exits ${b.parkedIdleExits}` : "no sample");
@@ -253,15 +254,22 @@ function judgeKnobs(out, on, tag) {
 // LEAN4_WASM64_PTHREAD_POOL is Module.pthreadPoolSize, which the glue reads as 0, 4 and 24 (the
 // default). The pool size changes only how many Workers exist before a thread needs one, so the
 // runs' own checks hold at any size.
+// THREAD KNOBS OFF (0038, G5/G6) ride on this run too: probes/thread-knobs.lean after it, with
+// every knob unset and the standard-worker cap at 2 (--threads=2), so its Task.get burst goes past
+// the cap; the workers beyond it stay and no dedicated thread parks, as before 0038.
 const smokePool = { LEAN4_WASM64_PTHREAD_POOL: "-3", ...RTSTATS };
-const smoke = await runLean("#eval System.Platform.numBits\nexample : (2 + 2 : Nat) = 4 := by rfl\n" + ASK, "smoke", smokePool);
+const smoke = await runLean("#eval System.Platform.numBits\nexample : (2 + 2 : Nat) = 4 := by rfl\n" + ASK + readProbe("thread-knobs.lean"),
+  "smoke", smokePool, ["--threads=2"]);
 poolTargets.push(["-3", 0, askedStats(smoke.stdout, "ASK")]);
-gate(/^64$/m.test(smoke.stdout) && !/error/i.test(stripDebug(smoke.stdout)),
+// as before 0038, only the progress lines are set aside (and 0039's lookup trace), not every diagnostic line
+const smokeOut = smoke.stdout.replace(/\[(DEBUG:PROGRESS|symtab)\][^\n]*(?:\n|$)/g, "");
+gate(/^64$/m.test(smoke.stdout) && !/error/i.test(smokeOut),
   "numBits=64 + rfl proof (judged by output)", smoke.timedOut ? "CLI kept alive after main, killed by the timeout (patch 0020; expected)" : `exit ${smoke.status}`);
 // QED64's contract: callMain reaches main only through _emscripten_proxy_main, and a stock MAIN_MODULE
 // glue returned silently when it could not resolve it. The CLI printing anything at all means main ran.
 gate(/^64$/m.test(smoke.stdout), "callMain ran main (the one-shot CLI printed #eval's 64)",
   /^64$/m.test(smoke.stdout) ? "" : "no output: main never ran (is _emscripten_proxy_main exported and callMain's entry function bound?)");
+judgeKnobs(smoke.stdout, false, "knobs off");
 
 // THREAD KNOBS ON (0038, G5/G6) ride on the false proof: probes/thread-knobs.lean after it, with
 // the standard-worker cap at 2 (--threads=2), surplus standard workers exiting, and parked
@@ -402,8 +410,8 @@ if (is0039) {
 // every pthread_create is a synchronous round trip to the main JS thread).
 // Run twice: the DEFAULT (no parking — qed64 L9) as served, and with parking
 // enabled (LEAN_WASM_PARKED_DEDICATED=8) so the opt-in path stays verified.
-const stormRun = async (env, tag, after = "") => {
-  const r = await runLean(readProbe("task-storm.lean") + after, "storm", { QED64_COUNT_PTHREADS: "1", ...env });
+const stormRun = async (env, tag) => {
+  const r = await runLean(readProbe("task-storm.lean"), "storm", { QED64_COUNT_PTHREADS: "1", ...env });
   const out = stripDebug(r.stdout);
   const ok = /STORM OK dedicated=(\d+) checksum=(\d+)/.exec(out);
   const created = /\[pthreads\] created=(\d+)/.exec(out);
@@ -413,11 +421,9 @@ const stormRun = async (env, tag, after = "") => {
        : (/STORM FAIL[^\n]*/.exec(out)?.[0] ?? (r.timedOut ? "no result before the timeout — deadlock?" : `exit ${r.status}`)));
   gate(!!leaked && leaked[1] === "0", `[${tag}] a later dedicated task does not inherit a leaked stream redirection`,
     leaked ? `${leaked[1]} bytes reached the leaked buffer` : "no result");
-  return { ok, created, stdout: r.stdout };
+  return { ok, created };
 };
-// The default run also carries probes/thread-knobs.lean with every knob unset (0038, G5/G6): the
-// threads of its bursts stay, as before 0038.
-judgeKnobs((await stormRun(RTSTATS, "default: no parking", `\n${readProbe("thread-knobs.lean")}`)).stdout, false, "knobs off");
+await stormRun({}, "default: no parking");
 const parked = await stormRun({ LEAN_WASM_PARKED_DEDICATED: "8" }, "parking 8");
 gate(!!parked.ok && !!parked.created && Number(parked.created[1]) * 4 <= Number(parked.ok[1]),
   "[parking 8] dedicated tasks reuse parked threads (at most 1 pthread created per 4 dedicated tasks)",

@@ -14,7 +14,10 @@ series (the former mail-patch files are retired).
 ## Build
 
 Requires Docker (image builds from `../docker-wasm64`, emsdk 6.0.5) and
-~10 GB in the Docker VM.
+~10 GB in the Docker VM. Since patch 0039 the host writes into the build tree
+the container made (the native-symbol table, `lib/temp`): Docker Desktop and
+rootless Docker map it to the host user; under rootful Docker on Linux it is
+root's, and `build.sh` stops before writing, saying so.
 
     wasm64-build/build.sh                              # full build (QED64_BUILD_DIR, default a sibling dir)
     wasm64-build/import-release.sh gate-dir <build dir> # the release gate; writes GATE-PASSED

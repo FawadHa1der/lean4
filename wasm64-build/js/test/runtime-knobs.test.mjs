@@ -37,7 +37,7 @@ test("forwardWasmEnv copies the five LEAN_WASM_* knobs when non-empty, and nothi
 
 test("runtimeStats reads the 0038 exports and the glue's pool, by name; Numbers, BigInts and -1 (no task manager)", () => {
   const calls = [];
-  const values = [3, 2, 9, 7, 1, 6];
+  const values = [3, 2, 9, 7, 1, 6, 11];
   const M = {
     _lean_wasm_task_manager_stat: (k) => { calls.push(k); return values[k]; },
     _lean_wasm_engine_probes: () => 1234,
@@ -46,14 +46,17 @@ test("runtimeStats reads the 0038 exports and the glue's pool, by name; Numbers,
   const g = { PThread: { unusedWorkers: [{}, {}], pthreads: { 64: {}, 128: {}, 256: {} } }, leanPthreadPoolTarget: 4 };
   assert.deepEqual(runtimeStats(M, g), {
     pool: { target: 4, unused: 2, live: 3 },
-    tm: { liveStd: 3, stdCap: 2, liveStdPeak: 9, stdSurplusExits: 7, parked: 1, parkedIdleExits: 6 },
+    tm: { liveStd: 3, stdCap: 2, liveStdPeak: 9, stdSurplusExits: 7, parked: 1, parkedIdleExits: 6, stdSpawns: 11 },
     guard: { probes: 1234, trips: [2, 5] },
   });
-  assert.deepEqual(calls, [0, 1, 2, 3, 4, 5]);
+  assert.deepEqual(calls, [0, 1, 2, 3, 4, 5, 6]);
   assert.deepEqual(Object.keys(runtimeStats(M, g).tm), [...TASK_MANAGER_STATS]);
   // before lean_init_task_manager: every key reads -1
   assert.deepEqual(runtimeStats({ ...M, _lean_wasm_task_manager_stat: () => -1 }, g).tm,
     Object.fromEntries(TASK_MANAGER_STATS.map((k) => [k, null])));
+  // a runtime from before key 6 (stdSpawns) answers -1 for it: that key alone reads null
+  assert.deepEqual(runtimeStats({ ...M, _lean_wasm_task_manager_stat: (k) => (k < 6 ? values[k] : -1) }, g).tm,
+    { liveStd: 3, stdCap: 2, liveStdPeak: 9, stdSurplusExits: 7, parked: 1, parkedIdleExits: 6, stdSpawns: null });
   // Module.PThread wins over the global (QED64's worker looks there first)
   assert.equal(runtimeStats({ ...M, PThread: { unusedWorkers: [], pthreads: {} } }, g).pool.unused, 0);
 });
@@ -80,7 +83,7 @@ for (const f of M.preRun ?? []) f();
 report({ ...moduleKeys, env: M.ENV });
 globalThis.PThread = { unusedWorkers: [{}, {}, {}], pthreads: { 64: {} } };
 globalThis.leanPthreadPoolTarget = 3;
-M._lean_wasm_task_manager_stat = (k) => [5, 4, 6, 2, 0, 1][k];
+M._lean_wasm_task_manager_stat = (k) => [5, 4, 6, 2, 0, 1, 9][k] ?? -1;
 M._lean_wasm_engine_probes = () => 77;
 M._lean_wasm_engine_guard_trips = (s) => [1, 0][s];
 ${body}
@@ -116,7 +119,7 @@ test("node-runner: the pool key and the forwarded knobs reach the glue; [rtstats
   assert.match(lines[at + 1], /^\[rtstats\] \{/);
   assert.deepEqual(JSON.parse(lines[at + 1].slice("[rtstats] ".length)), {
     pool: { target: 3, unused: 3, live: 1 },
-    tm: { liveStd: 5, stdCap: 4, liveStdPeak: 6, stdSurplusExits: 2, parked: 0, parkedIdleExits: 1 },
+    tm: { liveStd: 5, stdCap: 4, liveStdPeak: 6, stdSurplusExits: 2, parked: 0, parkedIdleExits: 1, stdSpawns: 9 },
     guard: { probes: 77, trips: [1, 0] },
   });
   assert.doesNotMatch(r.stdout, /\[pthreads\] created=/); // QED64_COUNT_PTHREADS stays its own switch

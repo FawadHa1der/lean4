@@ -290,8 +290,13 @@ const md = execFileSync("git", ["show", "HEAD:wasm64-build/PATCHES.md"], { encod
 const isAnc = (a, b) => spawnSync("git", ["merge-base", "--is-ancestor", a, b]).status === 0;
 const hs = patchHeadings(md);
 const bad = [];
-// a heading meant as a patch entry but not spelled "## NNNN[a-z] …" would be skipped
-for (const line of md.split("\n")) if (/^#{1,6}\s*\d{3,}/.test(line) && !/^## \d{4}[a-z]?\b/.test(line)) bad.push(`malformed patch heading "${line.slice(0, 40)}"`);
+// a heading meant as a patch entry but not spelled "## NNNN[a-z] …" would be skipped, and so would
+// an entry written before it names its commit ("## Unreleased: NNNN — …"): a build of its code
+// would silently stage as the patch before it
+for (const line of md.split("\n")) {
+  if (/^#{1,6}\s*\d{3,}/.test(line) && !/^## \d{4}[a-z]?\b/.test(line)) bad.push(`malformed patch heading "${line.slice(0, 40)}"`);
+  if (/^#{1,6}\s*Unreleased\b/i.test(line)) bad.push(`unplaced patch entry "${line.slice(0, 40)}" (name its commit: "## NNNN — … (<commit>)")`);
+}
 hs.forEach((h, i) => {
   if (!h.commit) return; // patchIdOf refuses those
   if (spawnSync("git", ["cat-file", "-e", `${h.commit}^{commit}`]).status !== 0) bad.push(`${h.id} names unknown commit ${h.commit}`);

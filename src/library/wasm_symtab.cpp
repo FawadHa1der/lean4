@@ -134,8 +134,11 @@ static bool symtab_trace_parse(std::string const & spec, symtab_trace & out) {
     }
 }
 
+/* Allocated once and never freed, as Lean's runtime keeps its globals: a static's destructor
+   would run in exit() (the link sets EXIT_RUNTIME) while detached Lean threads may still look
+   names up, and the prefixes they compare with would be freed under them. */
 static symtab_trace const & symtab_trace_config() {
-    static symtab_trace const config = [] {
+    static symtab_trace const & config = *new symtab_trace([] {
         symtab_trace t;
         char const * env = getenv("LEAN_WASM_SYMTAB_TRACE");
         if (!env || !*env) return t;
@@ -145,7 +148,7 @@ static symtab_trace const & symtab_trace_config() {
             return symtab_trace();
         }
         return t;
-    }();
+    }());
     return config;
 }
 

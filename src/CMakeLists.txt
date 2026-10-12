@@ -1024,7 +1024,9 @@ if(CMAKE_SYSTEM_NAME MATCHES "Emscripten")
     " -sPTHREAD_POOL_SIZE=leanPthreadPoolTarget --js-library=${LEAN_SOURCE_DIR}/emscripten-pthread-pool.js"
   )
   # Inputs of the `lean` link that are not libraries: a change to one relinks it
-  # (stdlib.make.in). gen-exports.py rewrites the export list only when it changes.
+  # (stdlib.make.in). gen-exports.py rewrites the export list only when it changes,
+  # so the dependency is a true one; the link itself still runs on every build, as
+  # the dummy shared-library targets below touch their outputs each time.
   set(LEAN_EXE_LINK_DEPS "${LEAN_SOURCE_DIR}/emscripten-pthread-pool.js ${LEAN_SOURCE_DIR}/emscripten-exports.txt")
   # The native-symbol table (patch 0039; gen-exports.py writes it only when it
   # changes): an input and a prerequisite of the `lean` rule alone, never part of

@@ -1,7 +1,9 @@
 # The lean4-wasm64 package (wasm64-build/js): unit tests and package contents.
 # Branch-scoped to the wasm64 line and to wasm64-build/ changes (and the runtime's
-# pool-size JS library, which the unit tests evaluate, and the JS export contract,
-# which they compare with the gate's copy); minutes, not the hours of Lean's own CI.
+# pool-size JS library, which the unit tests evaluate, the link wiring in
+# src/CMakeLists.txt and src/stdlib.make.in, which they check, and the JS export
+# contract, which they compare with the gate's copy: the paths are the sparse
+# checkout's); minutes, not the hours of Lean's own CI.
 # Node built-ins only: no install step (the native-symbol table's generator tests
 # run python3, which the runner has).
 name: lean4-wasm64 package
@@ -9,10 +11,10 @@ name: lean4-wasm64 package
 on:
   push:
     branches: [qed64-wasm64]
-    paths: ["wasm64-build/**", "src/emscripten-pthread-pool.js", "src/emscripten-exports.seed.txt", ".github/workflows/lean4-wasm64-js.yml"]
+    paths: ["wasm64-build/**", "src/emscripten-pthread-pool.js", "src/emscripten-exports.seed.txt", "src/CMakeLists.txt", "src/stdlib.make.in", ".github/workflows/lean4-wasm64-js.yml"]
   pull_request:
     branches: [qed64-wasm64]
-    paths: ["wasm64-build/**", "src/emscripten-pthread-pool.js", "src/emscripten-exports.seed.txt", ".github/workflows/lean4-wasm64-js.yml"]
+    paths: ["wasm64-build/**", "src/emscripten-pthread-pool.js", "src/emscripten-exports.seed.txt", "src/CMakeLists.txt", "src/stdlib.make.in", ".github/workflows/lean4-wasm64-js.yml"]
   workflow_dispatch:
 
 permissions:

@@ -66,7 +66,7 @@ may import any memory whose maximum is ≤ that.
 | `_lean_wasm_shell_mark_preinitialized()` | `()` | — | 0031 |
 | `_lean_browser64_configure_input_ring(ptr, capacity)` | `(i64, u32)` | `u32`: 0, or `EINVAL` (28) | 0031 |
 | `_lean_wasm_task_manager_parked_threads()` | `()` | `u32`: pthreads parked by the task manager | 0035 |
-| `_lean_wasm_task_manager_stat(key)` | `(u32)` | `f64`: 0 standard workers live, 1 their cap, 2 the most ever live, 3 surplus exits, 4 parked threads, 5 idle exits of parked threads (§3.6); -1 for another key or before the task manager exists | 0038 |
+| `_lean_wasm_task_manager_stat(key)` | `(u32)` | `f64`: 0 standard workers live, 1 their cap, 2 the most ever live, 3 surplus exits, 4 parked threads, 5 idle exits of parked threads, 6 standard workers started (§3.6); -1 for another key or before the task manager exists | 0038 |
 | `_lean_wasm_engine_probes()` | `()` | `f64`: questions the engine-stack guard asked since start-up (§6) | 0038 |
 | `_lean_wasm_engine_guard_trips(site)` | `(u32)` | `f64`: its refusals at site 0 (the kernel) or 1 (`Core.checkSystem`); 0 for another site | 0038 |
 | `_lean_wasm_symtab_stats(key)` | `(u32)` | `f64`: the native-symbol table's gauges: 0..6 lookups that found an entry of kind boxed, plain, export, cell, init, init_rt, init_meta; 7 lookups that found none; 8 its entries; 9..15 its entries by kind; 16 its self-check's status (0 intact); 17, 18 the high and low 32 bits of the FNV-1a-64 the check decoded (the build's `lib/temp/lean_wasm_symtab.json` has the same); -1 for another key. Keys 9..18 run the self-check once (a few ms) | 0039 |
@@ -137,6 +137,9 @@ mutating `Module.ENV` in `preRun`. Two readers see them:
 | `LEAN_IMPORT_WORKERS` | Lean | parallel region reads of a snapshot with dependency files; not on the in-memory path |
 | `LEAN_NUM_THREADS`, `LEAN_MAIN_USE_THREAD`, `LEAN_ABORT_ON_PANIC`, `LEAN_BACKTRACE*` | C | **inert on Emscripten** — not knobs |
 | `QED64_ALLOW_LEGACY_IMPORTS` | Lean | inert here: legacy (non-`module`) imports are always tolerated on wasm targets; it matters for native64 |
+
+The three task-manager variables take decimal digits only (since 0038): anything else (`-1`, `1e3`,
+` 1`, `true`) is off, with one line on stderr, as unset or empty is.
 
 ### 3.2 Persistent initialization (`onRuntimeInitialized`)
 
@@ -245,7 +248,10 @@ renderer's one pointer-compression cage (§6).
     blocked in `Task.get`, and such a block starts a worker when none is idle, so a
     burst of nested `Task.get`s leaves workers beyond the cap. They stay unless
     `LEAN_WASM_STD_SURPLUS_EXIT=1`, which makes a waiting worker exit while more live than the
-    cap; a later burst creates them again.
+    cap; a later burst creates them again. It has no hysteresis: a pool task that `Task.get`s
+    over and over while every worker is busy starts (a `pthread_create` round trip to the main
+    JS thread) and ends a worker per get, where without it the first stays and is reused; the
+    gauge's key 6 counts the starts.
   - Dedicated threads park only with `LEAN_WASM_PARKED_DEDICATED=<n>` (default 0); with
     `LEAN_WASM_PARKED_IDLE_MS=<ms>` a parked thread exits after that idle time.
 - **Gauges** [RT]: `_lean_wasm_task_manager_stat(key)` (§2), lock-free. Emscripten's own

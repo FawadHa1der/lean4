@@ -756,6 +756,25 @@ struct scoped_current_task_object : flet<lean_task_object *> {
     scoped_current_task_object(lean_task_object * t):flet(g_current_task_object, t) {}
 };
 
+#if defined(LEAN_EMSCRIPTEN)
+/* A task-manager knob of the environment (0035, 0038), read once when the task manager is
+   created: decimal digits, clamped to `max`. Unset or empty is 0, off. Anything else is 0 too,
+   with one line on stderr: strtoul alone read "-1" as ULONG_MAX (a knob turned on, at its
+   maximum), "1e3" as 1 and "1abc" as 1. */
+static unsigned long wasm_knob(char const * name, unsigned long max) {
+    char const * env = getenv(name);
+    if (!env || !*env) return 0;
+    for (char const * p = env; *p; p++) {
+        if (*p < '0' || *p > '9') {
+            fprintf(stderr, "%s=%s is not a decimal number, so it is off (0)\n", name, env);
+            return 0;
+        }
+    }
+    unsigned long n = strtoul(env, nullptr, 10); // saturates at ULONG_MAX
+    return n > max ? max : n;
+}
+#endif
+
 class task_manager {
     mutex                                         m_mutex;
 #if !defined(LEAN_EMSCRIPTEN)
@@ -835,10 +854,22 @@ class task_manager {
          started yet; so the queue waits for those exactly as the throttled
          worker would have waited before 0038, and a later raise starts a new
          worker when none is idle. A worker a raise asked for is counted in
-         `live` from its creation, so an exit never takes it away.
+         `live` from its creation, so an exit never takes it away. With the
+         knob, a raise starts no worker when the live ones already fill the
+         raised cap (all busy, as after an earlier burst): it could only wait
+         throttled, and would leave at once, where before 0038 it stayed as a
+         sleeper. A busy worker that finishes takes the queue itself, just as
+         that sleeper would have. The knob has no hysteresis: a pool task that
+         `Task.get`s again and again while every worker is busy starts a
+         worker for each get, which leaves once its get returns (each start a
+         synchronous `pthread_create` round trip to the main JS thread, where
+         without the knob the first such worker stays and is reused). Key 6
+         of `lean_wasm_task_manager_stat` counts the starts.
        * `LEAN_WASM_PARKED_IDLE_MS=<ms>` (clamped to an hour): a parked
          dedicated thread (`LEAN_WASM_PARKED_DEDICATED`) exits after that long
          without a task.
+       These knobs and 0035's are decimal digits (`wasm_knob`); anything else
+       is off.
        On wasm `~task_manager` joins no standard worker (it never has), so one
        leaving after a host's `lean_finalize_task_manager` writes the counters
        of a deleted task manager, as it already wrote `m_idle_std_workers`; no
@@ -853,6 +884,7 @@ class task_manager {
     std::atomic<unsigned>                         m_stat_live_std_peak{0};
     std::atomic<uint64_t>                         m_stat_std_surplus_exits{0};
     std::atomic<uint64_t>                         m_stat_parked_idle_exits{0};
+    std::atomic<uint64_t>                         m_stat_std_spawns{0};
 #endif
 
     lean_task_object * dequeue() {
@@ -893,6 +925,12 @@ class task_manager {
     // a waiting standard worker should leave (LEAN_WASM_STD_SURPLUS_EXIT, 0038)
     bool std_surplus() const {
         return m_std_surplus_exit && m_live_std_workers > m_max_std_workers;
+    }
+
+    // with no worker idle: one started now could only wait throttled, and would leave at once
+    // (LEAN_WASM_STD_SURPLUS_EXIT, 0038; `wait_for`)
+    bool std_spawn_futile() const {
+        return m_std_surplus_exit && m_live_std_workers >= m_max_std_workers;
     }
 #endif
 
@@ -1015,6 +1053,7 @@ class task_manager {
             throw;
         }
         lock.lock();
+        m_stat_std_spawns.fetch_add(1, std::memory_order_relaxed);
     }
 
     void spawn_dedicated_worker(unique_lock<mutex> & lock, lean_task_object * t) {
@@ -1209,17 +1248,10 @@ public:
     task_manager(unsigned max_std_workers):
         m_max_std_workers(max_std_workers) {
 #if defined(LEAN_EMSCRIPTEN)
-        if (char const * env = getenv("LEAN_WASM_PARKED_DEDICATED")) {
-            unsigned long n = strtoul(env, nullptr, 10);
-            m_max_parked_dedicated = n > 64 ? 64 : static_cast<size_t>(n);
-        }
+        m_max_parked_dedicated = static_cast<size_t>(wasm_knob("LEAN_WASM_PARKED_DEDICATED", 64));
         // 0038: both off when unset, empty or 0 (see the members)
-        if (char const * env = getenv("LEAN_WASM_STD_SURPLUS_EXIT"))
-            m_std_surplus_exit = strtoul(env, nullptr, 10) != 0;
-        if (char const * env = getenv("LEAN_WASM_PARKED_IDLE_MS")) {
-            unsigned long ms = strtoul(env, nullptr, 10);
-            m_parked_idle_ms = ms > 3600000 ? 3600000 : static_cast<unsigned>(ms);
-        }
+        m_std_surplus_exit = wasm_knob("LEAN_WASM_STD_SURPLUS_EXIT", 1) != 0;
+        m_parked_idle_ms = static_cast<unsigned>(wasm_knob("LEAN_WASM_PARKED_IDLE_MS", 3600000));
         publish_std();
 #endif
     }
@@ -1305,8 +1337,12 @@ public:
             m_max_std_workers++;
 #if defined(LEAN_EMSCRIPTEN)
             publish_std();
-#endif
+            // 0038: with LEAN_WASM_STD_SURPLUS_EXIT, no start that would leave at once (the
+            // members); notify_one then wakes nobody, as no worker is idle
+            if (m_idle_std_workers == 0 && !std_spawn_futile())
+#else
             if (m_idle_std_workers == 0)
+#endif
                 spawn_worker(lock);
             else
                 m_queue_cv.notify_one();
@@ -1374,6 +1410,7 @@ public:
         case 3: return static_cast<double>(m_stat_std_surplus_exits.load(std::memory_order_relaxed));
         case 4: return m_num_parked.load(std::memory_order_relaxed);
         case 5: return static_cast<double>(m_stat_parked_idle_exits.load(std::memory_order_relaxed));
+        case 6: return static_cast<double>(m_stat_std_spawns.load(std::memory_order_relaxed));
         default: return -1;
         }
     }
@@ -1411,8 +1448,9 @@ extern "C" LEAN_EXPORT unsigned lean_wasm_task_manager_parked_threads() {
    plus one per pool task blocked in `Task.get`), 2 the most standard workers ever live at
    once, 3 standard workers that left as surplus (LEAN_WASM_STD_SURPLUS_EXIT), 4 parked
    dedicated threads (as lean_wasm_task_manager_parked_threads), 5 parked threads that left
-   idle (LEAN_WASM_PARKED_IDLE_MS). Counters count since the task manager was created. -1 for
-   another key, or before there is a task manager. Lock-free, like the export above. */
+   idle (LEAN_WASM_PARKED_IDLE_MS), 6 standard workers started (each a pthread_create). Counters
+   count since the task manager was created. -1 for another key, or before there is a task
+   manager. Lock-free, like the export above. */
 extern "C" LEAN_EXPORT double lean_wasm_task_manager_stat(unsigned key) {
     return g_task_manager ? g_task_manager->stat(key) : -1;
 }

@@ -501,10 +501,12 @@ pthreads wake late here — rather than hanging. Of the stdlib's generated C onl
 `Lean/Shell.c` changed (its private specializations renumbered; none reused,
 none referenced elsewhere), so the v4.34.0 packs pair with this runtime.
 
-## Unreleased: 0038 — wasm: the host sizes the pthread pool; surplus and idle threads may leave; engine-guard counters
+## 0038 — wasm: the host sizes the pthread pool; surplus and idle threads may leave; engine-guard counters (40ea397b15)
 
-(The heading becomes `## 0038 — … (<commit>)` when a release records it with the gate's
-numbers, as for 0036 and 0037: the patch-id rule, `js/artifact-id.mjs`, needs the commit.)
+(Named before a release records the gate's numbers: the patch-id rule, `js/artifact-id.mjs`, places
+a build by the commits the headings name, so an entry left unnamed would stage a 0038-0039b build
+as 0037; `stage-release.sh` refuses a heading spelled `## Unreleased: …`. The fixes from the
+review of 0038-0039b (r0038) are a later commit; these entries describe the result.)
 
 Every live pthread holds an Emscripten Worker, and in a browser each Worker is a V8 isolate of
 ~129 MiB in a renderer whose pointer-compression cage fits about 30 of them (EMBED-RUNTIME.md §6;
@@ -523,7 +525,14 @@ default is 0037's; only the counters are new.
   none is idle; without the knob the workers of such a burst stay for the life of the process. A
   worker leaves only at its idle wait (nothing queued) or its throttle wait, where the queue
   waits for the busy workers exactly as the throttled one would have (the argument, including
-  `wait_any` waiters and workers not started yet, is in `object.cpp`). On wasm, standard workers
+  `wait_any` waiters and workers not started yet, is in `object.cpp`). With the knob, a raise
+  starts no worker when the live ones already fill the raised cap: it could only wait throttled
+  and would leave at once, where before 0038 it stayed asleep (a busy worker that finishes takes
+  the queue, as that sleeper would have). There is no hysteresis: a pool task that `Task.get`s
+  again and again while every worker is busy starts a worker for each get, which leaves after it
+  (each start a synchronous `pthread_create` round trip to the main JS thread), where without the
+  knob the first such worker stays and is reused; key 6 of the counters below counts the starts,
+  for the measurement that decides whether a host turns the knob on. On wasm, standard workers
   are now counted instead of kept as joinable handles, and created detached like dedicated
   threads: nothing ever joined them there, so this changes nothing until a worker exits.
 - **`LEAN_WASM_PARKED_IDLE_MS=<ms>`**: a parked dedicated thread (`LEAN_WASM_PARKED_DEDICATED`,
@@ -531,20 +540,27 @@ default is 0037's; only the counters are new.
   is safe: the task is set and the slot taken under the lock, and the woken thread runs it. The
   wait is one timed futex wait; timed sleeps on task threads have woken late in this build (0037
   measured 18 s for `sleep 1000`), so the gate measures how soon the idle threads leave.
+- **The knobs are decimal digits.** `LEAN_WASM_STD_SURPLUS_EXIT`, `LEAN_WASM_PARKED_IDLE_MS` and
+  0035's `LEAN_WASM_PARKED_DEDICATED` take digits only (then clamped); anything else (`-1`, `1e3`,
+  ` 1`, `true`) is off, with one line on stderr. `strtoul` alone read `-1` as its maximum (an
+  hour's timeout, 64 parked threads) and `1e3` as 1.
 - **Counters, always on, observation only.** `lean_wasm_task_manager_stat(key)`: 0 standard
-  workers live, 1 their cap, 2 the most ever live, 3 surplus exits, 4 parked threads, 5 idle exits;
-  -1 for another key or before the task manager exists. `lean_wasm_engine_probes()` counts the
-  questions the guard's two sites ask (the kernel's `scope_rec_depth` on its probe levels,
-  `Core.checkSystem` on every 16th call; with `LEAN_WASM_STACK_PROBE_SLOTS=0` they are still
-  counted, and never refused), `lean_wasm_engine_guard_trips(site)` the refusals at site 0 (the
-  kernel) and 1 (`Core.checkSystem`). The sites count around their own call of
+  workers live, 1 their cap, 2 the most ever live, 3 surplus exits, 4 parked threads, 5 idle exits,
+  6 standard workers started; -1 for another key or before the task manager exists.
+  `lean_wasm_engine_probes()` counts the questions the guard's two sites ask (the kernel's
+  `scope_rec_depth` on its probe levels, `Core.checkSystem` on every 16th call; with
+  `LEAN_WASM_STACK_PROBE_SLOTS=0` they are still counted, and never refused),
+  `lean_wasm_engine_guard_trips(site)` the refusals at site 0 (the kernel) and 1
+  (`Core.checkSystem`). The sites count around their own call of
   `engine_stack_has_headroom`, so that function, the probe, its interval, its headroom and every
   decision stay 0036's; the two callers' wasm frames may differ by a few bytes, nothing against the
   128 KiB of headroom. One relaxed atomic add per question (a question costs ~4 µs). All three
   are lock-free doubles, safe from the host's main JS thread; they are seeded exports.
 - **Relinking.** The JS library and the export list are prerequisites of the `lean` link
-  (`LEAN_EXE_LINK_DEPS`, `src/stdlib.make.in`), and `gen-exports.py` rewrites the export list only
-  when its content changes, so an unchanged list does not relink.
+  (`LEAN_EXE_LINK_DEPS`, `src/stdlib.make.in`), so an edit to either relinks, and `gen-exports.py`
+  rewrites its outputs only when their content changes, so the dependency is a true one. The link
+  still runs on every build: the Emscripten build's dummy shared-library targets touch
+  `libleanshared*` each time (`src/CMakeLists.txt`), and those are prerequisites too.
 
 **Dropped from the design after review** (r0038): a soft ceiling on the pool with held-back
 thread starts, its overflow timer, shrinking the pool back to its initial size,
@@ -563,7 +579,8 @@ every 0038 check is skipped with a note): the glue's pool loop reads the library
 three counters are exported (static); `LEAN4_WASM64_PTHREAD_POOL` -3, 4 and abc give pools of 0, 4
 and 24; with the knobs on (the false-proof run, `--threads=2`, `js/probes/thread-knobs.lean`) the
 standard workers of a `Task.get` burst fall back to the cap and parked threads leave within the
-idle time plus 1 s, while in the default storm run every thread stays as before; the guard's
+idle time plus 1 s, while with every knob unset (the smoke run, `--threads=2`, the same probe) the
+workers of the same burst, past the cap, all stay and no thread parks, as before; the guard's
 refusals are counted at Chrome's stack (kernel and Meta), and at the default stack it asks and
 refuses nothing. Node: `LEAN4_WASM64_RTSTATS=1` makes node-runner answer a printed `[rtstats?]`
 with `[rtstats] <json>` (`js/runtime-knobs.mjs`). Measured numbers: from the first gated build.
@@ -573,10 +590,9 @@ For hosts: a pool of other than 24 moves thresholds keyed to it, such as QED64's
 the two exits are for a host that has measured its reload behaviour with them (EMBED-RUNTIME.md
 §3.1, §3.6).
 
-## Unreleased: 0039 — wasm: native symbols through an in-module table; static link; exports = the JS contract
+## 0039 — wasm: native symbols through an in-module table; static link; exports = the JS contract (5343f2dfe9)
 
-(The heading becomes `## 0039 — … (<commit>)` with the gate's numbers when a release records it,
-as for 0038.)
+(Named before the gate's numbers, as 0038.)
 
 The IR interpreter finds native code by name (`lookup_symbol_in_cur_exe`): a decl's boxed wrapper,
 its `@[export]` name, a constant cell, a module initializer. Natively that is `dlsym` over the
@@ -617,7 +633,9 @@ through JavaScript (`Object.keys(…).indexOf` over the exports, under the dynam
   table. `lookup_symbol_in_cur_exe` calls it under `LEAN_EMSCRIPTEN`, with no fallback; 0017's
   EM_JS export `Set` is deleted. `initialize_ir_interpreter` asserts the table is not empty.
   Relaxed counters by kind; `LEAN_WASM_SYMTAB_TRACE` (`miss|hit|all[:prefix,…]`, clauses joined by
-  `;`, strictly parsed: anything else traces nothing, with one warning) prints lookups on stderr.
+  `;`, strictly parsed: anything else traces nothing, with one warning) prints lookups on stderr;
+  its parsed form is never freed, so a lookup on a detached thread during `exit()` reads no freed
+  prefix.
   Exports `lean_wasm_symtab_stats(key)` (doubles, lock-free; EMBED-RUNTIME.md §2) and
   `lean_wasm_symtab_selfcheck(counts, fnv)` (a full decode: order, kinds, addresses, FNV).
 - **The link is static** (no `-sMAIN_MODULE=2`). Nothing loads side modules, so the dynamic
@@ -647,7 +665,10 @@ through JavaScript (`Object.keys(…).indexOf` over the exports, under the dynam
   `gen-exports.py --slim`. The per-export glue it avoided is gone, Safari has no Memory64, nothing
   consumed `bin-slim`.
 
-**Build checks** (`build.sh`): B1 and B2 in the generator (step 4b; `QED64_NM` names the nm);
+**Build checks** (`build.sh`): B1 and B2 in the generator (step 4b; `QED64_NM` names the nm; it
+runs on the host and now writes into `lib/temp`, which make creates in the container, so the host
+user must be able to write there: Docker Desktop maps the bind mount to that user, while rootful
+Docker on Linux leaves it root's, and `build.sh` then stops before the generator with the reason);
 B3 after the link (`check-link.py`): a `signature mismatch` in the link log or a
 `signature_mismatch:` function in `lean.js.symbols`, or a table entry left undefined, fails the
 build; other undefined symbols are compared with `link-undefined-allowlist.txt`, which the first
@@ -656,8 +677,10 @@ build; other undefined symbols are compared with `link-undefined-allowlist.txt`,
 when it differs from the build's manifest or the export list on disk.
 
 **Gate**, folded into the existing runs (still 11 runtimes; on a runtime before 0039 every 0039
-check is skipped with a note): static S1 (no generated name bound on `Module`, `lean.js` under
-1 MiB, no `dylink.0`, no GOT import, few exports, no trace of 0017), S2 (every contract name bound
+check is skipped with a note; a runtime is 0039 by its statically linked `lean.wasm`, or a glue
+with 0038's names but without 0017's export-set gate, not only by the export S2 looks for): static
+S1 (no generated name bound on `Module`, `lean.js` under 1 MiB, no `dylink.0`, no GOT import, few
+exports, no trace of 0017), S2 (every contract name bound
 on `Module` to a function export, through the glue's own bindings; from the repository with the
 seed, packaged with `js/runtime-contract.mjs`'s copy), S6 (the [GLUE] surface QED64's worker and
 node-runner reach into, EMBED-RUNTIME.md §5), and that `callMain` ran `main`; G2 (the persistent
@@ -668,11 +691,14 @@ plain core functions computes its value; whether `Lean.Name.append` ran native i
 required since 0039b adds the plain functions), G6 (timing, informational), G7 (no lookup in any
 run missed a `lean_*` name; with `--baseline-exports <r3's lean.wasm>`, none missed a name r3
 exported). `js/probes/symtab.lean` rides on the legacy run. `js/exports-audit.mjs` lists what
-consumer trees touch against the contract and S6: over QED64 (worker, pipeline, lib, tests,
-embedding) and lean4game (client, served worker, relay) it reports every name covered; over the
-widgets showcase and the proof sheets, one glue global S6 did not list,
-`ENVIRONMENT_IS_PTHREAD` (the showcase's UX probes, typeof-guarded), now reported as a test
-reach-in.
+consumer trees touch against the contract and S6, reading a chain such as `globalThis.Module.X` at
+every link: over lean4game (client, served worker, relay) and the widgets showcase it reports
+every name covered (`ENVIRONMENT_IS_PTHREAD`, the showcase's typeof-guarded UX probes, is a test
+reach-in S6 reports); over QED64 (worker, pipeline, lib, tests, embedding) and the proof sheets,
+one name, `HEAPU8`, in `globalThis.Module.HEAPU8?.buffer` (QED64 `pipeline/snapshot/resident-probe.mjs`,
+the proof sheets' `scripts/browser-check.mjs`): the last fallback after `Module.wasmMemory` and
+`wasmMemory`, and dead, as no glue of this line sets `Module.HEAPU8` (it is not a runtime method
+the link exports). It is left UNGUARDED rather than listed: the consumers can drop it.
 
 **Snapshots**: every table index and static address moves, so every `.snap` is rebaked for the
 new build id (as for any build). Init replay should get cheaper: `runModInitCore` lookups (2.4k–4.7k
@@ -693,10 +719,9 @@ snapshot init-replay timings against r3; the stack margins above; the B3 allowli
 For hosts: the contract and every `Module["_x"]` name are as before. Do not reach a raw
 `wasmExports["x"]` (minified now); expect `Dynlib.load` to fail; rebake snapshots.
 
-## Unreleased: 0039b — wasm: all-object core functions run native from interpreted code
+## 0039b — wasm: all-object core functions run native from interpreted code (84ffd48cb1)
 
-(The heading becomes `## 0039b — … (<commit>)` with the gate's numbers when a release records it,
-as for 0039.)
+(Named before the gate's numbers, as 0038.)
 
 0039's table holds what r3 resolved. One kind of name was never there: an `l_*` function without a
 boxed wrapper. `lookup_symbol` probes the wrapper first and then the plain stem, and natively
@@ -743,6 +768,14 @@ What changes for interpreted code:
 - **Snapshots.** A partial application of such a function made by interpreted code is a closure
   over its native address now, not an interpreter stub carrying the declaration, so snapshot bytes
   differ (they are rebaked for the new build id anyway).
+- **Name collisions** (review r0038). Lookups are by mangled name, so an interpreted declaration
+  whose name mangles to a plain core function's — a file that does not import the defining
+  Std/Lean module and defines the same name (without a package its declarations get the bare
+  `l_` prefix) — now resolves to the core's native code: the core body runs, a call with another
+  arity traps in `call_indirect`, and a constant of that name reads the function's table index
+  as a cell. Native `lean` does the same (`dlsym` finds these symbols), and r3 had it already for
+  boxed wrappers and cells; 0039b widens it by 29,538 names. With N3 above: adversarial input can
+  reach core native code by a name collision, as natively; nothing guards against it.
 - **Pairing with an import's oleans.** A runtime-only release requires that the stdlib's
   generated C changed no function other code reaches by name (0036 added names to
   `Lean/CoreM.c`; 0037 renumbered only private specializations of `Lean/Shell.c`). The rule now

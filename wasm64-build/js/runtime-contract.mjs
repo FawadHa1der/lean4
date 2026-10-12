@@ -172,11 +172,21 @@ export function readWasm(bytes) {
   }
 }
 
-/** The contract level of a runtime from its glue: "0039" (the native-symbol table), "0038" or "base". */
-export function contractLevel(glue) {
-  if (/Module\[["']_lean_wasm_symtab_stats["']\]/.test(glue)) return "0039";
-  if (/Module\[["']_lean_wasm_task_manager_stat["']\]/.test(glue) || /var leanPthreadPoolTarget\s*=/.test(glue)) return "0038";
-  return "base";
+/**
+ * The contract level of a runtime: "0039" (the native-symbol table), "0038" or "base". 0039 is not
+ * read from the export its checks look for alone: every runtime of this line from 0017 to 0038 is
+ * a MAIN_MODULE (lean.wasm has a dylink.0 section and GOT imports) whose glue holds 0017's export-set
+ * gate (qed64_symbol_exists), and a 0039 runtime has neither. A statically linked lean.wasm, or a
+ * glue with 0038's names but without that gate, is 0039 even if its glue lost the binding of
+ * _lean_wasm_symtab_stats, so S2 fails on the lost name instead of the runtime being held to an
+ * older contract. `wasm`: readWasm's result (null, or unreadable bytes: the glue alone decides).
+ */
+export function contractLevel(glue, wasm = null) {
+  const g = String(glue);
+  const has0038 = /Module\[["']_lean_wasm_task_manager_stat["']\]/.test(g) || /var leanPthreadPoolTarget\s*=/.test(g);
+  const staticModule = !!wasm?.ok && !wasm.customs.some((c) => c.startsWith("dylink")) && !wasm.imports.some((i) => i.module.startsWith("GOT."));
+  if (/Module\[["']_lean_wasm_symtab_stats["']\]/.test(g) || staticModule || (has0038 && !g.includes("qed64_symbol_exists"))) return "0039";
+  return has0038 ? "0038" : "base";
 }
 
 const LEVELS = { base: 0, "0038": 1, "0039": 2 };
@@ -197,8 +207,8 @@ export function requiredExports(level, extra = []) {
  */
 export function staticChecks({ glue, wasmBytes, seed = null }) {
   const out = [];
-  const level = contractLevel(glue);
   const wasm = readWasm(wasmBytes);
+  const level = contractLevel(glue, wasm);
   const bindings = exportBindings(glue);
   if (level === "0039") {
     const generated = [...bindings.keys()].filter((n) => /^_(?:l_|lp_|initialize_|runtime_initialize_|meta_initialize_)/.test(n));

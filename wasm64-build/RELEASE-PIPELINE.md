@@ -77,7 +77,9 @@ check whether upstream absorbed the gates, then refresh it with
    Before a release that changes the seed or the glue, run
    `node wasm64-build/js/exports-audit.mjs --glue <the new lean.js> <consumer
    trees>` over QED64, lean4game, the widgets showcase and the proof sheets: it
-   must report every name covered. The first 0039 link also calibrates
+   must report every name covered, but for one known and dead reach-in,
+   `globalThis.Module.HEAPU8` in QED64's resident probe and the proof sheets'
+   browser check (PATCHES.md, 0039). The first 0039 link also calibrates
    `link-undefined-allowlist.txt` (its header says how).
 5. **Library ports** — game patches in lean4game were validated against one
    Mathlib commit; expect a re-port pass per bump. Moved modules are the usual

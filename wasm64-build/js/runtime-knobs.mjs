@@ -34,8 +34,9 @@ export function forwardWasmEnv(ENV, env = process.env) {
   return ENV;
 }
 
-/** The keys of lean_wasm_task_manager_stat (object.cpp), in key order. */
-export const TASK_MANAGER_STATS = Object.freeze(["liveStd", "stdCap", "liveStdPeak", "stdSurplusExits", "parked", "parkedIdleExits"]);
+/** The keys of lean_wasm_task_manager_stat (object.cpp), in key order (stdSpawns, key 6, is null on a
+ * runtime built before that key existed: it answers -1). */
+export const TASK_MANAGER_STATS = Object.freeze(["liveStd", "stdCap", "liveStdPeak", "stdSurplusExits", "parked", "parkedIdleExits", "stdSpawns"]);
 
 /**
  * The runtime's thread and engine-guard counters, safe to call on the main JS thread at any time

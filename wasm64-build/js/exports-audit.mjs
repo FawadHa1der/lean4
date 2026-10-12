@@ -10,12 +10,13 @@
 //    (`M._x`, `self._x`, `Module["_x"]`) or named bare; each must be in the contract
 //    (src/emscripten-exports.seed.txt, or the copy in runtime-contract.mjs) or a glue built-in the
 //    gate's S6 guards;
-//  - glue globals reached by name (`self.X`, `globalThis.X`, `M.X`, `Module.X`, `typeof X`) that the
-//    glue declares (--glue <lean.js>: its `var`/`function` names, standard globals left out);
+//  - glue globals reached by name (`self.X`, `globalThis.X`, `M.X`, `Module.X`, at any link of a
+//    chain such as `globalThis.Module.X`, `typeof X`) that the glue declares (--glue <lean.js>: its `var`/`function` names, standard globals left out);
 //    each must be one S6 guards ([GLUE], runtime-contract.mjs GLUE_NAMES), a runtime method or a
 //    Module input;
 //  - the members used of PThread, TTY and FS (listed, not judged: those objects are kept whole).
-// Exit 0 when every name is known, 1 when one is not (listed as UNKNOWN or UNGUARDED), 2 usage.
+// Exit 0 when every name is known, 1 when one is not (listed as UNKNOWN or UNGUARDED), 2 usage (a
+// missing directory, --glue or --seed file included).
 //
 // Usage: node exports-audit.mjs [--glue <lean.js>] [--seed <emscripten-exports.seed.txt>] [--json] <dir>…
 
@@ -139,6 +140,7 @@ function glueGlobals(src) {
 
 let glueDeclared = null;
 if (opts.glue) {
+  if (!fs.statSync(opts.glue, { throwIfNoEntry: false })?.isFile()) { console.error(`exports-audit: ${opts.glue} not found\n${USAGE}`); process.exit(2); }
   glueDeclared = glueGlobals(fs.readFileSync(opts.glue, "utf8"));
   for (const n of glueDeclared) if (n in globalThis) glueDeclared.delete(n);
 }
@@ -162,7 +164,8 @@ function scanFile(file, shown) {
   if (isGlueCopy(text)) { skippedGlue++; return; }
   files++;
   for (const m of text.matchAll(/(?:\??\.|\[\s*["'`]|\b)(_{1,2}[A-Za-z][\w]*)/g)) if (RUNTIME_NAME.test(m[1])) note("export", m[1], shown);
-  for (const m of text.matchAll(/\b(?:self|globalThis|window|M|Module)\??\.([A-Za-z$][\w$]*)/g)) note("global", m[1], shown);
+  // a lookahead, so a chain is read at every link: `globalThis.Module.HEAPU8` is Module and HEAPU8
+  for (const m of text.matchAll(/\b(?=(?:self|globalThis|window|M|Module)\??\.([A-Za-z$][\w$]*))/g)) note("global", m[1], shown);
   for (const m of text.matchAll(/\bModule\[\s*["']([A-Za-z$][\w$]*)["']\s*\]/g)) note("global", m[1], shown);
   for (const m of text.matchAll(/\btypeof\s+([A-Za-z_$][\w$]*)/g)) note("typeof", m[1], shown);
   for (const m of text.matchAll(/\b(PThread|PT|TTY|FS)\??\.([A-Za-z_$][\w$]*)/g)) note("member", `${m[1] === "PT" ? "PThread" : m[1]}.${m[2]}`, shown);
