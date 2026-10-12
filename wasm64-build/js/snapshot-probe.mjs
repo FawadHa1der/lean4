@@ -27,6 +27,7 @@ import vm from "node:vm";
 import { createRequire } from "node:module";
 import { Worker } from "node:worker_threads";
 import { applyCliContract, ensureStackSize } from "./cli-args.mjs";
+import { forwardWasmEnv, poolModuleKeys } from "./runtime-knobs.mjs";
 
 // First, before the contract prints anything: replaces this process (same PID) when
 // started without --stack-size, so every line below is printed once.
@@ -80,6 +81,8 @@ const cli = applyCliContract({
     "  LEAN4_WASM64_PTHREAD_STACK_MB=<n>  test knob: the runtime's pthread Workers get an n-MiB stack (0.68 ~ a Chrome Worker's",
     "                         500 KiB: elaboration tasks then run on a browser's stack budget), as under node-runner",
     "  LEAN_WASM_STACK_PROBE_SLOTS=<n>    calibration knob, forwarded: patch 0036's engine-stack probe headroom in 8-byte slots (0: off)",
+    "  LEAN4_WASM64_PTHREAD_POOL=<n>      Module.pthreadPoolSize: the pthread Workers created at load (0..64, default 24; kernel 0038)",
+    "  LEAN_WASM_PARKED_DEDICATED, LEAN_WASM_PARKED_IDLE_MS, LEAN_WASM_STD_SURPLUS_EXIT  forwarded too (EMBED-RUNTIME.md §3.1)",
     "",
     "exit codes:",
     "  0  SNAPSHOT PROBE PASS",
@@ -231,6 +234,7 @@ const sharedMem = new WebAssembly.Memory({ address: "i64", initial: 4096n, maxim
 
 globalThis.Module = {
   noInitialRun: true,
+  ...poolModuleKeys(),
   wasmMemory: sharedMem,
   INITIAL_MEMORY: 268435456,
   locateFile: (f) => path.join(path.dirname(leanJs), f),
@@ -243,7 +247,8 @@ globalThis.Module = {
       // (`Module["ENV"]=ENV`), so only an assignment here reaches getenv (as in node-runner).
       const ENV = globalThis.Module.ENV;
       ENV.LEAN_PATH = "/lib/lean";
-      for (const k of ["QED64_PROFILE_INIT", "LEAN_WASM_STACK_PROBE_SLOTS"]) if (process.env[k]) ENV[k] = process.env[k];
+      if (process.env.QED64_PROFILE_INIT) ENV.QED64_PROFILE_INIT = process.env.QED64_PROFILE_INIT;
+      forwardWasmEnv(ENV); // the runtime's LEAN_WASM_* knobs (runtime-knobs.mjs)
       const FS = globalThis.Module.FS;
       const NODEFS = FS.filesystems.NODEFS;
       for (const d of ["/lib/lean", "/workspace", "/bin", "/snapshots"]) {

@@ -185,7 +185,8 @@ $(OUTBIN)/lake$(EXE): ${LIB}/temp/LakeMain.*o.export $(OUTLIB)/libLake_shared$(S
 
 lake: $(OUTBIN)/lake$(EXE)
 
-$(OUTBIN)/lean$(EXE): $(OUTLIB)/libInit_shared$(SO) $(OUTLIB)/libleanshared_2$(SO) $(OUTLIB)/libleanshared_1$(SO) $(OUTLIB)/libleanshared$(SO) ${LIB}/temp/libleanmain.a
+# LEAN_EXE_LINK_DEPS: the link's other inputs (Emscripten: its JS library and export list; see src/CMakeLists.txt)
+$(OUTBIN)/lean$(EXE): $(OUTLIB)/libInit_shared$(SO) $(OUTLIB)/libleanshared_2$(SO) $(OUTLIB)/libleanshared_1$(SO) $(OUTLIB)/libleanshared$(SO) ${LIB}/temp/libleanmain.a ${LEAN_EXE_LINK_DEPS}
 	$(link-preamble)
 	$(LEANC_SH) ${LIB}/temp/libleanmain.a ${CMAKE_EXE_LINKER_FLAGS_MAKE} ${LEAN_EXE_LINKER_FLAGS} ${LEANC_OPTS} -o $@
 

@@ -37,4 +37,16 @@ LEAN_EXPORT void check_stack(char const * component_name);
 */
 LEAN_EXPORT bool engine_stack_has_headroom();
 
+#if defined(LEAN_EMSCRIPTEN)
+/**
+   \brief Counters of the engine-stack guard (0038), for \c lean_wasm_engine_probes and
+   \c lean_wasm_engine_guard_trips. Its two sites call them around their own
+   \c engine_stack_has_headroom call, which stays 0036's: \c note_engine_probe before it, and
+   \c note_engine_guard_trip(site) when it refused (site 0 the kernel's \c scope_rec_depth, 1
+   \c Core.checkSystem). Observation only: no decision reads them.
+*/
+LEAN_EXPORT void note_engine_probe();
+LEAN_EXPORT void note_engine_guard_trip(unsigned site);
+#endif
+
 }

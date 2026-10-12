@@ -70,6 +70,16 @@ reference with its base.
 
 Every command takes `--help`. `run`, `probe` and `snapshot-probe` re-exec
 themselves with `--stack-size=8192` (same PID) when started without one.
+
+The runtime's knobs (`runtime-knobs.mjs`; EMBED-RUNTIME.md §3.6): `run`, `probe`
+and `snapshot-probe` pass `LEAN4_WASM64_PTHREAD_POOL=<n>` as
+`Module.pthreadPoolSize` (the pthread Workers created at load, 0..64, default 24;
+kernel patch 0038 on) and copy `LEAN_WASM_PARKED_DEDICATED`,
+`LEAN_WASM_PARKED_IDLE_MS`, `LEAN_WASM_STD_SURPLUS_EXIT` and
+`LEAN_WASM_STACK_PROBE_SLOTS` into the runtime's environment. Under `run`,
+`LEAN4_WASM64_RTSTATS=1` answers every printed line containing `[rtstats?]` with
+`[rtstats] <json>`: the pool, task-manager and engine-guard counters (`null`
+where the runtime predates them).
 `lean4-wasm64 bake` and `lean4-wasm64 snapshot-probe` replace the dispatcher
 (`process.execve`), so the tool runs in the PID its caller started — a caller
 that SIGKILLs or measures that PID gets the tool itself; where execve cannot

@@ -22,6 +22,7 @@ Author: Leonardo de Moura
 #endif
 
 #if defined(LEAN_EMSCRIPTEN)
+#include <atomic>
 #include <emscripten/stack.h>
 #include <emscripten/em_js.h>
 #endif
@@ -173,12 +174,30 @@ bool engine_stack_has_headroom() {
     return slots <= 0 || lean_wasm_engine_stack_has(slots) != 0;
 }
 
+/* 0038: how often the guard asked and refused, process-wide (lean_wasm_engine_probes,
+   lean_wasm_engine_guard_trips below). The two guard sites count around their call of
+   `engine_stack_has_headroom`, which, like the probe, is left exactly as above: a probe is a
+   question asked (with LEAN_WASM_STACK_PROBE_SLOTS=0 it is still counted, and never refused);
+   a trip is a refusal, after which the site throws. No decision reads them: every one stays
+   0036's. One relaxed atomic add per question (a question costs ~4 µs), one more per trip. */
+static std::atomic<uint64_t> g_engine_probes{0};
+static std::atomic<uint64_t> g_engine_guard_trips[2] = {}; // 0 kernel scope_rec_depth, 1 Core.checkSystem
+void note_engine_probe() {
+    g_engine_probes.fetch_add(1, std::memory_order_relaxed);
+}
+void note_engine_guard_trip(unsigned site) {
+    if (site < 2) g_engine_guard_trips[site].fetch_add(1, std::memory_order_relaxed);
+}
+
 /* Lean code has no depth to go by, so `Core.checkSystem` probes on every 16th call of a thread. */
 static constexpr unsigned g_native_probe_every = 16;
 LEAN_THREAD_VALUE(unsigned, g_native_probe_tick, 0);
 static bool native_stack_ok() {
     if (++g_native_probe_tick % g_native_probe_every != 0) return true;
-    return engine_stack_has_headroom();
+    note_engine_probe();
+    if (engine_stack_has_headroom()) return true;
+    note_engine_guard_trip(1);
+    return false;
 }
 }
 #else
@@ -193,3 +212,15 @@ static bool native_stack_ok() { return true; }
 extern "C" LEAN_EXPORT uint8_t lean_wasm_native_stack_ok() {
     return lean::native_stack_ok();
 }
+
+#if defined(LEAN_EMSCRIPTEN)
+/* 0038, for hosts and the gate: the guard's questions, and its refusals by site (0 the kernel's
+   `scope_rec_depth`, 1 `Core.checkSystem`; any other site reads 0), since the process started.
+   Lock-free, so the host's main JS thread may call them at any time. Doubles, exact to 2^53. */
+extern "C" LEAN_EXPORT double lean_wasm_engine_probes() {
+    return static_cast<double>(lean::g_engine_probes.load(std::memory_order_relaxed));
+}
+extern "C" LEAN_EXPORT double lean_wasm_engine_guard_trips(unsigned site) {
+    return site < 2 ? static_cast<double>(lean::g_engine_guard_trips[site].load(std::memory_order_relaxed)) : 0;
+}
+#endif

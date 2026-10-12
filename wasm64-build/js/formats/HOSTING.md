@@ -257,6 +257,12 @@ in every `location` that adds one), `gzip off` for octet-stream, `try_files $uri
 - A browser runs the runtime's pthreads in Workers with a small engine stack (Chrome 500 KiB),
   and deep recursion is bounded by it (EMBED-RUNTIME.md §6). Node's are 4 MiB; to test at a
   browser's budget headlessly, `LEAN4_WASM64_PTHREAD_STACK_MB=0.68 lean4-wasm64 run …` (Chrome).
+- The thread knobs (kernel patch 0038, EMBED-RUNTIME.md §3.6) reach a Node runtime through the
+  environment of `run`, `probe` and `snapshot-probe`: `LEAN4_WASM64_PTHREAD_POOL=<n>` sizes the
+  pool of pthread Workers created at load (0..64, default 24), and `LEAN_WASM_PARKED_DEDICATED`,
+  `LEAN_WASM_PARKED_IDLE_MS`, `LEAN_WASM_STD_SURPLUS_EXIT` and `LEAN_WASM_STACK_PROBE_SLOTS` are
+  copied into the runtime's own environment. `LEAN4_WASM64_RTSTATS=1 lean4-wasm64 run …` answers a
+  printed `[rtstats?]` with `[rtstats] <json>` (pool, task manager, engine guard).
 - **`node --stack-size=8192`** for anything that boots the runtime in its own
   process (`node-runner`, `persistent-probe`, `gate`; `lean4-wasm64 run|gate|probe`
   add it, and `node-runner` / `persistent-probe` started without it re-exec

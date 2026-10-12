@@ -9,6 +9,9 @@
 //     deep recursion at a browser's stack (0036), and async elaboration through
 //     lean_wasm_compile (0037: every message of an Elab.async declaration reported once)
 //  5. THE PARSE GATE     — garbage input must produce >=1 error diagnostic
+//  0038 (folded into the runs above, no runtime of its own): the glue's pool size from
+//     Module.pthreadPoolSize, the opt-in exits of surplus standard workers and idle parked
+//     threads, the engine-guard counters. Skipped, with a note, on a runtime before 0038.
 // Every check prints ok or FAIL; exits nonzero if any failed.
 //
 // Usage: node gate.mjs --artifact <dir>   (lean4-wasm64 gate --artifact <dir>)
@@ -39,6 +42,8 @@ if (!fs.existsSync(path.join(artifact, "bin/lean.js"))) {
   process.exit(2);
 }
 const runner = path.join(root, "node-runner.mjs");
+const probes = path.join(root, "probes");
+const readProbe = (name) => fs.readFileSync(path.join(probes, name), "utf8");
 // The children boot the runtime: run them on this Node (PATH's `node` may be
 // another version, or absent in a container) with the deep JS stack the
 // runtime needs (HOSTING.md); --stack-size on the gate itself reaches no child.
@@ -62,7 +67,10 @@ for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
 }
 // The runner knobs at their defaults for every child unless a check sets one: the checks
 // judge the runtime, not the caller's shell ("" counts as unset in node-runner).
-const PINNED = { LEAN4_WASM64_CWD: "", LEAN4_WASM64_PTHREAD_STACK_MB: "", LEAN_WASM_STACK_PROBE_SLOTS: "", LEAN_WASM_PARKED_DEDICATED: "" };
+const PINNED = {
+  LEAN4_WASM64_CWD: "", LEAN4_WASM64_PTHREAD_STACK_MB: "", LEAN4_WASM64_PTHREAD_POOL: "", LEAN4_WASM64_RTSTATS: "",
+  LEAN_WASM_STACK_PROBE_SLOTS: "", LEAN_WASM_PARKED_DEDICATED: "", LEAN_WASM_PARKED_IDLE_MS: "", LEAN_WASM_STD_SURPLUS_EXIT: "",
+};
 function runChild(args, timeoutMs, env = {}) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, args, { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...PINNED, ...env } });
@@ -87,7 +95,8 @@ function runChild(args, timeoutMs, env = {}) {
   });
 }
 
-async function runLean(source, label, env = {}) {
+// `leanFlags`: Lean's own options, before the file
+async function runLean(source, label, env = {}, leanFlags = []) {
   const work = mkTemp("lean4-wasm64-gate-");
   fs.writeFileSync(path.join(work, "input.lean"), source);
   // Since the keepalive guard (patch 0020) and the resident transport (0031),
@@ -98,7 +107,7 @@ async function runLean(source, label, env = {}) {
   // `rfl` elaborates, the process is killed by the timeout. The CLI checks below
   // are therefore judged by OUTPUT; a timeout is reported, not failed.
   try {
-    return await runChild([STACK, runner, "--artifact", artifact, "--work", work, "--", "/work/input.lean"], 240_000, env);
+    return await runChild([STACK, runner, "--artifact", artifact, "--work", work, "--", ...leanFlags, "/work/input.lean"], 240_000, env);
   } finally {
     rmTemp(work);
   }
@@ -109,12 +118,94 @@ const gate = (ok, label, extra = "") => {
   if (!ok) failures += 1;
 };
 
-const smoke = await runLean("#eval System.Platform.numBits\nexample : (2 + 2 : Nat) = 4 := by rfl\n");
+// PATCH 0038, STATIC (G1): the glue sizes its pthread pool from Module.pthreadPoolSize
+// (src/emscripten-pthread-pool.js, a JS library of the link). A link that silently lost the
+// library would keep a fixed pool and pass every runtime check, so the glue's own text is checked.
+// A runtime before 0038 has none of these names: its 0038 checks are skipped with a note.
+const glue = fs.readFileSync(path.join(artifact, "bin/lean.js"), "utf8");
+const KNOB_EXPORTS = ["_lean_wasm_task_manager_stat", "_lean_wasm_engine_probes", "_lean_wasm_engine_guard_trips"];
+const poolGlue = {
+  loop: /var pthreadPoolSize\s*=\s*leanPthreadPoolTarget\s*;/.test(glue),
+  target: /var leanPthreadPoolTarget\s*=\s*leanPoolInt\(\s*Module\[\s*["']pthreadPoolSize["']\s*\]\s*,\s*24\s*,\s*0\s*,\s*64\s*\)/.test(glue),
+  parse: /function leanPoolInt\(/.test(glue),
+};
+const knobExports = KNOB_EXPORTS.filter((n) => glue.includes(`Module["${n}"]`));
+const is0038 = Object.values(poolGlue).some(Boolean) || knobExports.length > 0;
+const skip0038 = (label) => console.log(`note  [0038] ${label}: skipped (a runtime before 0038)`);
+if (is0038) {
+  gate(Object.values(poolGlue).every(Boolean), "[0038] the glue's pthread pool is Module.pthreadPoolSize (var pthreadPoolSize=leanPthreadPoolTarget)",
+    Object.entries(poolGlue).filter(([, ok]) => !ok).map(([k]) => `missing: ${k}`).join(", "));
+  gate(knobExports.length === KNOB_EXPORTS.length, "[0038] the task-manager and engine-guard counters are exported",
+    KNOB_EXPORTS.filter((n) => !knobExports.includes(n)).map((n) => `missing: ${n}`).join(", "));
+} else {
+  skip0038("the glue's pool size and the counter exports");
+}
+
+// The runtime's counters (LEAN4_WASM64_RTSTATS=1): node-runner answers a printed line containing
+// `[rtstats?]` with `[rtstats] <json>` right after it (runtime-knobs.mjs runtimeStats).
+const RTSTATS = { LEAN4_WASM64_RTSTATS: "1" };
+const ASK = '#eval IO.println "ASK [rtstats?]"\n';
+const rtstatsOf = (out) => {
+  const lines = out.split("\n");
+  return lines.flatMap((l, i) => {
+    const m = /^\[rtstats\] (\{.*\})$/.exec(l);
+    if (!m || i === 0) return [];
+    try { return [{ asked: lines[i - 1], ...JSON.parse(m[1]) }]; } catch { return []; }
+  });
+};
+const askedStats = (out, marker) => rtstatsOf(out).find((s) => s.asked.includes(`${marker} [rtstats?]`)) ?? null;
+const poolTargets = [];
+
+// G5/G6 judge probes/thread-knobs.lean, which samples the task manager every 100 ms for 3 s after
+// a burst of blocking pool tasks (phase nest) and after a burst of dedicated tasks (phase burst):
+// `KNOBS <phase>[-end] t=<ms since the burst> [rtstats?]`. With the knobs on (`on`) the surplus
+// standard workers exit and parked threads leave after IDLE_MS; by default neither happens.
+const IDLE_MS = 300;
+function judgeKnobs(out, on, tag) {
+  if (!is0038) return skip0038(`thread knobs [${tag}]`);
+  const samples = rtstatsOf(out).flatMap((s) => {
+    const m = /KNOBS (nest|burst)(?:-end)? t=(\d+) \[rtstats\?\]/.exec(s.asked);
+    return m && s.tm ? [{ phase: m[1], t: Number(m[2]), tm: s.tm }] : [];
+  });
+  const nest = samples.filter((x) => x.phase === "nest"), burst = samples.filter((x) => x.phase === "burst");
+  const n = nest.at(-1)?.tm, b = burst.at(-1)?.tm;
+  const std = n ? `live ${n.liveStd}, cap ${n.stdCap}, peak ${n.liveStdPeak}, surplus exits ${n.stdSurplusExits}` : "no sample";
+  const mostParked = burst.length ? Math.max(...burst.map((x) => x.tm.parked)) : null;
+  if (!on) {
+    gate(!!n && n.stdSurplusExits === 0 && n.liveStd === n.liveStdPeak,
+      `[0038] [${tag}] after a Task.get burst every standard worker stays (LEAN_WASM_STD_SURPLUS_EXIT unset)`, std);
+    gate(!!b && mostParked === 0 && b.parkedIdleExits === 0,
+      `[0038] [${tag}] after a burst of dedicated tasks no thread parks or leaves idle (parking unset)`,
+      b ? `parked at most ${mostParked}, idle exits ${b.parkedIdleExits}` : "no sample");
+    return;
+  }
+  gate(!!n && n.liveStdPeak > n.stdCap && n.liveStd <= n.stdCap && n.stdSurplusExits >= n.liveStdPeak - n.stdCap,
+    `[0038] [${tag}] LEAN_WASM_STD_SURPLUS_EXIT=1: after a Task.get burst the standard workers fall back to the cap`, std);
+  const first = burst.findIndex((x) => x.tm.parked > 0);
+  const gone = first < 0 ? -1 : burst.findIndex((x, i) => i > first && x.tm.parked === 0);
+  gate(first >= 0 && gone >= 0 && burst[gone].t <= IDLE_MS + 1000 && b.parked === 0 && b.parkedIdleExits >= 1,
+    `[0038] [${tag}] LEAN_WASM_PARKED_IDLE_MS=${IDLE_MS}: parked dedicated threads leave once idle that long (1 s slack)`,
+    !b ? "no sample" : first < 0 ? "no thread parked" : gone < 0 ? `${b.parked} still parked ${burst.at(-1).t} ms after the burst`
+      : `${mostParked} parked, none ${burst[gone].t} ms after the burst; idle exits ${b.parkedIdleExits}`);
+}
+
+// G3 rides on three runs, this one (-3), the legacy file (4) and the Meta deep recursion (abc):
+// LEAN4_WASM64_PTHREAD_POOL is Module.pthreadPoolSize, which the glue reads as 0, 4 and 24 (the
+// default). The pool size changes only how many Workers exist before a thread needs one, so the
+// runs' own checks hold at any size.
+const smokePool = { LEAN4_WASM64_PTHREAD_POOL: "-3", ...RTSTATS };
+const smoke = await runLean("#eval System.Platform.numBits\nexample : (2 + 2 : Nat) = 4 := by rfl\n" + ASK, "smoke", smokePool);
+poolTargets.push(["-3", 0, askedStats(smoke.stdout, "ASK")]);
 gate(/^64$/m.test(smoke.stdout) && !/error/i.test(smoke.stdout.replace(/\[DEBUG:PROGRESS\][^\n]*\n/g, "")),
   "numBits=64 + rfl proof (judged by output)", smoke.timedOut ? "CLI kept alive after main, killed by the timeout (patch 0020; expected)" : `exit ${smoke.status}`);
 
-const bad = await runLean("example : (1 + 1 : Nat) = 3 := by rfl\n");
+// THREAD KNOBS ON (0038, G5/G6) ride on the false proof: probes/thread-knobs.lean after it, with
+// the standard-worker cap at 2 (--threads=2), surplus standard workers exiting, and parked
+// dedicated threads (8) leaving after 300 ms idle. The proof's error is on line 1 whatever follows.
+const KNOBS_ON = { LEAN_WASM_STD_SURPLUS_EXIT: "1", LEAN_WASM_PARKED_DEDICATED: "8", LEAN_WASM_PARKED_IDLE_MS: "300", ...RTSTATS };
+const bad = await runLean("example : (1 + 1 : Nat) = 3 := by rfl\n" + readProbe("thread-knobs.lean"), "bad", KNOBS_ON, ["--threads=2"]);
 gate(/input\.lean:1:\d+: error|"severity":\s*"error"/.test(bad.stdout), "false proof reports a positioned error (judged by output)", bad.timedOut ? "CLI kept alive, killed by the timeout (expected)" : `exit ${bad.status}`);
+judgeKnobs(bad.stdout, true, "knobs on");
 
 // The parse defect lives in the PERSISTENT path (lean_wasm_compile); the
 // one-shot CLI has always reported parse errors. Drive the persistent probe
@@ -133,12 +224,11 @@ const parseFixed = probeOut.includes("runtime defect is FIXED");
 // three legacy probes run as ONE file (they all `import Lean`); the `module`
 // file runs alone. Probe sources: probes/*.lean next to this file (from qed64
 // tests/adversarial/kernel-probes).
-const probes = path.join(root, "probes");
-const readProbe = (name) => fs.readFileSync(path.join(probes, name), "utf8");
 const stripDebug = (s) => s.replace(/\[(DEBUG:PROGRESS|WASM (DEBUG|LSP|PROFILE|INIT))\][^\n]*\n/g, "");
 const legacySrc = "import Lean\n" + ["is-module.lean", "private-default.lean", "rpc-attr.lean"]
   .map((f) => readProbe(f).replace(/^import Lean\n/m, "")).join("\n");
-const legacy = await runLean(legacySrc);
+const legacy = await runLean(legacySrc + ASK, "legacy", { LEAN4_WASM64_PTHREAD_POOL: "4", ...RTSTATS });
+poolTargets.push(["4", 4, askedStats(legacy.stdout, "ASK")]);
 const legacyOut = stripDebug(legacy.stdout);
 gate(/isModule=false/.test(legacyOut) && !/isModule=true/.test(legacyOut), "legacy file: env.header.isModule = false",
   legacy.timedOut ? "CLI kept alive (expected)" : `exit ${legacy.status}`);
@@ -163,8 +253,8 @@ gate(/isModule=true/.test(moduleOut) && !/error/i.test(moduleOut), "`module` fil
 // every pthread_create is a synchronous round trip to the main JS thread).
 // Run twice: the DEFAULT (no parking — qed64 L9) as served, and with parking
 // enabled (LEAN_WASM_PARKED_DEDICATED=8) so the opt-in path stays verified.
-const stormRun = async (env, tag) => {
-  const r = await runLean(readProbe("task-storm.lean"), "storm", { QED64_COUNT_PTHREADS: "1", ...env });
+const stormRun = async (env, tag, after = "") => {
+  const r = await runLean(readProbe("task-storm.lean") + after, "storm", { QED64_COUNT_PTHREADS: "1", ...env });
   const out = stripDebug(r.stdout);
   const ok = /STORM OK dedicated=(\d+) checksum=(\d+)/.exec(out);
   const created = /\[pthreads\] created=(\d+)/.exec(out);
@@ -174,9 +264,11 @@ const stormRun = async (env, tag) => {
        : (/STORM FAIL[^\n]*/.exec(out)?.[0] ?? (r.timedOut ? "no result before the timeout — deadlock?" : `exit ${r.status}`)));
   gate(!!leaked && leaked[1] === "0", `[${tag}] a later dedicated task does not inherit a leaked stream redirection`,
     leaked ? `${leaked[1]} bytes reached the leaked buffer` : "no result");
-  return { ok, created };
+  return { ok, created, stdout: r.stdout };
 };
-await stormRun({}, "default: no parking");
+// The default run also carries probes/thread-knobs.lean with every knob unset (0038, G5/G6): the
+// threads of its bursts stay, as before 0038.
+judgeKnobs((await stormRun(RTSTATS, "default: no parking", `\n${readProbe("thread-knobs.lean")}`)).stdout, false, "knobs off");
 const parked = await stormRun({ LEAN_WASM_PARKED_DEDICATED: "8" }, "parking 8");
 gate(!!parked.ok && !!parked.created && Number(parked.created[1]) * 4 <= Number(parked.ok[1]),
   "[parking 8] dedicated tasks reuse parked threads (at most 1 pthread created per 4 dedicated tasks)",
@@ -187,18 +279,41 @@ gate(!!parked.ok && !!parked.created && Number(parked.created[1]) * 4 <= Number(
 // LEAN4_WASM64_PTHREAD_STACK_MB=0.68 gives the pthreads Chrome's budget (Node keeps ~192 KiB of it).
 const CHROME = { LEAN4_WASM64_PTHREAD_STACK_MB: "0.68" };
 const overflowed = (out) => /Maximum call stack size exceeded|too much recursion/.test(out);
-const deepMeta = stripDebug((await runLean(readProbe("deep-recursion.lean"), "deep", CHROME)).stdout);
+// G7 (0038): each run then asks for the engine guard's counters (GUARD); the Meta one also carries
+// G3's third pool size, abc (the default, 24: no change for this run).
+const GUARD = '#eval IO.println "GUARD [rtstats?]"\n';
+const guardOf = (out) => askedStats(out, "GUARD")?.guard ?? null;
+const deepMetaRun = await runLean(readProbe("deep-recursion.lean") + GUARD, "deep", { ...CHROME, LEAN4_WASM64_PTHREAD_POOL: "abc", ...RTSTATS });
+poolTargets.push(["abc", 24, askedStats(deepMetaRun.stdout, "GUARD")]);
+const deepMeta = stripDebug(deepMetaRun.stdout);
 gate(/maximum recursion depth has been reached/.test(deepMeta) && /DEEP SURVIVED/.test(deepMeta) && !overflowed(deepMeta),
   "deep recursion at Chrome's stack (Meta): Lean's max-recursion error, the thread survives",
   overflowed(deepMeta) ? "the engine's stack overflowed (RangeError)" : /DEEP SURVIVED/.test(deepMeta) ? "" : "no result");
-const deepKernel = stripDebug((await runLean(readProbe("deep-recursion-kernel.lean"), "deep-kernel", CHROME)).stdout);
+const deepKernelRun = await runLean(readProbe("deep-recursion-kernel.lean") + GUARD, "deep-kernel", { ...CHROME, ...RTSTATS });
+const deepKernel = stripDebug(deepKernelRun.stdout);
 gate(/engine's stack is exhausted/.test(deepKernel) && /DEEP SURVIVED/.test(deepKernel) && !overflowed(deepKernel),
   "deep recursion at Chrome's stack (kernel): the kernel's error, the thread survives",
   overflowed(deepKernel) ? "the engine's stack overflowed (RangeError)" : /DEEP SURVIVED/.test(deepKernel) ? "" : "no result");
-const deepRoomy = stripDebug((await runLean(readProbe("deep-recursion.lean"), "deep-roomy")).stdout);
+const deepRoomyRun = await runLean(readProbe("deep-recursion.lean") + GUARD, "deep-roomy", RTSTATS);
+const deepRoomy = stripDebug(deepRoomyRun.stdout);
 gate(/DEEP SURVIVED/.test(deepRoomy) && !/error/i.test(deepRoomy),
   "the same Meta proof at the default stack still checks (the probe does not cost valid proofs)",
   /error/i.test(deepRoomy) ? deepRoomy.split("\n").find((l) => /error/i.test(l))?.slice(0, 160) : "");
+// G7: counters only (the guard itself is 0036's): a question is counted at each probe point of
+// the two guard sites, a refusal by site (0 the kernel's depth guard, 1 Core.checkSystem)
+if (is0038) {
+  const shownGuard = (g) => (g ? `probes ${g.probes}, refused: kernel ${g.trips[0]}, checkSystem ${g.trips[1]}` : "no sample");
+  const gMeta = guardOf(deepMetaRun.stdout), gKernel = guardOf(deepKernelRun.stdout), gRoomy = guardOf(deepRoomyRun.stdout);
+  gate(!!gMeta && gMeta.trips[1] >= 1, "[0038] engine-guard counters at Chrome's stack (Meta): Core.checkSystem's refusal is counted", shownGuard(gMeta));
+  gate(!!gKernel && gKernel.trips[0] >= 1, "[0038] engine-guard counters at Chrome's stack (kernel): the kernel guard's refusal is counted", shownGuard(gKernel));
+  gate(!!gRoomy && gRoomy.probes > 0 && gRoomy.trips[0] === 0 && gRoomy.trips[1] === 0,
+    "[0038] engine-guard counters at the default stack: the guard asked, and refused nothing", shownGuard(gRoomy));
+  gate(poolTargets.every(([, want, x]) => x?.pool?.target === want),
+    "[0038] LEAN4_WASM64_PTHREAD_POOL is the glue's pool size: -3, 4, abc give 0, 4, 24",
+    poolTargets.map(([v, want, x]) => `${v}: ${x?.pool?.target ?? "no sample"}${x?.pool?.target === want ? "" : ` (want ${want})`}`).join(", "));
+} else {
+  skip0038("the engine-guard counters and the pool sizes");
+}
 // ASYNC ELABORATION THROUGH lean_wasm_compile (patch 0037; qed64 probe-neg N6, N6b, N7). With
 // `Elab.async` on, a theorem's proof, kernel check and (when the whole command is async) linters
 // run in tasks whose messages live only in `Command.State.snapshotTasks`; the persistent shell

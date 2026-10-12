@@ -23,7 +23,7 @@ Layers, so a host knows what it may rely on:
 |---|---|
 | Target | `wasm64-unknown-emscripten`: Memory64, shared memory, pthreads, `-sPROXY_TO_PTHREAD=1` (`main` runs on a pthread) |
 | Memory import | `env.memory`: `WebAssembly.Memory({shared: true, address: "i64", initial: ≥ 2048n, maximum: ≤ 262144n})` pages (128 MiB … 16 GiB). Without a host `wasmMemory` the glue creates `{initial: INITIAL_MEMORY ‖ 128 MiB, maximum: 262144n}`. The runtime manifest records these values (`memory`). |
-| Threads | a pool of 24 pthread Workers created at load, growing on demand; 16 MiB main/application stack, 8 MiB per pthread |
+| Threads | a pool of `Module.pthreadPoolSize` pthread Workers (0..64, default 24; 0038) created at load, growing on demand; 16 MiB main/application stack, 8 MiB per pthread (§3.6) |
 | Exit | `-sEXIT_RUNTIME=1` with the keepalive patch 0020 in the build image (§5) |
 | Filesystems | MEMFS (root), NODEFS, WORKERFS |
 | Runtime methods | `callMain, FS, ENV, ccall, getValue, setValue, UTF8ToString, stringToNewUTF8` |
@@ -63,7 +63,13 @@ may import any memory whose maximum is ≤ that.
 | `_lean_wasm_shell_mark_preinitialized()` | `()` | — | 0031 |
 | `_lean_browser64_configure_input_ring(ptr, capacity)` | `(i64, u32)` | `u32`: 0, or `EINVAL` (28) | 0031 |
 | `_lean_wasm_task_manager_parked_threads()` | `()` | `u32`: pthreads parked by the task manager | 0035 |
+| `_lean_wasm_task_manager_stat(key)` | `(u32)` | `f64`: 0 standard workers live, 1 their cap, 2 the most ever live, 3 surplus exits, 4 parked threads, 5 idle exits of parked threads (§3.6); -1 for another key or before the task manager exists | 0038 |
+| `_lean_wasm_engine_probes()` | `()` | `f64`: questions the engine-stack guard asked since start-up (§6) | 0038 |
+| `_lean_wasm_engine_guard_trips(site)` | `(u32)` | `f64`: its refusals at site 0 (the kernel) or 1 (`Core.checkSystem`); 0 for another site | 0038 |
 | `callMain(args)` | `string[]` | runs `lean_main` on the application pthread | — |
+
+The 0038 counters are lock-free: a host may call them from its main JS thread at any time, also
+while Lean threads hold the task manager's lock (which that thread must never wait for).
 
 `_mem` loads: `ptr` is a `_malloc`ed buffer holding a whole `.snap` file of
 `size` bytes; on success it becomes the loaded region's memory (never free or
@@ -88,6 +94,7 @@ shims — see `js/node-runner.mjs`). Keys the glue reads:
 | `wasmMemory` | the shared i64 memory (§1); pthreads receive it |
 | `INITIAL_MEMORY` | only without `wasmMemory` |
 | `noInitialRun: true` | persistent hosts: do not run `main` at load |
+| `pthreadPoolSize` | the pthread Workers created at load (§3.6): an integer, clamped to 0..64; absent, blank or not a number, 24. Read once, when the glue is evaluated (0038; an earlier runtime ignores it) |
 | `arguments` | argv of the implicit `main` (one-shot CLI) |
 | `locateFile(path)` | where `lean.wasm` is (QED64: a Blob URL of verified bytes) |
 | `mainScriptUrlOrBlob` | the script **every pthread Worker** loads: the glue itself, or a prelude that `importScripts` it in the same global scope |
@@ -110,6 +117,8 @@ mutating `Module.ENV` in `preRun`. Two readers see them:
 |---|---|---|
 | `LEAN_PATH` | Lean | `:`-separated library dirs, prepended to the built-in `/lib/lean` (§3.3) |
 | `LEAN_WASM_PARKED_DEDICATED` | C, at task-manager creation | idle dedicated task threads kept for reuse; clamped to 64; **default 0** — parked pthreads outlive a page reload by the browser's ~2 s termination grace, and overlapping the next boot they exhausted V8's pointer-compression cage (0035b) |
+| `LEAN_WASM_PARKED_IDLE_MS` | C, at task-manager creation | a parked dedicated thread exits after that many ms without a task (clamped to 3,600,000); **default unset: parked threads wait for good** (0038, §3.6) |
+| `LEAN_WASM_STD_SURPLUS_EXIT` | C, at task-manager creation | `1`: a standard worker exits while more of them live than the cap, as after a burst of `Task.get` in pool tasks; **default unset: they stay** (0038, §3.6) |
 | `LEAN_COMPACTOR_RESERVE` | C | bytes reserved up front when saving a snapshot (`--incr-header-save`); a doubling buffer needs old + new at once (bakes use 3.5 GiB) |
 | `LEAN_WASM_STACK_PROBE_SLOTS` | C, once | headroom (in 8-byte argument slots, default 16384 = 128 KiB) the engine-stack probe demands (§6); 0 disables it — for calibration only (0036) |
 | `LEAN_NAT_MAX_SIZE`, `LEAN_STACK_SIZE_KB` | C | upstream semantics (the latter on the `main` path only) |
@@ -206,6 +215,37 @@ names `/work/X.lean` `X`). `LEAN4_WASM64_CWD=work` keeps the earlier layout
 (the work dir, mirrored at its host path, is the cwd, so relative paths land
 in it).
 
+### 3.6 Threads and Workers (0038)
+
+Every live pthread holds one Emscripten Worker, and in a browser each Worker is an isolate in the
+renderer's one pointer-compression cage (§6).
+
+- **The pool** [RT]: `Module.pthreadPoolSize` Workers are created, and load the module, while the
+  runtime starts (default 24). A thread then starts on an idle pool Worker; when none is idle it
+  gets a new Worker, which boots first. A finished thread's Worker returns to the pool; nothing
+  terminates Workers before exit. A smaller pool boots faster and holds fewer isolates while idle;
+  a host with thresholds keyed to 24 (QED64's edit hold: fewer than 6 free pool Workers) moves
+  them with it. The glue computes the size into a top-level `leanPthreadPoolTarget` [GLUE].
+- **Threads that leave** [RT], both opt-in through `Module.ENV` in `preRun` (§3.1); measure a page
+  reload with them before turning them on (§6, 0035b):
+  - Standard workers serve pool tasks. Their cap is the task manager's worker count
+    (`_lean_init_task_manager_using(n)`, else the hardware concurrency) plus one per pool task
+    blocked in `Task.get`, and such a block starts a worker when none is idle, so a
+    burst of nested `Task.get`s leaves workers beyond the cap. They stay unless
+    `LEAN_WASM_STD_SURPLUS_EXIT=1`, which makes a waiting worker exit while more live than the
+    cap; a later burst creates them again.
+  - Dedicated threads park only with `LEAN_WASM_PARKED_DEDICATED=<n>` (default 0); with
+    `LEAN_WASM_PARKED_IDLE_MS=<ms>` a parked thread exits after that idle time.
+- **Gauges** [RT]: `_lean_wasm_task_manager_stat(key)` (§2), lock-free. Emscripten's own
+  `PThread.unusedWorkers` (idle pool Workers) and `PThread.pthreads` (Workers running a thread)
+  [GLUE] count the Workers.
+- **Node**: `node-runner.mjs`, `persistent-probe.mjs` and `snapshot-probe.mjs` take
+  `LEAN4_WASM64_PTHREAD_POOL=<n>` for `Module.pthreadPoolSize` and copy `LEAN_WASM_PARKED_DEDICATED`,
+  `LEAN_WASM_PARKED_IDLE_MS`, `LEAN_WASM_STD_SURPLUS_EXIT` and `LEAN_WASM_STACK_PROBE_SLOTS` into
+  `Module.ENV`; with `LEAN4_WASM64_RTSTATS=1`, node-runner answers a printed line containing
+  `[rtstats?]` with `[rtstats] <json>` of these gauges and the guard's counters
+  (`js/runtime-knobs.mjs`).
+
 ## 4. The stdin ring (0031) [RT]
 
 ```
@@ -266,7 +306,9 @@ max-recursion error, or the kernel's "the WebAssembly engine's stack is exhauste
 recurses deeper than a browser allows fails with an error, and the session survives; whether it
 fits depends on the engine. Recursion that passes no checkpoint (the IR interpreter, some
 expression traversals) can still overflow, as native Lean can abort there. Headless, the
-node-runner knob `LEAN4_WASM64_PTHREAD_STACK_MB=0.68` gives the pthreads Chrome's budget.
+node-runner knob `LEAN4_WASM64_PTHREAD_STACK_MB=0.68` gives the pthreads Chrome's budget. Since
+0038 a host can read how often the guard asked and refused: `_lean_wasm_engine_probes()` and
+`_lean_wasm_engine_guard_trips(site)` (§2). Counters only: the guard itself is 0036's.
 
 - Browser: a classic **DedicatedWorker** (`importScripts`, nested Workers for
   pthreads; a SharedWorker cannot host it), cross-origin isolated (HOSTING.md),

@@ -15,6 +15,7 @@ import path from "node:path";
 import vm from "node:vm";
 import { createRequire } from "node:module";
 import { applyCliContract, ensureStackSize } from "./cli-args.mjs";
+import { forwardWasmEnv, poolModuleKeys } from "./runtime-knobs.mjs";
 
 // First, before the contract prints anything: replaces this process (same PID) when
 // started without --stack-size, so every line below is printed once.
@@ -45,6 +46,10 @@ const cli = applyCliContract({
     "  --cases <files>   comma-separated .lean files: compile each n times, one `CASE {json}` line per compile, then `CASES DONE` (the gate's 0037 checks)",
     "  --passes <n>      passes over --cases (default 2)",
     "  -h, --help        print this help and exit 0, before any side effect",
+    "",
+    "env: LEAN4_WASM64_PTHREAD_POOL=<n> is Module.pthreadPoolSize, the pthread Workers created at load (0..64, default 24;",
+    "     kernel patch 0038); LEAN_WASM_PARKED_DEDICATED, LEAN_WASM_PARKED_IDLE_MS, LEAN_WASM_STD_SURPLUS_EXIT and",
+    "     LEAN_WASM_STACK_PROBE_SLOTS are copied into the runtime's environment (EMBED-RUNTIME.md §3.1)",
     "",
     "exit codes: 0 PERSISTENT PROBE PASS (or CASES DONE), 1 PERSISTENT PROBE FAIL or an unreadable --cases file, 2 no artifact, 3 the runtime aborted",
   ].join("\n"),
@@ -117,6 +122,7 @@ process.argv[1] = "/bin/lean";
 
 globalThis.Module = {
   noInitialRun: true,
+  ...poolModuleKeys(),
   locateFile: (f) => path.join(path.dirname(leanJs), f),
   mainScriptUrlOrBlob: leanJs,
   print: capture("stdout"),
@@ -135,6 +141,7 @@ globalThis.Module = {
       }
       FS.mount(NODEFS, { root: libLean }, "/lib/lean");
       globalThis.Module.ENV.LEAN_PATH = "/lib/lean";
+      forwardWasmEnv(globalThis.Module.ENV); // the runtime's LEAN_WASM_* knobs (runtime-knobs.mjs)
       FS.chdir("/workspace");
     },
   ],

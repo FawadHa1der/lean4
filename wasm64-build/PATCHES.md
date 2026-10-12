@@ -494,3 +494,75 @@ proofs fanned out by one command are joined in ~0.45 s (sync twin ~0.26 s);
 pthreads wake late here — rather than hanging. Of the stdlib's generated C only
 `Lean/Shell.c` changed (its private specializations renumbered; none reused,
 none referenced elsewhere), so the v4.34.0 packs pair with this runtime.
+
+## Unreleased: 0038 — wasm: the host sizes the pthread pool; surplus and idle threads may leave; engine-guard counters
+
+(The heading becomes `## 0038 — … (<commit>)` when a release records it with the gate's
+numbers, as for 0036 and 0037: the patch-id rule, `js/artifact-id.mjs`, needs the commit.)
+
+Every live pthread holds an Emscripten Worker, and in a browser each Worker is a V8 isolate of
+~129 MiB in a renderer whose pointer-compression cage fits about 30 of them (EMBED-RUNTIME.md §6;
+qed64 HARDENING #55, #69, #70). This patch gives the host the size of the pool and two opt-in ways
+for an idle thread to give its Worker back, and counts the engine-stack guard of 0036. Every
+default is 0037's; only the counters are new.
+
+- **The pool size is the host's.** `-sPTHREAD_POOL_SIZE` is a JS expression that emsdk emits
+  verbatim into the glue's pool loop. It now names a variable of `src/emscripten-pthread-pool.js`,
+  a `--js-library` of the `lean` link pinned to emsdk 6.0.5 (another emsdk fails the link there):
+  `Module.pthreadPoolSize`, read once when the glue is evaluated, an integer clamped to 0..64,
+  else 24, the pool since 0019. A thread beyond the pool gets a Worker of its own when it starts,
+  as before. node-runner, persistent-probe and snapshot-probe pass `LEAN4_WASM64_PTHREAD_POOL`.
+- **`LEAN_WASM_STD_SURPLUS_EXIT=1`**: a standard worker exits while more of them live than the
+  cap. `Task.get` in a pool task raises the cap by one while it waits and starts a worker when
+  none is idle; without the knob the workers of such a burst stay for the life of the process. A
+  worker leaves only at its idle wait (nothing queued) or its throttle wait, where the queue
+  waits for the busy workers exactly as the throttled one would have (the argument, including
+  `wait_any` waiters and workers not started yet, is in `object.cpp`). On wasm, standard workers
+  are now counted instead of kept as joinable handles, and created detached like dedicated
+  threads: nothing ever joined them there, so this changes nothing until a worker exits.
+- **`LEAN_WASM_PARKED_IDLE_MS=<ms>`**: a parked dedicated thread (`LEAN_WASM_PARKED_DEDICATED`,
+  0035b) exits after that long without a task (clamped to an hour). A hand-off racing the deadline
+  is safe: the task is set and the slot taken under the lock, and the woken thread runs it. The
+  wait is one timed futex wait; timed sleeps on task threads have woken late in this build (0037
+  measured 18 s for `sleep 1000`), so the gate measures how soon the idle threads leave.
+- **Counters, always on, observation only.** `lean_wasm_task_manager_stat(key)`: 0 standard
+  workers live, 1 their cap, 2 the most ever live, 3 surplus exits, 4 parked threads, 5 idle exits;
+  -1 for another key or before the task manager exists. `lean_wasm_engine_probes()` counts the
+  questions the guard's two sites ask (the kernel's `scope_rec_depth` on its probe levels,
+  `Core.checkSystem` on every 16th call; with `LEAN_WASM_STACK_PROBE_SLOTS=0` they are still
+  counted, and never refused), `lean_wasm_engine_guard_trips(site)` the refusals at site 0 (the
+  kernel) and 1 (`Core.checkSystem`). The sites count around their own call of
+  `engine_stack_has_headroom`, so that function, the probe, its interval, its headroom and every
+  decision stay 0036's; the two callers' wasm frames may differ by a few bytes, nothing against the
+  128 KiB of headroom. One relaxed atomic add per question (a question costs ~4 µs). All three
+  are lock-free doubles, safe from the host's main JS thread; they are seeded exports.
+- **Relinking.** The JS library and the export list are prerequisites of the `lean` link
+  (`LEAN_EXE_LINK_DEPS`, `src/stdlib.make.in`), and `gen-exports.py` rewrites the export list only
+  when its content changes, so an unchanged list does not relink.
+
+**Dropped from the design after review** (r0038): a soft ceiling on the pool with held-back
+thread starts, its overflow timer, shrinking the pool back to its initial size,
+`Module.pthreadPoolStats()`, and the "pool pressure" cell that would have stopped threads from
+parking. A held-back start can be released only from the main JS thread's event loop, so a host
+that blocks that thread in a wasm call — QED64 does, at boot (`lean_wasm_load_snapshot_mem`) and in
+its blocking `compile()` — could deadlock on a thread it held back; and shrinking on every release
+churned Worker boots in exactly the band such a host configures. The native-symbol table (0039) is
+expected to make each Worker cheap enough that the ceiling is not needed now (0039 measures it).
+Also left out: `lean_wasm_compile` elaborating with `Elab.async` on unless the file says otherwise,
+as native `lean` does. That changes a default, with thread and stack effects of its own, and
+needs a decision of its own.
+
+Gate, folded into the existing runs (the gate still boots 11 runtimes; on a runtime before 0038
+every 0038 check is skipped with a note): the glue's pool loop reads the library's variable and the
+three counters are exported (static); `LEAN4_WASM64_PTHREAD_POOL` -3, 4 and abc give pools of 0, 4
+and 24; with the knobs on (the false-proof run, `--threads=2`, `js/probes/thread-knobs.lean`) the
+standard workers of a `Task.get` burst fall back to the cap and parked threads leave within the
+idle time plus 1 s, while in the default storm run every thread stays as before; the guard's
+refusals are counted at Chrome's stack (kernel and Meta), and at the default stack it asks and
+refuses nothing. Node: `LEAN4_WASM64_RTSTATS=1` makes node-runner answer a printed `[rtstats?]`
+with `[rtstats] <json>` (`js/runtime-knobs.mjs`). Measured numbers: from the first gated build.
+
+For hosts: a pool of other than 24 moves thresholds keyed to it, such as QED64's edit hold
+(`lib/edit-coalescer.ts` holds while fewer than 6 pool Workers are free, "6 of the runtime's 24");
+the two exits are for a host that has measured its reload behaviour with them (EMBED-RUNTIME.md
+§3.1, §3.6).

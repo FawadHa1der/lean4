@@ -36,6 +36,9 @@ boxed wrappers, 168 module initializers and 213 cells it would never have
 exported.
 
 Usage: gen-exports.py <stage1/lib/temp> <lean4/src> [--check] [--slim <file>]
+  Writes <lean4/src>/emscripten-exports.txt only when its content changes: the
+  list is a prerequisite of the `lean` link (src/stdlib.make.in), so a rewrite
+  of the same names would relink it.
   --check: do not write; print the category counts and the delta against the
            list currently on disk.
   --slim <file>: ALSO write the slim (iPhone WebKit) list: seed + init + cell +
@@ -154,6 +157,23 @@ if os.path.exists(target):
     old = set(read_list("emscripten-exports.txt"))
     new = set(final)
     print(f"vs the list on disk: +{len(new - old)} -{len(old - new)}")
+
+
+def write_if_changed(path, text):
+    """Write `text` to `path` unless the file already holds exactly that. The export list is a
+    prerequisite of the `lean` link (src/stdlib.make.in, patch 0038): rewriting it unchanged
+    would relink on every build. True when it wrote."""
+    try:
+        with open(path) as fh:
+            if fh.read() == text:
+                return False
+    except FileNotFoundError:
+        pass
+    with open(path, "w") as out:
+        out.write(text)
+    return True
+
+
 if slim_out:
     slim = seed + [n for n in generated if n not in seedset and
                    (kind[n] != "boxed" or n[:-len("___boxed")] not in kind)]
@@ -162,6 +182,7 @@ if slim_out:
     print(f"wrote {slim_out} (slim: {len(slim)} names)")
 if check:
     sys.exit(0)
-with open(target, "w") as out:
-    out.write("\n".join(final) + "\n")
-print(f"wrote {target}")
+if write_if_changed(target, "\n".join(final) + "\n"):
+    print(f"wrote {target}")
+else:
+    print(f"unchanged: {target} (kept as it was, so it does not relink `lean`)")

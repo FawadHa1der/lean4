@@ -759,10 +759,13 @@ _lean_uv_udp_set_multicast_ttl
 _lean_uv_udp_set_ttl
 _lean_uv_uptime
 _lean_wasm_compile
+_lean_wasm_engine_guard_trips
+_lean_wasm_engine_probes
 _lean_wasm_load_snapshot
 _lean_wasm_load_snapshot_mem
 _lean_wasm_reset
 _lean_wasm_task_manager_parked_threads
+_lean_wasm_task_manager_stat
 _lean_wasm_native_stack_ok
 _lean_whnf
 _lean_windows_get_next_transition

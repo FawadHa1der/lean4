@@ -988,18 +988,31 @@ if(CMAKE_SYSTEM_NAME MATCHES "Emscripten")
   # just interpreted instead of native. This replaces MAIN_MODULE=1 +
   # LINKABLE=1 + EXPORT_ALL=1, whose ~230k-entry export table dominated the
   # glue JS and blocked all DCE (WebKit on iPhone dies compiling the result).
-  # PTHREAD_POOL_SIZE pre-spawns worker threads so Lean can create threads without
-  # the main thread blocking (Emscripten can't spawn a worker synchronously); 4
-  # matched the working 4.28 build. STACK_SIZE=16MB covers whatever import work
-  # still runs on the main wasm stack (Emscripten's 64KB default overflows it).
-  # INITIAL_MEMORY must exceed static data + the 16MB stack + per-thread TLS; the
-  # pthread layout needs ~22MB up front (the default 16MB fails to link). Memory
-  # growth is enabled; MAXIMUM_MEMORY is an address-space ceiling, not an eager
-  # physical allocation. wasm64 uses 128MB initially and may grow to 12GB.
+  # STACK_SIZE=16MB covers whatever import work still runs on the main wasm
+  # stack (Emscripten's 64KB default overflows it). INITIAL_MEMORY must exceed
+  # static data + the 16MB stack + per-thread TLS; the pthread layout needs ~22MB
+  # up front (the default 16MB fails to link). Memory growth is enabled;
+  # MAXIMUM_MEMORY is an address-space ceiling, not an eager physical
+  # allocation. wasm64 uses 128MB initially and may grow to 12GB.
   string(
     APPEND LEAN_EXE_LINKER_FLAGS
-    " ${LIB}/temp/libleanshell.a ${TOOLCHAIN_STATIC_LINKER_FLAGS} ${EMSCRIPTEN_SETTINGS} ${EMSCRIPTEN_LINK_SETTINGS} -lnodefs.js -lworkerfs.js -s EXIT_RUNTIME=1 -s MAIN_MODULE=2 -s ERROR_ON_UNDEFINED_SYMBOLS=0 -sEXPORTED_FUNCTIONS=@${LEAN_SOURCE_DIR}/emscripten-exports.txt -sEXPORTED_RUNTIME_METHODS=ccall,callMain,FS,ENV,getValue,setValue,stringToNewUTF8,UTF8ToString -s STACK_SIZE=16777216 -sINITIAL_MEMORY=${EMSCRIPTEN_INITIAL_MEMORY} -sMAXIMUM_MEMORY=${EMSCRIPTEN_MAXIMUM_MEMORY} -sPTHREAD_POOL_SIZE=24 -sDEFAULT_PTHREAD_STACK_SIZE=8388608 -sPROXY_TO_PTHREAD=1"
+    " ${LIB}/temp/libleanshell.a ${TOOLCHAIN_STATIC_LINKER_FLAGS} ${EMSCRIPTEN_SETTINGS} ${EMSCRIPTEN_LINK_SETTINGS} -lnodefs.js -lworkerfs.js -s EXIT_RUNTIME=1 -s MAIN_MODULE=2 -s ERROR_ON_UNDEFINED_SYMBOLS=0 -sEXPORTED_FUNCTIONS=@${LEAN_SOURCE_DIR}/emscripten-exports.txt -sEXPORTED_RUNTIME_METHODS=ccall,callMain,FS,ENV,getValue,setValue,stringToNewUTF8,UTF8ToString -s STACK_SIZE=16777216 -sINITIAL_MEMORY=${EMSCRIPTEN_INITIAL_MEMORY} -sMAXIMUM_MEMORY=${EMSCRIPTEN_MAXIMUM_MEMORY} -sDEFAULT_PTHREAD_STACK_SIZE=8388608 -sPROXY_TO_PTHREAD=1"
   )
+  # The pthread pool: Workers created (and loaded) at start-up, so a thread can
+  # start without the main JS thread waiting for a new Worker to boot. Its size
+  # is the host's since patch 0038: PTHREAD_POOL_SIZE is a JS expression emitted
+  # verbatim into the glue, here a variable of emscripten-pthread-pool.js (a JS
+  # library): `Module.pthreadPoolSize`, an integer clamped to 0..64, else 24 as
+  # since patch 0019 (every language-server task is `.dedicated`, a thread each).
+  # Threads beyond the pool get a Worker of their own (PROXY_TO_PTHREAD forces
+  # PTHREAD_POOL_SIZE_STRICT=0).
+  string(
+    APPEND LEAN_EXE_LINKER_FLAGS
+    " -sPTHREAD_POOL_SIZE=leanPthreadPoolTarget --js-library=${LEAN_SOURCE_DIR}/emscripten-pthread-pool.js"
+  )
+  # Inputs of the `lean` link that are not libraries: a change to one relinks it
+  # (stdlib.make.in). gen-exports.py rewrites the export list only when it changes.
+  set(LEAN_EXE_LINK_DEPS "${LEAN_SOURCE_DIR}/emscripten-pthread-pool.js ${LEAN_SOURCE_DIR}/emscripten-exports.txt")
 endif()
 
 # Build the compiler using the bootstrapped C sources for stage0, and use
