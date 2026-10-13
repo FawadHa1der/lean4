@@ -1,4 +1,4 @@
-// A tools re-cut by reference, the reader side (formats/release.md, "Release by reference"): fetch from
+// A tools re-cut, the reader side (formats/release.md, "Release by reference"): fetch from
 // a thin flat -r3 (tools/, release.json, SHA256SUMS) whose every other file is its first cut's,
 // found as the sibling <…>/<base id>/ or at --base-from; a complete served -r3 read alone; the
 // refusals that write nothing; verify --base. End to end and offline: a small synthetic first cut
@@ -525,7 +525,7 @@ const R2_TOOLS = "2050a9ca0c";
 const git = (...args) => spawnSync("git", ["-C", REPO, ...args], { timeout: TIMEOUT_MS, maxBuffer: 256 << 20 });
 const haveR2Tools = git("cat-file", "-e", `${R2_TOOLS}^{commit}`).status === 0;
 
-test("older readers fail closed, end to end: the -r2 tools' own fetch refuses a re-cut by reference before writing anything, their verify calls it malformed", { skip: haveR2Tools ? false : `commit ${R2_TOOLS} (the -r2 tools) is not in this clone (a shallow checkout?)` }, () => {
+test("older readers fail closed, end to end: the -r2 tools' own fetch refuses a tools re-cut before writing anything, their verify calls it malformed", { skip: haveR2Tools ? false : `commit ${R2_TOOLS} (the -r2 tools) is not in this clone (a shallow checkout?)` }, () => {
   const old = mkdtemp("l4w-r2-tools-");
   const a = git("archive", "--format=tar", R2_TOOLS, "wasm64-build/js");
   assert.equal(a.status, 0, String(a.stderr));

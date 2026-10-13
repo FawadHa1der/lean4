@@ -1,4 +1,4 @@
-// release.mjs --base: the writer side of a tools re-cut by reference (formats/release.md, "Release by
+// release.mjs --base: the writer side of a tools re-cut (formats/release.md, "Release by
 // reference"). A small first cut is staged and released once; each case clones its files outside
 // tools/ into a fresh <id>-r3 dir beside a new tgz, derives the config from the base's record as
 // by-reference staging does, and runs release.mjs as a separate process. Every refusal writes
@@ -141,7 +141,7 @@ test("a clean by-reference config over the cloned files: written, base right aft
   assert.deepEqual(checkReleaseRecord(rec), []);
   assert.deepEqual(checkRecutBase(rec, B.record), []);
   assert.equal(rec.files.length, B.record.files.length);
-  // only what a re-cut by reference may change differs: gate.checks, tools, notes
+  // only what a tools re-cut may change differs: gate.checks, tools, notes
   assert.equal(rec.gate.checks, B.record.gate.checks + 1);
   assert.equal(rec.tools.tgz, RECUT_TGZ);
   assert.deepEqual(rec.notes.slice(1), B.record.notes);

@@ -32,7 +32,8 @@
 //          release.json names the base and keeps its equality rules, and SHA256SUMS differs from the
 //          base's at release.json and at the files the release owns only; then, for a tools re-cut
 //          (its printed manual fallback), writes the shared paths for the R2 copy to
-//          <sidecar prefix>.r2-objects.txt / .r2-manifests.txt
+//          <sidecar prefix>.r2-objects.txt / .r2-manifests.txt and the GitHub release body publish
+//          writes (publish-release.mjs releaseBody) to <sidecar prefix>.release-notes.md
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -215,7 +216,7 @@ export async function cloneShared(file, mirror, rel) {
  * recut; the base's notes then follow a separator that says which of them hold for it. `recut` and
  * `checks` are the script's text (a count that is not digits is null).
  */
-export function recutConfig(b, { id, recut, runtime = null, checks, version, tgz, commit, notes = [] }) {
+export function byReferenceConfig(b, { id, recut, runtime = null, checks, version, tgz, commit, notes = [] }) {
   const count = /^\d+$/.test(checks) ? Number(checks) : null;
   const kernelCommit = runtime ? runtime.kernelCommit : b.kernel.commit;
   // what release.mjs cannot derive from the cloned manifests, as the base recorded it (a pack's note included)
@@ -237,8 +238,8 @@ export function recutConfig(b, { id, recut, runtime = null, checks, version, tgz
 
 const RUNTIME_OWN = /^([0-9a-f]{40}):(\d{4}[a-z]?):([0-9a-f]{64})$/;
 
-/** Step `config`: writes recutConfig(<base record>) to `config`; `own` is a re-cut number or <kernel commit>:<patch>:<lean.wasm sha256>. */
-export function writeRecutConfig(file, config, id, own, checks, version, tgz, commit, notes = []) {
+/** Step `config`: writes byReferenceConfig(<base record>) to `config`; `own` is a re-cut number or <kernel commit>:<patch>:<lean.wasm sha256>. */
+export function writeByReferenceConfig(file, config, id, own, checks, version, tgz, commit, notes = []) {
   let kind;
   if (/^\d+$/.test(own)) kind = { recut: own };
   else {
@@ -246,7 +247,7 @@ export function writeRecutConfig(file, config, id, own, checks, version, tgz, co
     if (!m) throw new Error(`<own> ${JSON.stringify(own)} is neither a re-cut number nor <kernel commit>:<patch>:<lean.wasm sha256>`);
     kind = { runtime: { kernelCommit: m[1], kernelPatch: m[2], wasmSha256: m[3] } };
   }
-  fs.writeFileSync(config, JSON.stringify(recutConfig(readRecord(file), { id, ...kind, checks, version, tgz, commit, notes }), null, 2) + "\n");
+  fs.writeFileSync(config, JSON.stringify(byReferenceConfig(readRecord(file), { id, ...kind, checks, version, tgz, commit, notes }), null, 2) + "\n");
 }
 
 // ---------- final ----------
@@ -261,12 +262,13 @@ const parseSums = (text) => new Map(text.split("\n").filter(Boolean).map((l) => 
  * Step `final`, after release.mjs and verify: the record names this base and keeps the equality
  * rules, and its SHA256SUMS differs from the base's at release.json and at files it owns only
  * (RELEASE.md; a path only the base lists is judged by the same rule). Then, for a tools re-cut
- * only, the shared paths by the content type R2 serves them with, written to
- * `<sidecar>.r2-objects.txt` and `<sidecar>.r2-manifests.txt` (its printed manual fallback reads
- * them; `publish` derives its own lists from the record). Nothing is written on a refusal.
+ * only, what its printed manual fallback reads (`publish` derives the same from the record): the
+ * shared paths by the content type R2 serves them with, in `<sidecar>.r2-objects.txt` and
+ * `<sidecar>.r2-manifests.txt`, and publish's GitHub release body in `<sidecar>.release-notes.md`.
+ * Nothing is written on a refusal.
  */
 export async function finalCheck(file, rel, sidecar) {
-  const { contentTypeOf } = await import("./publish-release.mjs");
+  const { contentTypeOf, releaseBody } = await import("./publish-release.mjs");
   const baseText = fs.readFileSync(file);
   const b = JSON.parse(baseText);
   const r = JSON.parse(fs.readFileSync(path.join(rel, "release.json"), "utf8"));
@@ -290,6 +292,7 @@ export async function finalCheck(file, rel, sidecar) {
   if (byReferenceKind(r) === "tools") {
     fs.writeFileSync(`${sidecar}.r2-objects.txt`, objects.map((q) => `${q}\n`).join(""));
     fs.writeFileSync(`${sidecar}.r2-manifests.txt`, manifests.map((q) => `${q}\n`).join(""));
+    fs.writeFileSync(`${sidecar}.release-notes.md`, releaseBody(r));
   }
   return `only release.json and its own files (${ownLabel(r)}) differ from ${b.id}: SHA256SUMS differs at ${differ.length} paths; `
     + `${r.files.length} files, ${r.files.length - shared.length} own, ${shared.length} shared (${objects.length} objects, ${manifests.length} manifests)`;
@@ -302,7 +305,7 @@ const STEPS = {
   pairing: { args: 2, run: ([file, c]) => checkPairing(file, c) },
   mirror: { args: 4, run: ([file, mirror, out, id]) => checkMirror(file, mirror, out, id) },
   clone: { args: 3, run: ([file, mirror, rel]) => cloneShared(file, mirror, rel) },
-  config: { args: 8, more: true, run: ([file, config, id, own, checks, version, tgz, commit, ...notes]) => writeRecutConfig(file, config, id, own, checks, version, tgz, commit, notes) },
+  config: { args: 8, more: true, run: ([file, config, id, own, checks, version, tgz, commit, ...notes]) => writeByReferenceConfig(file, config, id, own, checks, version, tgz, commit, notes) },
   final: { args: 3, run: ([file, rel, sidecar]) => finalCheck(file, rel, sidecar) },
 };
 

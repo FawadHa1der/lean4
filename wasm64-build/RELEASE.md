@@ -55,9 +55,9 @@ Options: `--packs-from <dir>` copies packs a site already serves (their
 transport bytes stay valid in every cache) instead of re-packing them;
 `--match-runtime <manifest>` makes staging stop unless the release's runtime
 manifest is byte-identical to one a site serves (so nothing baked against it
-unpairs); `--note <text>` adds a release note; `--recut <n>` a tools-only
-re-cut: **by reference** with `--base <mirror of the base>` (below), or by value
-with `--match-runtime` (only when a re-cut by reference is refused, e.g. a
+unpairs); `--note <text>` adds a release note; `--recut <n>` a tools re-cut:
+**by reference** with `--base <mirror of the base>` (below), or by value with
+`--match-runtime` (only when staging it by reference is refused, e.g. a
 `hosting` change); `--base <mirror>` with `--runtime <build dir>` a runtime
 release by reference (below). Relative paths are the caller's.
 
@@ -95,9 +95,10 @@ A **tools re-cut** then packs the tools and gates them on the base's runtime and
 `lean-lib` as cloned into the release dir (the hashed clones, not the mirror's
 files); its record differs from the base's only in `id`, `base`,
 `gate.checks`, `tools`, `notes` and `tools/`. It needs no build dir and no
-`GATE-PASSED`, and also leaves `<id>.gate/`, `<id>.gate.log` and the R2 lists
-`<id>.r2-objects.txt` / `<id>.r2-manifests.txt` (for its printed manual
-fallback).
+`GATE-PASSED`, and also leaves `<id>.gate/`, `<id>.gate.log` and what its
+printed manual fallback reads: the R2 lists `<id>.r2-objects.txt` /
+`<id>.r2-manifests.txt` and `<id>.release-notes.md` (the GitHub release body
+`publish` writes).
 
 A **runtime release by reference** releases a new runtime of the same tag — a
 kernel-only fix — without its import build dir: the base's import-built packs
@@ -163,7 +164,7 @@ beside it, the release config (`<id>.config.json`) and the verification report
 and a tools re-cut none (its packs are the base's); each leaves the files listed
 above. A release by value runs `verify-release --deep` last; a release by
 reference runs it, then the `SHA256SUMS` check against the base's (a tools
-re-cut writes its R2 lists only once both pass). On a failure it removes
+re-cut writes its fallback's files only once both pass). On a failure it removes
 `release.json` and `SHA256SUMS`, so nothing half-checked looks cut. It then
 prints the commands below, with the record's digest (a tools re-cut also its
 manual fallback; a runtime release by reference only the publish command).
@@ -231,9 +232,9 @@ Only `publish` pushes, uploads or publishes, and only the repository owner runs 
 once tagged: the tag, the GitHub assets and the R2 prefix are never rewritten
 (until the tag exists, re-running the staging replaces the staged dir). A
 mistake is fixed by a new release; a change to the tools alone (same runtime,
-same packs) is a re-cut by reference `<id>-r<n>` (`--recut <n> --base <mirror>`),
-and a new runtime of the same tag a runtime release by reference
-(`--runtime <build dir> --base <mirror>`).
+same packs) is a tools re-cut `<id>-r<n>` (`--recut <n> --base <mirror>`), and a
+new runtime of the same tag a runtime release by reference (`--runtime <build
+dir> --base <mirror>`).
 
 ## Consuming a release
 
@@ -299,9 +300,12 @@ never garbage-collected while any app's pin names the release. A first cut's
 tag, GitHub assets and R2 prefix are kept while any release by reference names
 it (its by-reference fetches read the assets, and `publish` copies from the
 prefix); a release by reference's own R2 prefix is a full copy, independent of
-the base's once published. A runtime released by reference keeps its build dir
-until a successor runtime ships: it is the only source for a later tools-only
-fix of that runtime. A release by reference names a first cut, never another
-release by reference, so such a fix would release that build again, by
-reference of the same base, with new tools (not supported yet: it needs an
-`-r<N>` runtime release by reference, which the record rules refuse today).
+the base's once published.
+
+Reclaiming the build dir of a runtime released by reference has one cost.
+Re-releasing that same build with new tools (a tools-only fix) would be an
+`-r<N>` runtime release by reference of the same base, since a release by
+reference never names another one as its base. The record rules refuse that
+today, so it is not supported yet. Once the dir is gone, such a fix can only be
+a new runtime: a rebuild, with a new build id that apps re-pair against.
+Keeping the dir (several GB) for this is optional.

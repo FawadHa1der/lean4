@@ -14,7 +14,7 @@ export const RELEASE_KEY_ORDER = Object.freeze([
   "docker", "mathlib", "modules", "hosting", "tools", "notes", "files", "digest",
 ]);
 
-/** Release ids: lean-<upstream tag>-<kernel commit, 7 hex>[-r<N>] (N ≥ 2: a tools-only re-cut). */
+/** Release ids: lean-<upstream tag>-<kernel commit, 7 hex>[-r<N>] (N ≥ 2: a tools re-cut). */
 export const RELEASE_ID = /^lean-(v\d+\.\d+\.\d+(?:-rc\d+)?)-([0-9a-f]{7})(?:-r([2-9]|[1-9]\d+))?$/;
 /** A record digest, as `--digest` and `base.digest` spell it. */
 export const RELEASE_DIGEST = /^sha256:[0-9a-f]{64}$/;
@@ -25,10 +25,10 @@ export const firstCutOf = (id) => {
 };
 
 // ---------- a release by reference (formats/release.md, "Release by reference") ----------
-/** The only directory a tools re-cut by reference changes; every other file is its base's. */
+/** The only directory a tools re-cut changes; every other file is its base's. */
 export const RECUT_OWN_DIRS = Object.freeze(["tools"]);
 export const isRecutOwnPath = (p) => typeof p === "string" && RECUT_OWN_DIRS.some((d) => p.startsWith(`${d}/`));
-/** Record fields a tools re-cut by reference has from its base, compared as JSON text (key order included). */
+/** Record fields a tools re-cut has from its base, compared as JSON text (key order included). */
 export const RECUT_SAME_KEYS = Object.freeze(["schema", "lean", "kernel", "runtime", "packs", "native64", "docker", "mathlib", "modules", "hosting"]);
 /** gate fields that are the base's: the gate ran on the same binary (`checks` is the new tools' count). */
 export const RECUT_SAME_GATE_KEYS = Object.freeze(["passed", "commit", "wasmSha256"]);

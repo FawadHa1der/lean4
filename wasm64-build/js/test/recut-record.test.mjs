@@ -1,7 +1,7 @@
-// A tools re-cut by reference, the record layer (release-record.mjs; formats/release.md, "Release by
+// A tools re-cut, the record layer (release-record.mjs; formats/release.md, "Release by
 // reference"): the structure rules checkReleaseRecord adds for `base`, and checkRecutBase, the
 // comparison with the base's record. Pure: the committed records under ../../releases are the
-// fixtures, and a -r3 is synthesized from e1a79c1. The runtime kind: runtime-recut.test.mjs.
+// fixtures, and a -r3 is synthesized from e1a79c1. The runtime kind: runtime-by-reference.test.mjs.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -20,7 +20,7 @@ const byId = (id) => structuredClone(committed.find((r) => r.id === id));
 const BASE = byId("lean-v4.34.0-e1a79c1");
 const resign = (r) => { const { digest: _d, ...rest } = r; return canonicalRelease(rest); };
 
-/** A re-cut by reference of `base`: its files outside tools/, one new tgz, the base pinned. */
+/** A tools re-cut of `base`: its files outside tools/, one new tgz, the base pinned. */
 function recutOf(base, { n = 3, edit = (x) => x } = {}) {
   const { digest: _d, ...rest } = structuredClone(base);
   const version = `${base.tools.version.replace(/-r\d+$/, "")}-r${n}`;
@@ -186,7 +186,7 @@ test("checkRecutBase: the pin first; an unpinned base is refused on it alone, it
   // the pinned digest over other content: the self-digest says so, and nothing else is reported
   const edited = { ...structuredClone(BASE), runtime: { ...BASE.runtime, target: "other" } };
   assert.deepEqual(checkRecutBase(r, edited), ["the base's release.json: self-digest does not match the content"]);
-  // a re-cut by reference given as the base: its id and its own base are named with the pin
+  // a tools re-cut given as the base: its id and its own base are named with the pin
   assert.deepEqual(checkRecutBase(r, r), [
     `the base's release.json is "${r.id}", the record names ${BASE.id}`,
     `the base's release.json digest is ${r.digest}, the record pins ${BASE.digest}`,

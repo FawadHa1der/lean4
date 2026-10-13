@@ -1,9 +1,9 @@
 // The decisions of wasm64-build/publish-release.mjs (the owner's publish step): which release a
 // tag maps to, how assets are reconciled with the staged files, how R2 is judged, and how a release
-// by reference (a tools re-cut, a runtime release) is split from its base. Pure functions (and main's usage errors, which stop before
-// any command): no gh, git, rclone or network here. The steps themselves — preflight's checks
-// before any write, the dry run, the real publish — run end to end against fakes in
-// publish-sandbox.test.mjs.
+// by reference (a tools re-cut, a runtime release) is split from its base. Pure functions (and
+// main's usage errors, which stop before any command): no gh, git, rclone or network here. The
+// steps themselves — preflight's checks before any write, the dry run, the real publish — run end
+// to end against fakes in publish-sandbox.test.mjs.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -15,12 +15,12 @@ import {
   splitFiles, r2Lists, r2Passes, checkBaseAssets, checkR2Copy, fetchPlan, main,
 } from "../../publish-release.mjs";
 import { canonicalRelease, checkRecutBase, checkReleaseRecord, isRecutOwnPath, serializeRelease } from "../release-record.mjs";
-import { runtimeRecutOf } from "./runtime-recut-fixture.mjs";
+import { runtimeReleaseOf } from "./runtime-by-reference-fixture.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const BASE = JSON.parse(fs.readFileSync(path.join(here, "..", "..", "releases", "lean-v4.34.0-e1a79c1.json"), "utf8"));
 const BASE_TEXT = serializeRelease(BASE);
-/** A re-cut by reference of e1a79c1 (-r3): its files outside tools/, one new tgz, the base pinned. */
+/** A tools re-cut of e1a79c1 (-r3): its files outside tools/, one new tgz, the base pinned. */
 const RECUT = (() => {
   const { digest: _d, ...rest } = structuredClone(BASE);
   const version = `${BASE.tools.version}-r3`;
@@ -32,7 +32,7 @@ const RECUT = (() => {
 })();
 const SHARED = RECUT.files.filter((f) => !isRecutOwnPath(f.path));
 /** A runtime release by reference of e1a79c1 (lean-v4.34.0-64d6ebb): its own runtime/, lean-lib and tools. */
-const RUNTIME = runtimeRecutOf(BASE);
+const RUNTIME = runtimeReleaseOf(BASE);
 const RT_OWN = (p) => p.startsWith("runtime/") || p.startsWith("profiles/lean-lib.") || p.startsWith("tools/");
 
 test("repoSlug takes a github.com repository URL", () => {
@@ -162,7 +162,7 @@ test("the fixtures: a -r3 of e1a79c1 by reference and the runtime release by ref
   assert.deepEqual(checkRecutBase(RUNTIME, BASE), []);
 });
 
-test("splitFiles: a full record owns every file; a re-cut by reference owns tools/ alone (+ release.json, SHA256SUMS)", () => {
+test("splitFiles: a full record owns every file; a tools re-cut owns tools/ alone (+ release.json, SHA256SUMS)", () => {
   const full = splitFiles(BASE);
   assert.deepEqual(full.own, ["release.json", "SHA256SUMS", ...BASE.files.map((f) => f.path)]);
   assert.deepEqual(full.shared, []);
@@ -222,7 +222,7 @@ test("r2Passes: a full record, or --r2-source local, gives today's three passes"
     THREE("/s/rel", "r:b/p/id-r3/"));
 });
 
-test("r2Passes: a tools re-cut by reference copies the shared files server-side, then its own files, release.json last", () => {
+test("r2Passes: a tools re-cut copies the shared files server-side, then its own files, release.json last", () => {
   const p = r2Passes({ rel: "/s/rel", dest: "r:b/p/id-r3/", basePrefix: "r:b/p/id/", objectsList: "/t/shared.objects", manifestsList: "/t/shared.manifests", ownObjectsList: "/t/own.objects" });
   assert.equal(p.length, 5);
   for (const a of p) {
@@ -357,7 +357,8 @@ test("releaseBody: a release by reference says where its other files are, betwee
   const body = releaseBody(RECUT);
   const [pin, ref, notes, ...rest] = body.split("\n\n");
   assert.match(pin, /^Toolchain release lean-v4\.34\.0-e1a79c1-r3\. Pin: --id lean-v4\.34\.0-e1a79c1-r3 --digest sha256:[0-9a-f]{64}\./);
-  assert.equal(ref, `Release by reference of ${BASE.id} (${BASE.digest}): this release's assets are its own files (tools/: 1 file), `
+  // a tools re-cut names its one own file; a runtime release by reference counts its own files
+  assert.equal(ref, `Release by reference of ${BASE.id} (${BASE.digest}): this release's assets are ${RECUT.tools.tgz}, `
     + `release.json and SHA256SUMS; every other file release.json lists is an asset of ${BASE.id} (lean4-wasm64 fetch takes them from there).`);
   assert.equal(notes, `${RECUT.notes.map((n) => `- ${n}`).join("\n")}\n`);
   assert.deepEqual(rest, []);

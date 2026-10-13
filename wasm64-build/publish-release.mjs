@@ -189,14 +189,16 @@ export function checkR2Listing(local, listing) {
 
 /**
  * The GitHub release body: the pin, then (a release by reference) where its other files are, then
- * the record's notes.
+ * the record's notes. A tools re-cut's printed manual fallback uses it too (stage-by-reference.mjs
+ * final writes it to <id>.release-notes.md).
  */
 export function releaseBody(record) {
   const pin = `Toolchain release ${record.id}. Pin: --id ${record.id} --digest ${record.digest}. Contents and digests: release.json`;
-  const n = splitFiles(record).own.filter((p) => p !== "release.json" && p !== "SHA256SUMS").length;
-  const ref = record.base ? `Release by reference of ${record.base.id} (${record.base.digest}): this release's assets are its own files `
-    + `(${ownLabel(record)}: ${n} file${n === 1 ? "" : "s"}), release.json and SHA256SUMS; every other file release.json lists is an asset of `
-    + `${record.base.id} (lean4-wasm64 fetch takes them from there).` : "";
+  const mine = splitFiles(record).own.filter((p) => p !== "release.json" && p !== "SHA256SUMS");
+  // a tools re-cut owns one file, by name; a runtime release by reference, by count
+  const assets = byReferenceKind(record) === "tools" ? mine.join(", ") : `its own files (${ownLabel(record)}: ${mine.length} file${mine.length === 1 ? "" : "s"})`;
+  const ref = record.base ? `Release by reference of ${record.base.id} (${record.base.digest}): this release's assets are ${assets}, `
+    + `release.json and SHA256SUMS; every other file release.json lists is an asset of ${record.base.id} (lean4-wasm64 fetch takes them from there).` : "";
   const notes = (record.notes ?? []).map((n) => `- ${n}`).join("\n");
   return `${[pin, ref, notes].filter(Boolean).join("\n\n")}\n`;
 }

@@ -3,10 +3,10 @@
 // R2 and the network. A small synthetic first cut is "published" in the fakes' state (its GitHub
 // release, its R2 prefix, its tag), and its -r3 by reference (a tools re-cut) and a runtime release
 // by reference of it (another kernel commit's runtime and lean-lib) are staged, each with a real
-// tools tgz packed from this package. The script runs from a copy of wasm64-build (publish-release.mjs + js/) in a
-// temp dir, so nothing it does reaches this repository; the fakes refuse any other repository,
-// remote or URL, and the fake git refuses every write. What it pins (decision 8, AMENDMENTS A1-A3,
-// A10):
+// tools tgz packed from this package. The script runs from a copy of wasm64-build
+// (publish-release.mjs, stage-by-reference.mjs and js/) in a temp dir, so nothing it does reaches
+// this repository; the fakes refuse any other repository, remote or URL, and the fake git refuses
+// every write. What it pins (decision 8, AMENDMENTS A1-A3, A10):
 //   - every check of the base runs in preflight, whatever --only is, before any write: its GitHub
 //     release missing a shared asset, an R2 object with other bytes, its record at its tag failing
 //     checkRecutBase, an `rclone check` that gives no answer
@@ -20,7 +20,8 @@
 //   - --r2-source local never reads the base's prefix, and checks against the staged dir
 //   - a runtime release by reference uploads its own files (runtime, lean-lib, tools) and copies
 //     the rest server-side, and its fetch check takes its runtime from its own release and the
-//     lists from the base's
+//     lists from the base's; preflight runs staging's pairing guards again on its record, and a
+//     dry run from the staged dir plans the record, push and release
 import { describe, test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
@@ -32,7 +33,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildIdFromSha256 } from "../artifact-id.mjs";
 import { byReferenceKind, canonicalRelease, checkRecutBase, checkReleaseRecord, isOwnPath, isRecutOwnPath, serializeRelease, sha256sums } from "../release-record.mjs";
 import { contentTypeOf, r2Lists, splitFiles } from "../../publish-release.mjs";
-import { recutConfig } from "../../stage-by-reference.mjs";
+import { byReferenceConfig } from "../../stage-by-reference.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const FIX = path.join(here, "fixtures", "publish-sandbox");
@@ -162,7 +163,7 @@ function stageRecut(w, { pkgVersion = VERSION, verifyStub = null } = {}) {
     .sort((x, y) => (x.path < y.path ? -1 : x.path > y.path ? 1 : 0));
   const { digest: _d, ...fields } = base;
   const record = canonicalRelease({ ...fields, id: ID, base: { id: base.id, digest: base.digest }, gate: { ...base.gate, checks: 34 },
-    tools: { ...base.tools, version: VERSION, tgz: TGZ, commit: C.tools }, notes: ["the sandbox's re-cut by reference", ...base.notes], files });
+    tools: { ...base.tools, version: VERSION, tgz: TGZ, commit: C.tools }, notes: ["the sandbox's tools re-cut", ...base.notes], files });
   const text = serializeRelease(record);
   fs.writeFileSync(path.join(rel, "release.json"), text);
   fs.writeFileSync(path.join(rel, "SHA256SUMS"), sha256sums([...files, { path: "release.json", sha256: sha256(text) }]));
@@ -195,7 +196,7 @@ function stageRuntime(w) {
   for (const f of fs.readdirSync(path.join(rel, "profiles"))) if (f.startsWith("lean-lib.")) fs.rmSync(path.join(rel, "profiles", f));
   packLeanLib(w.js, lib, rel, C.kernel2, wasmSha);
   packTools(w.js, RT_VERSION, path.join(rel, RT_TGZ));
-  writeJson(path.join(work, "config.json"), recutConfig(base, { id: RT_ID, runtime: { kernelCommit: C.kernel2, kernelPatch: "0040", wasmSha256: wasmSha },
+  writeJson(path.join(work, "config.json"), byReferenceConfig(base, { id: RT_ID, runtime: { kernelCommit: C.kernel2, kernelPatch: "0040", wasmSha256: wasmSha },
     checks: "4", version: RT_VERSION, tgz: path.posix.basename(RT_TGZ), commit: C.rtTools, notes: ["the sandbox's runtime release by reference"] }));
   node(path.join(w.js, "release.mjs"), ["--release", rel, "--config", path.join(work, "config.json"), "--base", path.join(w.stage, BASE_ID)]);
   fs.rmSync(work, { recursive: true, force: true });
@@ -352,7 +353,7 @@ const shown = (r, lead) => r.out.split("\n").filter((l) => l.startsWith(`  ${lea
 const norm = (w, s) => s.split(w.root).join("<world>").replace(/publish-release-[A-Za-z0-9]{6}/g, "publish-release-<tmp>");
 
 // the worlds are independent copies: the tests run concurrently
-describe("publish-release.mjs on a re-cut by reference, against fake git, gh and rclone", { concurrency: true, skip }, () => {
+describe("publish-release.mjs on a tools re-cut, against fake git, gh and rclone", { concurrency: true, skip }, () => {
   test("the sandbox: fakes first on PATH, a synthetic first cut published in them, its -r3 by reference staged", () => {
     const w = world();
     const which = sh("/bin/sh", ["-c", "command -v git gh rclone node"], { env: env(w) }).stdout.trim().split("\n");

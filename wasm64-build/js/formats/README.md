@@ -45,12 +45,12 @@ ring) is [`../../EMBED-RUNTIME.md`](../../EMBED-RUNTIME.md); the release process
    `kernel.patch`; a consumer with a floor (`minKernelPatch`) compares with
    `comparePatchIds`.
 5. **Release id.** `lean-<upstream tag>-<first 7 hex digits of the kernel
-   commit>`, e.g. `lean-v4.34.0-a8817d0`; a tools-only re-cut of the same
+   commit>`, e.g. `lean-v4.34.0-a8817d0`; a tools re-cut of the same
    runtime and packs appends `-r2`, `-r3`, … A release may be cut **by
    reference** (release.md, "Release by reference"): its record names an
    earlier first cut of its tag in `base`, and every file it does not own is
-   that release's. A re-cut by reference owns `tools/` and names its own first
-   cut. A new runtime of the same tag may be released by reference too: id
+   that release's. A tools re-cut owns `tools/` and names its own first cut.
+   A new runtime of the same tag may be released by reference too: id
    `lean-<tag>-<kernel7>` (a first cut of its own kernel commit), `base` an
    earlier first cut whose packs, native64 and lists it shares; it owns
    `runtime/`, its `lean-lib` and `tools/`.

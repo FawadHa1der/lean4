@@ -18,7 +18,7 @@
 #   --revision <text>       runtime manifest sourceRevision (default: from
 #                           --match-runtime, else "qed64-wasm64@<commit10> (upstream <tag>)")
 #   --note <text>           a release note (repeatable)
-#   --recut <n>             a tools-only re-cut of the same runtime: id suffix -r<n> (n ≥ 2)
+#   --recut <n>             a tools re-cut of the same runtime: id suffix -r<n> (n ≥ 2)
 #   --base <dir>            a release by reference (js/formats/release.md, "Release by reference";
 #                           needs at least one --note): a mirror of its base, a first cut of <tag>
 #                           (served layout, e.g. `lean4-wasm64 fetch --only all` of it, or its own
@@ -47,18 +47,21 @@
 #
 # A release by reference (--base; its node steps: stage-by-reference.mjs) runs, in
 # order: the clones (each sha256-checked), then a tools re-cut: tools, the gate on the
-# clones; a runtime release by reference: runtime/ and the lean-lib pack from the build
-# dir (its gate is the build dir's), then tools. Then release.json (release.mjs --base),
-# verify-release --deep --base, and last the check that its SHA256SUMS differs from the
-# base's at release.json and its own files only; for a tools re-cut that check then writes
-# <id>.r2-objects.txt / <id>.r2-manifests.txt (its shared paths, for the printed R2 copy). A
-# failure or an interrupt from release.json on removes release.json and SHA256SUMS (as one
-# during the gate's fetch removes the base's record it reads there). Beside the release dir
-# it leaves <id>.config.json, <id>.verify.json, <id>.tools/ (its tools tarball, extracted);
+# clones; a runtime release by reference: the pairing guards, runtime/ and the lean-lib
+# pack from the build dir (its gate is the build dir's), then tools. Then release.json
+# (release.mjs --base), verify-release --deep --base, and last the check that its
+# SHA256SUMS differs from the base's at release.json and its own files only; for a tools
+# re-cut that check then writes what its printed manual fallback reads:
+# <id>.r2-objects.txt / <id>.r2-manifests.txt (its shared paths, for the R2 copy) and
+# <id>.release-notes.md (the GitHub release body publish writes). A failure or an
+# interrupt from release.json on removes release.json and SHA256SUMS (as one during the
+# gate's fetch removes the base's record it reads there). Beside the release dir it
+# leaves <id>.config.json, <id>.verify.json, <id>.tools/ (its tools tarball, extracted);
 # a tools re-cut also <id>.gate/ (the artifact its gate ran on, kept for a re-run while
-# <id>.gate.stamp holds), <id>.gate.log and the R2 lists; a runtime release by reference
-# <id>.pack-set.json (where its lean-lib came from). A by-value staging's sidecars of the
-# same id are removed. Re-running re-clones the files and repacks the tools.
+# <id>.gate.stamp holds), <id>.gate.log and the fallback's files; a runtime release by
+# reference <id>.pack-set.json (where its lean-lib came from). A by-value staging's
+# sidecars of the same id are removed. Re-running re-clones the files and repacks the
+# tools.
 #
 # A release is immutable once its tag exists; until then a re-run replaces it.
 set -euo pipefail
@@ -221,9 +224,9 @@ clone_base() {
   node "$SBR" mirror "$BASE_REC_FILE" "$BASE_REC_DIR" "$OUT" "$ID" || die "cannot stage from the mirror $BASE_REC_DIR (reason above)"
   mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"; REL="$OUT/$ID"   # only now: every refusal comes first
   # what an earlier staging of this id left that no longer holds: a by-value one's pack provenance,
-  # an earlier run's R2 lists (a tools re-cut writes them again once this run's release is checked)
+  # an earlier run's fallback files (a tools re-cut writes them again once this run's release is checked)
   rm -f "$OUT/$ID.pack-set.json" "$OUT/$ID.packed.json" "$OUT/$ID.copied.json" "$OUT/$ID.fingerprints.json" "$OUT/$ID.native64.stamp" \
-    "$OUT/$ID.r2-objects.txt" "$OUT/$ID.r2-manifests.txt"
+    "$OUT/$ID.r2-objects.txt" "$OUT/$ID.r2-manifests.txt" "$OUT/$ID.release-notes.md"
   say "== clones"
   rm -rf "$REL"
   # (clones where the filesystem can, never hard links; only the record's paths; each sha256-checked)
@@ -258,14 +261,14 @@ write_and_verify() {
     die "verify-release failed ($OUT/$ID.verify.log); release.json removed — fix and re-run"
   fi
   tail -1 "$OUT/$ID.verify.log"
-  # only release.json and its own files differ from the base (RELEASE.md); a tools re-cut's R2 lists
+  # only release.json and its own files differ from the base (RELEASE.md); a tools re-cut's fallback files
   node "$SBR" final "$BASE_REC_FILE" "$REL" "$OUT/$ID" \
     || { rm -f "$REL/release.json" "$REL/SHA256SUMS"; die "$REL is not a release by reference of $BASE_REC_ID (reason above); release.json removed"; }
   unguard_rel
   DIGEST="$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).digest' "$REL/release.json")"
 }
 
-# A tools re-cut by reference: its record differs from its base's only in id, base, gate.checks,
+# A tools re-cut: its record differs from its base's only in id, base, gate.checks,
 # tools, notes and its tools/ file; the new tools are packed and gated, as the tarball ships them,
 # on the base's runtime and lean-lib taken from the clones. No build dir and no GATE-PASSED.
 stage_tools_by_reference() {
@@ -274,7 +277,7 @@ stage_tools_by_reference() {
   on_line "$C"
   K7="${C:0:7}"; ID="$BASE_REC_ID-r$RECUT"
   check_release_id "$V-$K7-r$RECUT" "re-cut with another --recut <n>"
-  say "re-cut by reference $ID of $BASE_REC_ID (${BASE_REC_DIGEST:0:23}…): kernel ${C:0:10}, tools $PKG_VERSION at ${TOOLS_COMMIT:0:10}, mirror $BASE_REC_DIR"
+  say "tools re-cut $ID of $BASE_REC_ID (${BASE_REC_DIGEST:0:23}…): kernel ${C:0:10}, tools $PKG_VERSION at ${TOOLS_COMMIT:0:10}, mirror $BASE_REC_DIR"
   clone_base
   pack_tools
 
@@ -323,7 +326,7 @@ stage_tools_by_reference() {
   cat <<EOF
 
 Staged and verified: $REL   (digest $DIGEST)
-A re-cut by reference of $BASE_REC_ID ($BASE_REC_DIGEST): its own files are tools/$TGZ, release.json and
+A tools re-cut of $BASE_REC_ID ($BASE_REC_DIGEST): its own files are tools/$TGZ, release.json and
 SHA256SUMS; every other file release.json lists is $BASE_REC_ID's (a GitHub asset of that release).
 $( [ "$ON_ORIGIN" = no ] && echo "NOTE: $C is not on origin/$LINE yet — push the line before publishing." )
 Next (RELEASE.md): the owner publishes — record + tag, push, GitHub (the own files; the base's release holds the rest),
@@ -335,7 +338,7 @@ The manual fallback (none of publish's checks: no resume, no check of the base's
   git -C $QREPO tag -a $ID -m "lean4-wasm64 $ID ($DIGEST)"
   # repository owner — the line and the tag first, then the bytes:
   $( [ "$(git -C "$REPO" symbolic-ref -q HEAD)" != "refs/heads/$LINE" ] && echo "git -C $QREPO push origin refs/tags/$ID      # a re-cut staged on a branch off its base: the tag alone" || echo "git -C $QREPO push --atomic origin $LINE $ID" )
-  gh release create $ID --repo FawadHa1der/lean4 --draft --verify-tag --title "lean4-wasm64 $ID" --notes "Toolchain release $ID. Pin: --id $ID --digest $DIGEST. Contents and digests: release.json. Re-cut by reference of $BASE_REC_ID ($BASE_REC_DIGEST): this release's assets are tools/$TGZ, release.json and SHA256SUMS; every other file release.json lists is an asset of $BASE_REC_ID (lean4-wasm64 fetch takes them from there)."
+  gh release create $ID --repo FawadHa1der/lean4 --draft --verify-tag --title "lean4-wasm64 $ID" --notes-file $QSIDE.release-notes.md   # the body publish writes
   gh release upload $ID --repo FawadHa1der/lean4 $QREL/tools/$TGZ $QREL/release.json $QREL/SHA256SUMS   # flat, by basename: the own files only
   gh release edit $ID --repo FawadHa1der/lean4 --tag $ID --verify-tag --draft=false
   # R2 (served layout, complete): the shared files copied server-side from the base's prefix (each keeps its
@@ -421,7 +424,7 @@ fi
 
 [ -d "$K" ] || die "import build dir $K missing"; [ -d "$R" ] || die "runtime build dir $R missing"
 K="$(cd "$K" && pwd)"; R="$(cd "$R" && pwd)"
-# a tools-only re-cut must reproduce the base release's runtime manifest byte for byte
+# a re-cut by value must reproduce the base release's runtime manifest byte for byte
 [ -z "$RECUT" ] || [ -n "$MATCH_RUNTIME" ] || die "--recut needs --match-runtime <the base release's runtime/runtime-manifest.json>: a re-cut keeps the runtime" 2
 
 # ---------- what is being released ----------

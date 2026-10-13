@@ -115,6 +115,9 @@ When `base` is present:
 
 ### Equality with the base (`checkRecutBase(record, base)`; needs the base's `release.json`)
 
+(The function keeps the name it had when the tools re-cut was the only kind; it
+checks both kinds.)
+
 - **E1** The base's `release.json` passes every rule of this document. Its `id`
   is `base.id` and its `digest` is `base.digest`. It names no base of its own.
 - **E2** These fields equal the base's, compared key by key as

@@ -16,13 +16,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalRelease, checkRecutBase, checkReleaseRecord, isOwnPath, isRecutOwnPath, serializeRelease, sha256sums } from "../release-record.mjs";
 import { buildIdFromSha256 } from "../artifact-id.mjs";
-import { K0040, WASM0040, runtimeRecutOf } from "./runtime-recut-fixture.mjs";
+import { K0040, WASM0040, runtimeReleaseOf } from "./runtime-by-reference-fixture.mjs";
 import { olean } from "./olean-fixture.mjs";
 import {
   OLEAN_FORMAT, STDLIB_SOURCES, baseFields, baseProblems, checkMirror, cloneShared, finalCheck, isWithin, mirrorMisses, mirrorOverlaps,
-  pairing, physicalPath, recutConfig, writeRecutConfig,
+  pairing, physicalPath, byReferenceConfig, writeByReferenceConfig,
 } from "../../stage-by-reference.mjs";
-import { contentTypeOf } from "../../publish-release.mjs";
+import { contentTypeOf, releaseBody } from "../../publish-release.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pkg = path.resolve(here, "..");     // wasm64-build/js
@@ -262,7 +262,7 @@ test("clone: only the record's files outside tools/, each its own inode and the 
 
 test("config: every field but the re-cut's own is e1a79c1's; the count, notes and tools are the re-cut's", () => {
   const own = { id: `${E1.id}-r3`, recut: "3", checks: "34", version: "4.34.0-e1a79c1-r3", tgz: "lean4-wasm64-4.34.0-e1a79c1-r3.tgz", commit: "b".repeat(40), notes: ["one", "two"] };
-  const c = recutConfig(E1, own);
+  const c = byReferenceConfig(E1, own);
   assert.deepEqual(c, {
     id: `${E1.id}-r3`, upstreamTag: "v4.34.0", kernelCommit: E1.kernel.commit, kernelPatch: "0037",
     kernelRepo: E1.kernel.repo, kernelBranch: E1.kernel.branch, recut: 3, base: { id: E1.id, digest: E1.digest },
@@ -275,18 +275,18 @@ test("config: every field but the re-cut's own is e1a79c1's; the count, notes an
   });
   // the base's pack notes are kept (the -r2 drift was a note the base lacks)
   assert.deepEqual(c.packs.map((p) => p.note ?? null), E1.packs.map((p) => p.note ?? null));
-  for (const checks of ["", "3x", "-1"]) assert.equal(recutConfig(E1, { ...own, checks }).gate.checks, null, JSON.stringify(checks));
+  for (const checks of ["", "3x", "-1"]) assert.equal(byReferenceConfig(E1, { ...own, checks }).gate.checks, null, JSON.stringify(checks));
   const root = mkdtemp("l4w-sbr-config-");
   const file = path.join(root, "c.json");
-  writeRecutConfig(E1_FILE, file, own.id, own.recut, own.checks, own.version, own.tgz, own.commit, own.notes);
+  writeByReferenceConfig(E1_FILE, file, own.id, own.recut, own.checks, own.version, own.tgz, own.commit, own.notes);
   assert.equal(fs.readFileSync(file, "utf8"), `${JSON.stringify(c, null, 2)}\n`);
 });
 
 test("config with a runtime: its kernel, gate and lean-lib entry, no recut, a separator before e1a79c1's notes; every other field e1a79c1's", () => {
   const own = { id: "lean-v4.34.0-64d6ebb", checks: "56", version: "4.34.0-64d6ebb", tgz: "lean4-wasm64-4.34.0-64d6ebb.tgz", commit: "b".repeat(40), notes: ["one", "two"] };
   const runtime = { kernelCommit: K0040, kernelPatch: "0040", wasmSha256: WASM0040 };
-  const c = recutConfig(E1, { ...own, runtime });
-  const plain = recutConfig(E1, { ...own, recut: "3" });
+  const c = byReferenceConfig(E1, { ...own, runtime });
+  const plain = byReferenceConfig(E1, { ...own, recut: "3" });
   assert.equal("recut" in c, false);
   const mine = ["kernelCommit", "kernelPatch", "recut", "gate", "packs", "notes"];
   for (const k of Object.keys(plain).filter((x) => !mine.includes(x))) assert.deepEqual(c[k], plain[k], k);
@@ -305,10 +305,10 @@ test("config with a runtime: its kernel, gate and lean-lib entry, no recut, a se
   // the step: <own> is a re-cut number or <kernel commit>:<patch>:<lean.wasm sha256>, nothing else
   const root = mkdtemp("l4w-sbr-config-rt-");
   const file = path.join(root, "c.json");
-  writeRecutConfig(E1_FILE, file, own.id, `${K0040}:0040:${WASM0040}`, own.checks, own.version, own.tgz, own.commit, own.notes);
+  writeByReferenceConfig(E1_FILE, file, own.id, `${K0040}:0040:${WASM0040}`, own.checks, own.version, own.tgz, own.commit, own.notes);
   assert.equal(fs.readFileSync(file, "utf8"), `${JSON.stringify(c, null, 2)}\n`);
   for (const bad of ["x", "3a", `${K0040}:40:${WASM0040}`, `${K0040.slice(1)}:0040:${WASM0040}`, `${K0040}:0040`, `${K0040}:0040:${WASM0040}:x`]) {
-    assert.throws(() => writeRecutConfig(E1_FILE, path.join(root, "bad.json"), own.id, bad, own.checks, own.version, own.tgz, own.commit),
+    assert.throws(() => writeByReferenceConfig(E1_FILE, path.join(root, "bad.json"), own.id, bad, own.checks, own.version, own.tgz, own.commit),
       /^Error: <own> ".*" is neither a re-cut number nor <kernel commit>:<patch>:<lean\.wasm sha256>$/, bad);
   }
   assert.equal(fs.existsSync(path.join(root, "bad.json")), false);
@@ -338,12 +338,14 @@ function writeRecut(root, record, sums = (s) => s) {
   fs.writeFileSync(path.join(rel, "release.json"), text);
   fs.writeFileSync(path.join(rel, "SHA256SUMS"), sums(sha256sums([...record.files, { path: "release.json", sha256: sha(text) }])));
   const sidecar = path.join(root, record.id);
-  for (const s of ["r2-objects.txt", "r2-manifests.txt"]) fs.rmSync(`${sidecar}.${s}`, { force: true });
+  for (const s of FALLBACK) fs.rmSync(`${sidecar}.${s}`, { force: true });
   return { rel, sidecar };
 }
-const lists = (sidecar) => ["r2-objects.txt", "r2-manifests.txt"].filter((s) => fs.existsSync(`${sidecar}.${s}`));
+/** What a tools re-cut's printed manual fallback reads, beside the release dir: the R2 lists and the release body. */
+const FALLBACK = ["r2-objects.txt", "r2-manifests.txt", "release-notes.md"];
+const lists = (sidecar) => FALLBACK.filter((s) => fs.existsSync(`${sidecar}.${s}`));
 
-test("final: a -r3 of e1a79c1 differs at release.json and the two tarballs only; the R2 lists split its 138 shared paths by content type", async () => {
+test("final: a -r3 of e1a79c1 differs at release.json and the two tarballs only; the R2 lists split its 138 shared paths by content type; the release body is publish's", async () => {
   const good = recutOfE1();
   assert.deepEqual(checkReleaseRecord(good), []);
   assert.deepEqual(checkRecutBase(good, E1), []);
@@ -359,6 +361,9 @@ test("final: a -r3 of e1a79c1 differs at release.json and the two tarballs only;
   assert.equal(objects.length, 130);
   assert.ok(manifests.length === 8 && manifests.every((p) => p.endsWith(".json")));
   assert.deepEqual([...objects, ...manifests].sort(), [...shared].sort());
+  // the fallback's gh release create --notes-file: the body publish writes, one source
+  assert.equal(read("release-notes.md"), releaseBody(good));
+  assert.match(read("release-notes.md"), new RegExp(`this release's assets are ${escapeRe(R3_TGZ)}, release\\.json and SHA256SUMS; `));
 });
 
 test("final: refuses a SHA256SUMS that differs elsewhere, a record of another base or none, and the -r2 pack-note drift; writes no R2 list", async () => {
@@ -387,7 +392,7 @@ test("final: refuses a SHA256SUMS that differs elsewhere, a record of another ba
 });
 
 test("final, a runtime release by reference of e1a79c1: differs at release.json and its own files only, and writes no R2 list; a shared line that differs is refused", async () => {
-  const rt = runtimeRecutOf(E1);
+  const rt = runtimeReleaseOf(E1);
   const root = mkdtemp("l4w-sbr-final-rt-");
   let { rel, sidecar } = writeRecut(root, rt);
   const said = await finalCheck(E1_FILE, rel, sidecar);
@@ -610,14 +615,14 @@ function world() {
   return W;
 }
 
-test("stage-release.sh --base: stages a re-cut by reference end to end, and its printed next steps run as printed from paths with spaces", { skip: E2E, timeout: 180_000 }, () => {
+test("stage-release.sh --base: stages a tools re-cut end to end, and its printed next steps run as printed from paths with spaces", { skip: E2E, timeout: 180_000 }, () => {
   const w = world();
   const out = path.join(w.S, "out dir");
   const r = w.stage(["--base", w.mirror, "--recut", "3", "--note", "a test re-cut (by reference)", "--out", out]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   const rel = path.join(out, RECUT_ID);
   // the node steps, as the script runs them
-  assert.match(r.stdout, new RegExp(`^re-cut by reference ${RECUT_ID} of ${BASE_ID} \\(sha256:`, "m"));
+  assert.match(r.stdout, new RegExp(`^tools re-cut ${RECUT_ID} of ${BASE_ID} \\(sha256:`, "m"));
   assert.match(r.stdout, new RegExp(`^\\d+ files cloned from .*base mirror/${BASE_ID} \\(0\\.00 GB\\), each sha256-checked against ${BASE_ID}'s record$`, "m"));
   assert.match(r.stdout, /^GATE PASSED \(3 checks\): /m);
   assert.match(r.stdout, new RegExp(`RELEASE VERIFIED ${RECUT_ID}`));
@@ -635,6 +640,7 @@ test("stage-release.sh --base: stages a re-cut by reference end to end, and its 
   assert.deepEqual([...objects, ...manifests].sort(), [...shared].sort());
   assert.ok(manifests.length > 0 && manifests.every((p) => p.endsWith(".json")));
   for (const n of ["config.json", "verify.json", "gate.log", "gate.stamp"]) assert.ok(fs.existsSync(path.join(out, `${RECUT_ID}.${n}`)), n);
+  assert.equal(fs.readFileSync(path.join(out, `${RECUT_ID}.release-notes.md`), "utf8"), releaseBody(rec), "the fallback's release body is publish's");
 
   // the printed next steps, each line run by bash as printed (the shims record what they were given)
   const steps = r.stdout.slice(r.stdout.indexOf("Next (RELEASE.md)")).split("\n").filter((l) => /^ {2}\S/.test(l) && !/^ {2}#/.test(l));
@@ -650,6 +656,8 @@ test("stage-release.sh --base: stages a re-cut by reference end to end, and its 
   assert.equal(fs.readFileSync(path.join(w.repo, "wasm64-build", "releases", `${RECUT_ID}.json`), "utf8"), fs.readFileSync(path.join(rel, "release.json"), "utf8"));
   const gits = by("git").filter((c) => c.C !== null);
   assert.deepEqual(gits.map((c) => [c.C, c.argv[0]]), [[w.repo, "add"], [w.repo, "commit"], [w.repo, "tag"], [w.repo, "push"]]);
+  const create = by("gh").find((c) => c.argv[1] === "create").argv;
+  assert.equal(create[create.indexOf("--notes-file") + 1], path.join(out, `${RECUT_ID}.release-notes.md`));
   assert.deepEqual(by("gh").find((c) => c.argv[1] === "upload").argv,
     ["release", "upload", RECUT_ID, "--repo", "FawadHa1der/lean4", path.join(rel, "tools", RECUT_TGZ), path.join(rel, "release.json"), path.join(rel, "SHA256SUMS")]);
   const rc = by("rclone");

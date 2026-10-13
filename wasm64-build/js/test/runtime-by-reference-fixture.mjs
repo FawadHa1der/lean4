@@ -3,7 +3,7 @@
 // "Release by reference"). Its own runtime/ (one lean.js chunk, seven lean.wasm chunks, the two
 // manifests, bin/leanmake), its own lean-lib (its manifest and parts, the entry bound to its kernel
 // and build id: S6) and tools; every other file and field the base's. Not a test file: the tests
-// that need the record import it (runtime-recut, stage-by-reference, publish-release).
+// that need the record import it (runtime-by-reference, stage-by-reference, publish-release).
 import { createHash } from "node:crypto";
 import { buildIdFromSha256 } from "../artifact-id.mjs";
 import { canonicalRelease, isOwnPath } from "../release-record.mjs";
@@ -19,7 +19,7 @@ const byPath = (x, y) => (x.path < y.path ? -1 : x.path > y.path ? 1 : 0);
  * `patch`): lean-<tag>-<kernel7>, base pinned, gate bound, tools <version>-<kernel7>. `edit` sees
  * the fields before they are signed.
  */
-export function runtimeRecutOf(base, { edit = (x) => x, kernel = K0040, wasmSha256 = WASM0040, patch = "0040" } = {}) {
+export function runtimeReleaseOf(base, { edit = (x) => x, kernel = K0040, wasmSha256 = WASM0040, patch = "0040" } = {}) {
   const { digest: _d, ...rest } = structuredClone(base);
   const k7 = kernel.slice(0, 7);
   const id = `lean-${base.lean.upstreamTag}-${k7}`;

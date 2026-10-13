@@ -1,11 +1,11 @@
 // A runtime release by reference (formats/release.md, "Release by reference"): a first cut of its
 // own kernel commit whose base is a first cut of the same tag and another kernel. It owns runtime/,
 // profiles/lean-lib.* and tools/; every other file and field is its base's. First the record layer,
-// pure, on lean-v4.34.0-64d6ebb synthesized from the committed e1a79c1 (runtime-recut-fixture.mjs):
-// the structure rules S2-S6, the equality rules E1-E4 walked as the spec states them, and the older
-// readers that fail closed. Then end to end and offline: a small synthetic first cut (chunk → pack
+// pure, on lean-v4.34.0-64d6ebb synthesized from the committed e1a79c1
+// (runtime-by-reference-fixture.mjs): the structure rules S2-S6, the equality rules E1-E4 walked as
+// the spec states them, and the older readers that fail closed. Then end to end and offline: a small synthetic first cut (chunk → pack
 // → release), a runtime release by reference of it written by release.mjs --base from the config
-// stage-release.sh writes (recutConfig), then fetch from flat copies and verify.
+// stage-release.sh writes (byReferenceConfig), then fetch from flat copies and verify.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -18,15 +18,15 @@ import { buildIdFromSha256 } from "../artifact-id.mjs";
 import { byReferenceKind, canonicalRelease, checkRecutBase, checkReleaseRecord, isOwnPath, serializeRelease } from "../release-record.mjs";
 import * as r2Reader from "./fixtures/release-record-r2/release-record.mjs";
 import * as r3Reader from "./fixtures/release-record-r3/release-record.mjs";
-import { K0040, runtimeRecutOf } from "./runtime-recut-fixture.mjs";
-import { recutConfig } from "../../stage-by-reference.mjs";
+import { K0040, runtimeReleaseOf } from "./runtime-by-reference-fixture.mjs";
+import { byReferenceConfig } from "../../stage-by-reference.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pkg = path.resolve(here, "..");
 const releasesDir = path.join(pkg, "..", "releases");
 const committed = fs.readdirSync(releasesDir).filter((f) => f.endsWith(".json")).map((f) => JSON.parse(fs.readFileSync(path.join(releasesDir, f), "utf8")));
 const E1 = structuredClone(committed.find((r) => r.id === "lean-v4.34.0-e1a79c1"));
-const RT = runtimeRecutOf(E1);
+const RT = runtimeReleaseOf(E1);
 const sha = (b) => createHash("sha256").update(b).digest("hex");
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const spec = fs.readFileSync(path.join(pkg, "formats", "release.md"), "utf8");
@@ -68,11 +68,11 @@ test("structure (S2-S6): each malformed runtime release by reference is refused 
     ["no tools", (r) => { const { tools: _t, ...x } = r; return { ...x, files: r.files.filter((f) => !f.path.startsWith("tools/")) }; }, /^a release by reference carries its own tools: tools missing$/],
   ];
   for (const [label, edit, re] of cases) {
-    const p = checkReleaseRecord(runtimeRecutOf(E1, { edit }));
+    const p = checkReleaseRecord(runtimeReleaseOf(E1, { edit }));
     assert.ok(p.some((q) => re.test(q)), `${label}: ${JSON.stringify(p)}`);
   }
   // all three lean-lib parts at once: one message naming each
-  const all = checkReleaseRecord(runtimeRecutOf(E1, { edit: (r) => lib(r, () => E1.packs.find((q) => q.id === "lean-lib")) }));
+  const all = checkReleaseRecord(runtimeReleaseOf(E1, { edit: (r) => lib(r, () => E1.packs.find((q) => q.id === "lean-lib")) }));
   assert.equal(all.filter((q) => q.startsWith("packs[lean-lib]: ")).length, 1);
   assert.match(all.find((q) => q.startsWith("packs[lean-lib]: ")), /lean\.compiler .*; lean\.gitRevision .*; release /);
 });
@@ -103,13 +103,13 @@ test("E2: each shared field of the spec's runtime line, changed alone or dropped
   assert.deepEqual(Object.keys(edits), SHARED);
   for (const k of SHARED) {
     const why = [`${k} differs from the base's`];
-    assert.deepEqual(checkRecutBase(runtimeRecutOf(E1, { edit: edits[k] }), E1), why, `${k} changed`);
+    assert.deepEqual(checkRecutBase(runtimeReleaseOf(E1, { edit: edits[k] }), E1), why, `${k} changed`);
     const drop = drops[k] ?? ((r) => { const { [k]: _gone, ...rest } = r; return rest; });
-    assert.deepEqual(checkRecutBase(runtimeRecutOf(E1, { edit: drop }), E1), why, `${k} dropped`);
+    assert.deepEqual(checkRecutBase(runtimeReleaseOf(E1, { edit: drop }), E1), why, `${k} dropped`);
   }
   // the pack order is part of packs; the lean-lib entry is compared by id alone
-  assert.deepEqual(checkRecutBase(runtimeRecutOf(E1, { edit: (r) => ({ ...r, packs: [...r.packs].reverse() }) }), E1), ["packs differs from the base's"]);
-  assert.deepEqual(checkRecutBase(runtimeRecutOf(E1, { edit: (r) => ({ ...r, packs: r.packs.map((k) => (k.id === "lean-lib" ? { ...k, note: "its own" } : k)) }) }), E1), []);
+  assert.deepEqual(checkRecutBase(runtimeReleaseOf(E1, { edit: (r) => ({ ...r, packs: [...r.packs].reverse() }) }), E1), ["packs differs from the base's"]);
+  assert.deepEqual(checkRecutBase(runtimeReleaseOf(E1, { edit: (r) => ({ ...r, packs: r.packs.map((k) => (k.id === "lean-lib" ? { ...k, note: "its own" } : k)) }) }), E1), []);
 });
 
 test("may differ: each field of the spec's runtime line, changed (binding rules kept) and re-signed, passes both checks", () => {
@@ -121,21 +121,21 @@ test("may differ: each field of the spec's runtime line, changed (binding rules 
   const leanmake = (r) => { const sha256 = "7".repeat(64); return { ...r, runtime: { ...r.runtime, bin: [{ ...r.runtime.bin[0], sha256 }] }, files: r.files.map((f) => (f.path === "runtime/bin/leanmake" ? { ...f, sha256 } : f)) }; };
   const variants = {
     // id and base: the id follows the kernel commit; base is the pin itself (any other is another base: the E-rules' business)
-    id: () => runtimeRecutOf(E1, { kernel: other }),
+    id: () => runtimeReleaseOf(E1, { kernel: other }),
     base: () => RT,
-    "kernel.commit": () => runtimeRecutOf(E1, { kernel: other }),
-    "kernel.patch": () => runtimeRecutOf(E1, { patch: "0039b" }),
-    gate: () => runtimeRecutOf(E1, { edit: (r) => ({ ...r, gate: { ...r.gate, checks: 57 } }) }),
-    "runtime.buildId": () => runtimeRecutOf(E1, { wasmSha256: otherWasm }),
-    "runtime.sourceRevision": () => runtimeRecutOf(E1, { edit: (r) => ({ ...r, runtime: { ...r.runtime, sourceRevision: "another build of it" } }) }),
-    "runtime.files": () => runtimeRecutOf(E1, { wasmSha256: otherWasm }),
-    "runtime.bin": () => runtimeRecutOf(E1, { edit: leanmake }),
-    "packs[lean-lib]": () => runtimeRecutOf(E1, { edit: (r) => ({ ...r, packs: r.packs.map((k) => (k.id === "lean-lib" ? { ...k, modules: k.modules + 1, rawBytes: 7 } : k)) }) }),
-    "tools.version": () => runtimeRecutOf(E1, { kernel: other }),
-    "tools.tgz": () => runtimeRecutOf(E1, { kernel: other }),
-    "tools.commit": () => runtimeRecutOf(E1, { edit: (r) => ({ ...r, tools: { ...r.tools, commit: "c".repeat(40) } }) }),
-    notes: () => runtimeRecutOf(E1, { edit: (r) => ({ ...r, notes: [] }) }),
-    "files[]": () => runtimeRecutOf(E1, { edit: leanmake }),
+    "kernel.commit": () => runtimeReleaseOf(E1, { kernel: other }),
+    "kernel.patch": () => runtimeReleaseOf(E1, { patch: "0039b" }),
+    gate: () => runtimeReleaseOf(E1, { edit: (r) => ({ ...r, gate: { ...r.gate, checks: 57 } }) }),
+    "runtime.buildId": () => runtimeReleaseOf(E1, { wasmSha256: otherWasm }),
+    "runtime.sourceRevision": () => runtimeReleaseOf(E1, { edit: (r) => ({ ...r, runtime: { ...r.runtime, sourceRevision: "another build of it" } }) }),
+    "runtime.files": () => runtimeReleaseOf(E1, { wasmSha256: otherWasm }),
+    "runtime.bin": () => runtimeReleaseOf(E1, { edit: leanmake }),
+    "packs[lean-lib]": () => runtimeReleaseOf(E1, { edit: (r) => ({ ...r, packs: r.packs.map((k) => (k.id === "lean-lib" ? { ...k, modules: k.modules + 1, rawBytes: 7 } : k)) }) }),
+    "tools.version": () => runtimeReleaseOf(E1, { kernel: other }),
+    "tools.tgz": () => runtimeReleaseOf(E1, { kernel: other }),
+    "tools.commit": () => runtimeReleaseOf(E1, { edit: (r) => ({ ...r, tools: { ...r.tools, commit: "c".repeat(40) } }) }),
+    notes: () => runtimeReleaseOf(E1, { edit: (r) => ({ ...r, notes: [] }) }),
+    "files[]": () => runtimeReleaseOf(E1, { edit: leanmake }),
     digest: () => RT,
   };
   assert.deepEqual(Object.keys(variants), MAY);
@@ -151,19 +151,19 @@ test("may differ: each field of the spec's runtime line, changed (binding rules 
 test("E3/E4: the base's runtime, an earlier patch, another package, the base's tools version, a shared file's bytes, a missing and an extra file are refused", () => {
   const refused = (r, re, label) => { const p = checkRecutBase(r, E1); assert.ok(p.some((q) => re.test(q)), `${label}: ${JSON.stringify(p)}`); };
   // the base's own lean.wasm, re-signed with a gate and lean-lib bound to it: a tools re-cut's job
-  const same = runtimeRecutOf(E1, { wasmSha256: E1.gate.wasmSha256 });
+  const same = runtimeReleaseOf(E1, { wasmSha256: E1.gate.wasmSha256 });
   assert.deepEqual(checkReleaseRecord(same), []);
   assert.deepEqual(checkRecutBase(same, E1), [`runtime.buildId ${E1.runtime.buildId} is the base's: a runtime release by reference ships its own runtime (a tools re-cut, -rN, keeps the base's)`]);
   // a later build of the base's line: its patch id never precedes the base's (the base's own is fine: a kernel
   // commit with no PATCHES.md entry of its own); staging and publish check the ancestry with git
-  assert.deepEqual(checkRecutBase(runtimeRecutOf(E1, { patch: "0030" }), E1), ["kernel.patch 0030 precedes the base's 0037: a runtime release by reference is a later build of the base's line"]);
-  assert.deepEqual(checkRecutBase(runtimeRecutOf(E1, { patch: E1.kernel.patch }), E1), []);
-  refused(runtimeRecutOf(E1, { edit: (r) => ({ ...r, tools: { ...r.tools, package: "other" } }) }), /^tools\.package "other" is not the base's "lean4-wasm64"$/, "package");
-  refused(runtimeRecutOf(E1, { edit: (r) => ({ ...r, tools: { ...r.tools, version: E1.tools.version } }) }), /^tools\.version 4\.34\.0-e1a79c1 is the base's: a release by reference ships its own tools$/, "version");
-  refused(runtimeRecutOf(E1, { edit: (r) => ({ ...r, files: r.files.map((f) => (f.path === "lists/extra-modules.txt" ? { ...f, bytes: f.bytes + 1 } : f)) }) }), /^files\[\]: lists\/extra-modules\.txt is not the base's bytes$/, "bytes");
-  refused(runtimeRecutOf(E1, { edit: (r) => ({ ...r, files: r.files.map((f) => (f.path === "lists/extra-modules.txt" ? { ...f, sha256: "d".repeat(64) } : f)) }) }), /is not the base's bytes/, "sha256");
-  refused(runtimeRecutOf(E1, { edit: (r) => ({ ...r, files: r.files.filter((f) => f.path !== "lists/extra-modules.txt") }) }), /^files\[\]: the base's lists\/extra-modules\.txt is missing$/, "missing");
-  refused(runtimeRecutOf(E1, { edit: (r) => ({ ...r, files: [...r.files, { path: "lists/zz-extra.txt", bytes: 1, sha256: "e".repeat(64) }].sort((a, b) => (a.path < b.path ? -1 : 1)) }) }), /^files\[\]: lists\/zz-extra\.txt is not a file of the base$/, "extra");
+  assert.deepEqual(checkRecutBase(runtimeReleaseOf(E1, { patch: "0030" }), E1), ["kernel.patch 0030 precedes the base's 0037: a runtime release by reference is a later build of the base's line"]);
+  assert.deepEqual(checkRecutBase(runtimeReleaseOf(E1, { patch: E1.kernel.patch }), E1), []);
+  refused(runtimeReleaseOf(E1, { edit: (r) => ({ ...r, tools: { ...r.tools, package: "other" } }) }), /^tools\.package "other" is not the base's "lean4-wasm64"$/, "package");
+  refused(runtimeReleaseOf(E1, { edit: (r) => ({ ...r, tools: { ...r.tools, version: E1.tools.version } }) }), /^tools\.version 4\.34\.0-e1a79c1 is the base's: a release by reference ships its own tools$/, "version");
+  refused(runtimeReleaseOf(E1, { edit: (r) => ({ ...r, files: r.files.map((f) => (f.path === "lists/extra-modules.txt" ? { ...f, bytes: f.bytes + 1 } : f)) }) }), /^files\[\]: lists\/extra-modules\.txt is not the base's bytes$/, "bytes");
+  refused(runtimeReleaseOf(E1, { edit: (r) => ({ ...r, files: r.files.map((f) => (f.path === "lists/extra-modules.txt" ? { ...f, sha256: "d".repeat(64) } : f)) }) }), /is not the base's bytes/, "sha256");
+  refused(runtimeReleaseOf(E1, { edit: (r) => ({ ...r, files: r.files.filter((f) => f.path !== "lists/extra-modules.txt") }) }), /^files\[\]: the base's lists\/extra-modules\.txt is missing$/, "missing");
+  refused(runtimeReleaseOf(E1, { edit: (r) => ({ ...r, files: [...r.files, { path: "lists/zz-extra.txt", bytes: 1, sha256: "e".repeat(64) }].sort((a, b) => (a.path < b.path ? -1 : 1)) }) }), /^files\[\]: lists\/zz-extra\.txt is not a file of the base$/, "extra");
 });
 
 test("E1: a runtime release by reference is no base — not of a tools re-cut, not of another runtime release", () => {
@@ -177,7 +177,7 @@ test("E1: a runtime release by reference is no base — not of a tools re-cut, n
   assert.deepEqual(checkReleaseRecord(recut), []);
   assert.ok(checkRecutBase(recut, RT).includes(msg), JSON.stringify(checkRecutBase(recut, RT)));
   // another runtime release by reference of it
-  const next = runtimeRecutOf(RT, { kernel: "64d6ebd7b4f587e2df014106b2707b54846f6435", wasmSha256: "1".repeat(64) });
+  const next = runtimeReleaseOf(RT, { kernel: "64d6ebd7b4f587e2df014106b2707b54846f6435", wasmSha256: "1".repeat(64) });
   assert.equal(byReferenceKind(next), "runtime");
   assert.ok(checkRecutBase(next, RT).includes(msg), JSON.stringify(checkRecutBase(next, RT)));
 });
@@ -229,7 +229,7 @@ let W = null;
 /** The world, built once: <root>/served/<BASE_ID> (a first cut) and <root>/served/<RT_ID> (its runtime release by reference). */
 function world() {
   if (W) return W;
-  const root = mkdtemp("l4w-runtime-recut-");
+  const root = mkdtemp("l4w-runtime-by-reference-");
   // the base: lean-core and lean-lib, native64, lists, tools
   const a = sources(root, "a", 1, 3);
   const base = path.join(root, "served", BASE_ID);
@@ -285,7 +285,7 @@ function stageRuntime(w, edit = (c) => c) {
   dropRaw(rel);
   fs.mkdirSync(path.join(rel, "tools"));
   fs.writeFileSync(path.join(rel, "tools", TOOLS_TGZ), "the runtime release's tools");
-  const config = edit(recutConfig(w.baseRecord, { id: RT_ID, runtime: { kernelCommit: K2, kernelPatch: "0040", wasmSha256: w.b.wasmSha },
+  const config = edit(byReferenceConfig(w.baseRecord, { id: RT_ID, runtime: { kernelCommit: K2, kernelPatch: "0040", wasmSha256: w.b.wasmSha },
     checks: "4", version: TOOLS_VERSION, tgz: TOOLS_TGZ, commit: "c".repeat(40), notes: ["the runtime release's own note"] }));
   const configPath = path.join(root, "config.json");
   fs.writeFileSync(configPath, JSON.stringify(config));
