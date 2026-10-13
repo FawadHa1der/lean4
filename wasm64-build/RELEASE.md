@@ -102,8 +102,8 @@ fallback).
 A **runtime release by reference** releases a new runtime of the same tag — a
 kernel-only fix — without its import build dir: the base's import-built packs
 (`lean-core`, `mathlib-essential`, `mathlib-game-extra`), `native64` and lists
-stay valid when no stdlib Lean source changed, and are shared. It needs the
-runtime's own gated build dir (`GATE-PASSED` for its `BUILT-COMMIT` and
+stay valid when none of the stdlib's sources changed, and are shared. It needs
+the runtime's own gated build dir (`GATE-PASSED` for its `BUILT-COMMIT` and
 `lean.wasm`, as a release by value; staging does not gate again, and
 `gate.checks` counts that build's `gate.log`). Over the clones it chunks that
 build's runtime into `runtime/` and packs its own `lib/lean` as `lean-lib`
@@ -111,29 +111,38 @@ build's runtime into `runtime/` and packs its own `lib/lean` as `lean-lib`
 leaves `<id>.pack-set.json`), then packs the tools. Its record keeps the base's
 `docker` (the toolchain image's recipe is checked to be the same) and every
 other shared field (E2); `kernel.commit` and `.patch`, `gate`, `runtime` (but
-its `target`), the `lean-lib` entry, `tools` and `notes` are its own. The guards refuse the known ways in which the
-shared packs would stop pairing with the new runtime; they are not a proof (a
-compile flag that changes the object layout passes them), and QED64's Mathlib
-bake against the shared packs remains the end-to-end check.
+its `target`), the `lean-lib` entry, `tools` and `notes` are its own. The
+pairing guards (below) refuse the known ways in which the shared packs would
+stop pairing with the new runtime; they are not a proof (a compile flag that
+changes the object layout passes them), and QED64's Mathlib bake against the
+shared packs remains the end-to-end check.
 
-Staging by reference refuses, besides what any staging refuses (below): a base
-that is not a first cut of the tag or names a base of its own, a mirror whose
-record is not the tag's, a HEAD that does not descend from the base's record
-commit, a mirror that holds a dir staging replaces, a clone whose bytes are not
-the base's, any drift from the base's record, and a `SHA256SUMS` difference
-outside `release.json` and the files the release owns. A tools re-cut also
-refuses a failing gate (exit 31). A runtime release by reference also refuses
-`--recut` with `--runtime`, a build dir without a matching `GATE-PASSED` (exit
-31), a build of the base's own kernel commit (that is a tools re-cut), a kernel
-commit that does not descend from the base's, a `docker-wasm64/` recipe at that
-commit other than the base's `docker.recipeCommit`, any change since the base's
-kernel to the olean format's C++ (`src/include/lean/lean.h`,
-`src/runtime/object.h`, `src/runtime/compact.{h,cpp}`,
-`src/library/module.cpp`), and any change to the stdlib Lean sources
-(`src/Init`, `src/Std`, `src/Lean`) unless `--stdlib-drift <note>` says why it
-is harmless (the note is recorded; given with no change, it is refused). The
-recipe, olean-format and ancestry guards have no override: their fallback is a
-full import (RELEASE-PIPELINE.md). `--packs-from`, `--match-runtime` and
+Staging by reference refuses, besides what any staging refuses (below):
+
+- a base that is not a first cut of the tag or names a base of its own, a
+  mirror whose record is not the tag's, or a HEAD that does not descend from
+  the base's record commit;
+- a mirror that holds a dir staging replaces, or a clone whose bytes are not
+  the base's;
+- any drift from the base's record, and a `SHA256SUMS` difference outside
+  `release.json` and the files the release owns;
+- a tools re-cut: a failing gate (exit 31);
+- a runtime release by reference: `--recut` with `--runtime`; a build dir
+  without a matching `GATE-PASSED` (exit 31); a build of the base's own kernel
+  commit (that is a tools re-cut); and the pairing guards, which `publish` runs
+  again on the record:
+  - a kernel commit that does not descend from the base's;
+  - a `docker-wasm64/` recipe at that commit other than the base's
+    `docker.recipeCommit`;
+  - any change since the base's kernel to the olean format's C++
+    (`src/include/lean/lean.h`, `src/runtime/object.h`,
+    `src/runtime/compact.{h,cpp}`, `src/library/module.cpp`);
+  - staging only: any change to the stdlib's sources (`src/Init`, `src/Std`,
+    `src/Lean`, `src/lake`, `stage0`) unless `--stdlib-drift <note>` says why
+    it is harmless (the note is recorded; given with no change, it is refused).
+
+The recipe, olean-format and ancestry guards have no override: their fallback
+is a full import (RELEASE-PIPELINE.md). `--packs-from`, `--match-runtime` and
 `--revision` are by-value options and refused with `--base`.
 
 A re-cut by value (the fallback; every file uploaded again): `--runtime` the
@@ -192,7 +201,10 @@ For a release by reference, `publish` first — in preflight, before any push,
 and whatever `--only` is — reads the base's record at its tag, checks that the
 base's GitHub release is published and holds every shared asset (size and
 digest), and that the base's R2 prefix holds every shared object with the right
-bytes (MD5 against the staged clones) and the base's `release.json`. It then
+bytes (MD5 against the staged clones) and the base's `release.json`; for a
+runtime release by reference it also runs the pairing guards again, on the
+record (so a record `release.mjs --base` wrote from a hand-made config gets
+them too). It then
 uploads only its own assets (a tools re-cut: 3; a runtime release by reference:
 its runtime, its `lean-lib` parts and manifest, its tgz, `release.json` and
 `SHA256SUMS`). R2 is a server-side copy of the shared paths from

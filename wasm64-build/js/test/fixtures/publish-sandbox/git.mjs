@@ -1,7 +1,7 @@
 // A FAKE git for test/publish-sandbox.test.mjs (run through a wrapper the test writes, first on
 // PATH). The repository and its origin are a JSON model in $FAKE_STATE/git.json, never a real
 // repository: it answers the read commands publish-release.mjs makes (rev-parse, ls-remote, show,
-// merge-base, log, …) and REFUSES every write (add, commit, tag, push, a fetch into a ref), so the
+// merge-base, log, diff, …) and REFUSES every write (add, commit, tag, push, a fetch into a ref), so the
 // test can assert from the call log that none was attempted. Every call is appended to
 // $FAKE_STATE/calls.log. `-C <dir>` must be $FAKE_REPO, the sandbox's copy of the repository.
 //
@@ -45,6 +45,8 @@ const resolve = (rev) => {
 };
 const commitOf = (rev) => { const v = resolve(rev); const c = v && peel(v); return c && at.has(c) ? c : null; };
 const short = (sha) => sha.slice(0, 7);
+/** Whether path `p` is named by pathspec `s` (the path itself, or a directory above it). */
+const under = (p, s) => p === s || p.startsWith(`${s}/`);
 /** The newest commit at or before `tip` that adds `p` (the history is linear). */
 const adder = (tip, p) => { for (let i = at.get(tip); i >= 0; i--) if (S.commits[i].adds?.[p] !== undefined) return S.commits[i]; return null; };
 
@@ -105,11 +107,25 @@ if (cmd === "log") {
   if (revs[0]?.includes("..")) { const [x, y] = revs[0].split(".."); from = at.get(commitOf(x)); to = at.get(commitOf(y)); }
   else { const c = commitOf(revs[0] ?? "HEAD"); if (!c) die(`fatal: bad revision '${revs[0]}'`); to = at.get(c); }
   let list = S.commits.slice(from + 1, to + 1).reverse();
-  if (p) list = list.filter((c) => c.adds?.[p] !== undefined);
+  if (p) list = list.filter((c) => Object.keys(c.adds ?? {}).some((q) => under(q, p)));
   if (one) list = list.slice(0, 1);
   const fmt = (c) => (oneline ? `${short(c.sha)} ${c.subject}` : (format ?? "%H").replace("%H", c.sha).replace("%h", short(c.sha)).replace("%s", c.subject));
   for (const c of list) console.log(fmt(c));
   process.exit(0);
+}
+if (cmd === "diff") {
+  // diff <older> <newer> [-- <pathspec>…]: the paths the commits after <older> up to <newer> add
+  // (a linear history: an add is a change), --name-only or --quiet
+  const dd = a.indexOf("--");
+  const revs = (dd >= 0 ? a.slice(0, dd) : a).filter((x) => !x.startsWith("-"));
+  const specs = dd >= 0 ? a.slice(dd + 1) : [];
+  const [x, y] = revs.map(commitOf);
+  if (!x || !y) die(`fatal: bad revision '${x ? revs[1] : revs[0]}'`);
+  if (at.get(x) > at.get(y)) die("fake git: diff from a newer commit to an older one is not modeled", 97);
+  const changed = [...new Set(S.commits.slice(at.get(x) + 1, at.get(y) + 1).flatMap((c) => Object.keys(c.adds ?? {})))]
+    .filter((q) => !specs.length || specs.some((sp) => under(q, sp))).sort();
+  if (a.includes("--name-only")) for (const q of changed) console.log(q);
+  process.exit(a.includes("--quiet") && changed.length ? 1 : 0);
 }
 if (cmd === "branch" && a.includes("--contains")) {
   const c = commitOf(a[a.indexOf("--contains") + 1]);

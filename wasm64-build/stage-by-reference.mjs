@@ -9,7 +9,13 @@
 //   base   <base release.json> <tag>
 //          the base must be a first cut of <tag> (checkReleaseRecord, no base of its own, the
 //          lean4-wasm64 package, a lean-lib pack); prints "<id> <digest> <kernel commit>
-//          <gate.wasmSha256> <lean-lib rawSha256> <docker.recipeCommit, or ->"
+//          <gate.wasmSha256> <lean-lib rawSha256>"
+//   pairing <base release.json> <kernel commit>
+//          a runtime release by reference: whether a runtime built at <kernel commit> may share the
+//          base's packs, native64 and lists (pairing(); publish-release.mjs runs it again on the
+//          record). Refuses a kernel commit that does not descend from the base's, a docker-wasm64
+//          recipe at it other than the base's, and a change to the olean format's C++; prints the
+//          stdlib sources (STDLIB_SOURCES) changed since the base's kernel, one per line
 //   mirror <base release.json> <mirror dir> <out> <id>
 //          before any write: the mirror is not, does not contain and does not lie inside <out>/<id>,
 //          <out>/<id>.gate or <out>/<id>.tools (judged by each directory's identity, not its
@@ -30,6 +36,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { RELEASE_ID, byReferenceKind, checkRecutBase, checkReleaseRecord, isOwnPath, isRecutOwnPath, ownLabel, sha256sums } from "./js/release-record.mjs";
 import { sha256File } from "./js/artifact-id.mjs";
@@ -55,7 +62,58 @@ export function baseFields(file, tag) {
   const p = baseProblems(b, tag);
   if (p.length) throw new Error(`${file}: ${p.join("; ")}`);
   const leanLib = b.packs.find((k) => k?.id === "lean-lib");
-  return [b.id, b.digest, b.kernel.commit, b.gate.wasmSha256, leanLib.rawSha256, b.docker?.recipeCommit ?? "-"].join(" ");
+  return [b.id, b.digest, b.kernel.commit, b.gate.wasmSha256, leanLib.rawSha256].join(" ");
+}
+
+// ---------- pairing (a runtime release by reference) ----------
+
+/** The olean format's C++: a runtime that shares its base's packs must read their oleans as the base's did (their githash check is compiled off). */
+export const OLEAN_FORMAT = Object.freeze(["src/include/lean/lean.h", "src/runtime/object.h", "src/runtime/compact.h", "src/runtime/compact.cpp", "src/library/module.cpp"]);
+/**
+ * The sources of the shared packs' library modules (src/Init, src/Std, src/Lean; src/lake: the
+ * Lake.* modules a pack may carry, such as mathlib-game-extra's Lake.Util.Casing) and of the
+ * compiler that compiles them and names their auxiliary declarations (stage0). A change since the
+ * base's kernel is drift: the shared oleans lag this runtime's compiled code. It needs
+ * --stdlib-drift <why that is harmless>.
+ */
+export const STDLIB_SOURCES = Object.freeze(["src/Init", "src/Init.lean", "src/Std", "src/Std.lean", "src/Lean", "src/Lean.lean", "src/lake", "stage0"]);
+
+/**
+ * Whether a runtime built at kernel commit `c` may share base `b`'s packs, native64 and lists (a
+ * runtime release by reference; RELEASE.md), asked of git through `git(args) → {status, stdout}`
+ * in the repository: both kernel commits are in it, `c` descends from the base's kernel,
+ * docker-wasm64 at `c` is the base's docker.recipeCommit, and the olean format's C++ is unchanged
+ * between them. These refuse the known ways in which the shared packs stop pairing with a runtime;
+ * they prove nothing more. Staging runs it (the `pairing` step), and publish again on the record,
+ * whatever wrote it. → {problems, drift}: `drift` lists the STDLIB_SOURCES paths that changed.
+ */
+export function pairing(b, c, git) {
+  const k = b?.kernel?.commit;
+  const short = (x) => String(x).slice(0, 10);
+  const missing = [k, c].filter((x) => git(["cat-file", "-e", `${x}^{commit}`]).status !== 0);
+  if (missing.length) return { problems: missing.map((x) => `kernel commit ${x} is not in this repository`), drift: [] };
+  const problems = [];
+  if (git(["merge-base", "--is-ancestor", k, c]).status !== 0) {
+    problems.push(`kernel commit ${short(c)} does not descend from the base's kernel ${short(k)}: a runtime release by reference is a later build of the base's line`);
+  }
+  const recipe = b.docker?.recipeCommit;
+  const at = git(["log", "-1", "--format=%H", c, "--", "docker-wasm64"]);
+  if (!recipe || at.status !== 0 || at.stdout.trim() !== recipe) {
+    problems.push(`docker-wasm64 at ${short(c)} is not the base's recipe (${recipe ? short(recipe) : "none recorded"}): the base's docker record would not describe this runtime's toolchain — a full import (RELEASE-PIPELINE.md)`);
+  }
+  if (git(["diff", "--quiet", k, c, "--", ...OLEAN_FORMAT]).status !== 0) {
+    problems.push(`the olean format's C++ (${OLEAN_FORMAT.join(" ")}) changed since the base's kernel ${short(k)}: this runtime could misread the shared packs (their githash check is compiled off) — a full import (RELEASE-PIPELINE.md)`);
+  }
+  const d = git(["diff", "--name-only", k, c, "--", ...STDLIB_SOURCES]);
+  if (d.status !== 0) problems.push(`git diff --name-only ${short(k)} ${short(c)} failed (exit ${d.status})`);
+  return { problems, drift: d.status === 0 ? d.stdout.split("\n").filter(Boolean) : [] };
+}
+
+/** Step `pairing`: refuses a runtime at `c` that cannot share the base's files; prints the drift, one path per line (nothing when none). */
+export function checkPairing(file, c) {
+  const { problems, drift } = pairing(readRecord(file), c, (args) => spawnSync("git", args, { encoding: "utf8", maxBuffer: 64 << 20 }));
+  if (problems.length) throw new Error(problems.join("; "));
+  return drift.length ? drift.join("\n") : undefined;
 }
 
 // ---------- mirror ----------
@@ -241,6 +299,7 @@ export async function finalCheck(file, rel, sidecar) {
 
 const STEPS = {
   base: { args: 2, run: ([file, tag]) => baseFields(file, tag) },
+  pairing: { args: 2, run: ([file, c]) => checkPairing(file, c) },
   mirror: { args: 4, run: ([file, mirror, out, id]) => checkMirror(file, mirror, out, id) },
   clone: { args: 3, run: ([file, mirror, rel]) => cloneShared(file, mirror, rel) },
   config: { args: 8, more: true, run: ([file, config, id, own, checks, version, tgz, commit, ...notes]) => writeRecutConfig(file, config, id, own, checks, version, tgz, commit, notes) },

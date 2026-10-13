@@ -178,14 +178,15 @@ pack's raw digest is in the release's `packs`) with `--umbrella` (oleans and
 umbrella are reused), rebake, pyramid, promote (~500 MB upload: runtime chunks
 + two snapshots). lean4game re-pairs its game snapshots the same way.
 
-A stdlib Lean source changed since the base's kernel (`src/Init`, `src/Std`,
-`src/Lean`) makes the shared packs' oleans of those modules lag the compiled
-code until the next full import: staging refuses it unless `--stdlib-drift
-<why it is harmless>` says why (the runtime runs its own compiled code for
-them; the note is recorded). When the olean-format guard (`lean.h`,
-`object.h`, `compact.{h,cpp}`, `module.cpp`), the Docker recipe guard or the
-ancestry guard refuses, the fix needs a full import: the shared packs would no
-longer pair with the runtime.
+A change since the base's kernel to the stdlib's sources (`src/Init`,
+`src/Std`, `src/Lean`, `src/lake`; `stage0`, the compiler that compiles them)
+makes the shared packs' oleans of those modules lag the compiled code until the
+next full import: staging refuses it unless `--stdlib-drift <why it is
+harmless>` says why (the runtime runs its own compiled code for them; the note
+is recorded). When the olean-format guard (`lean.h`, `object.h`,
+`compact.{h,cpp}`, `module.cpp`), the Docker recipe guard or the ancestry guard
+refuses (staging, and `publish` again on the record), the fix needs a full
+import: the shared packs would no longer pair with the runtime.
 
 ## Ship gate (repository owner)
 

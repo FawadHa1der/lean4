@@ -44,6 +44,9 @@
 // before any step, whatever --only is: the base's record at its tag (canonical, checkRecutBase),
 // its published GitHub release holding every shared file (size and digest) and that record, and
 // (--r2-source base) its R2 prefix holding every shared object with the staged MD5 and that record.
+// A runtime release by reference also passes staging's pairing guards again, on the record (git:
+// its kernel commit descends from the base's, docker-wasm64 at it is the base's recipe, and the
+// olean format's C++ is unchanged; stage-by-reference.mjs, pairing).
 //
 // Options:
 //   --release-dir <dir>   the staged release (default: ../wasm64-lean-kernel-release/<id> beside the repo)
@@ -73,7 +76,7 @@ import readline from "node:readline";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { RELEASE_ID, checkRecutBase, checkReleaseRecord, isOwnPath, ownLabel, releaseDigest, serializeRelease } from "./js/release-record.mjs";
+import { RELEASE_ID, byReferenceKind, checkRecutBase, checkReleaseRecord, isOwnPath, ownLabel, releaseDigest, serializeRelease } from "./js/release-record.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..");
@@ -679,7 +682,7 @@ function checkTools(ctx) {
 
 // ---------- the steps ----------
 
-function preflight(o) {
+async function preflight(o) {
   step(`preflight ${o.id}`);
   if (!RELEASE_ID.test(o.id)) throw new Stop(`${o.id} is not a release id (lean-vX.Y.Z-<kernel7>[-rN])`, 2);
   const rel = o.releaseDir ?? path.resolve(REPO, "..", "wasm64-lean-kernel-release", o.id);
@@ -718,6 +721,13 @@ function preflight(o) {
     const problems = checkReleaseRecord(record);
     if (problems.length) throw new Stop(`${rel}/release.json is malformed:\n  ${problems.slice(0, 12).join("\n  ")}`);
     const at = baseRecordAtTag(o, record);
+    if (byReferenceKind(record) === "runtime") {
+      // the guards stage-release.sh ran, again on the record, whatever wrote it: its runtime may share
+      // the base's packs, native64 and lists (imported here, not at load: staging imports this module)
+      const { pairing } = await import("./stage-by-reference.mjs");
+      const { problems } = pairing(at.record, record.kernel.commit, (args) => run("git", ["-C", REPO, ...args], { allowFail: true }));
+      if (problems.length) throw new Stop(`${o.id}'s runtime cannot share ${record.base.id}'s files (the guards of stage-release.sh, run on the record):\n  ${problems.join("\n  ")}`);
+    }
     const dir = tempDir();
     const { own, shared } = splitFiles(record);
     const { objects, manifests, ownObjects, ownManifests } = r2Lists(record);
@@ -742,6 +752,10 @@ function preflight(o) {
   if (ctx.base) {
     const { base } = ctx;
     say(`  by reference of ${base.id} (${base.digest.slice(0, 23)}…): ${base.own.length} own, ${base.shared.length} shared — the base's record from ${base.where}, compared`);
+    if (byReferenceKind(ctx.record) === "runtime") {
+      say(`  its runtime pairs with ${base.id}'s files: kernel ${ctx.record.kernel.commit.slice(0, 10)} descends from ${base.record.kernel.commit.slice(0, 10)}, `
+        + "the same docker-wasm64 recipe, the olean format's C++ unchanged");
+    }
     // every read-only check of the base, before any step can push or publish anything
     checkBaseRelease(o, ctx, { hash: true });
     if (o.r2Source === "base") {
@@ -1030,7 +1044,7 @@ export async function main(argv = process.argv.slice(2)) {
   if (o.help) { console.log(usage()); return 0; }
   if (!o.id) { console.error("usage: publish-release.mjs <release id> [options]   (--help)"); return 2; }
   try {
-    const ctx = preflight(o);
+    const ctx = await preflight(o);
     for (const s of STEPS) if (o.only.includes(s)) await { record: stepRecord, push: stepPush, github: stepGithub, r2: stepR2, fetch: stepFetch }[s](o, ctx);
     const full = ["record", "push", "github", "r2"].every((s) => o.only.includes(s));
     say(o.dryRun ? `\nDRY RUN: nothing was changed (${o.id})`

@@ -43,10 +43,11 @@ const SLUG = "sandbox-owner/sandbox-repo", LINE = "qed64-wasm64", R2 = "fake-r2:
 const sha1 = (s) => createHash("sha1").update(s).digest("hex");
 const sha256 = (b) => createHash("sha256").update(b).digest("hex");
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-// the sandbox's history (fake git): root, the kernel commit, the base's record commit, the -r3's
-// tools commit, then (once recorded) the -r3's record commit. A runtime release by reference's
-// history: root, the kernel commit, the base's record commit, its own kernel commit (a descendant),
-// its tools commit and its record commit.
+// the sandbox's history (fake git): root (which adds docker-wasm64/, the base's recipe), the kernel
+// commit, the base's record commit, the -r3's tools commit, then (once recorded) the -r3's record
+// commit. A runtime release by reference's history: root, the kernel commit, the base's record
+// commit, its own kernel commit (a descendant), its tools commit, then (once recorded) its record
+// commit.
 const C = { root: sha1("root"), kernel: sha1("kernel"), base: sha1("release base"), tools: sha1("tools of -r3"), recut: sha1("release -r3"),
   kernel2: sha1("kernel 0040"), rtTools: sha1("tools of 0040"), rt: sha1("release 0040") };
 const TAGOBJ = { base: sha1("tag object base"), recut: sha1("tag object -r3"), rt: sha1("tag object 0040") };
@@ -135,7 +136,7 @@ function stageBase(js, rel) {
     gate: { commit: C.kernel, wasmSha256: manifest.files["lean.wasm"].sha256, checks: 33 },
     packs: [{ id: "lean-core", compiler: "8d91aadcda8a0b231e47c42d4ff4b9b8360563aa" }, { id: "lean-lib", compiler: C.kernel }],
     native64: { commit: "857544b439aa51633344d638dacc03d304b9ea96", os: "linux", arch: "aarch64", tar: "native64/native64.tar.gz" },
-    docker: { tag: "qed64-toolchain:emsdk-6.0.5", recipeCommit: "974ee228b0" },
+    docker: { tag: "qed64-toolchain:emsdk-6.0.5", recipeCommit: C.root }, // the root commit adds docker-wasm64/
     mathlib: { commit: "5ed2965256430c3649e86755f9576b54eca72435", tag: "v4.34.0" },
     modules: { essential: "lists/essential-modules.txt" },
     tools: { package: "lean4-wasm64", version, tgz: `tools/lean4-wasm64-${version}.tgz`, commit: C.kernel },
@@ -200,25 +201,30 @@ function stageRuntime(w) {
   fs.rmSync(work, { recursive: true, force: true });
 }
 
-/** The fake git's repository and origin: the base recorded, tagged and pushed; with `tagged`, the -r3 too; with `runtime`, the runtime release by reference's history instead. */
+const ROOT = { sha: C.root, subject: "root", adds: { README: "sandbox\n", "docker-wasm64/Dockerfile": "FROM emscripten/emsdk:6.0.5\n" } };
+/**
+ * The fake git's repository and origin: the base recorded, tagged and pushed; with `tagged`, the -r3
+ * (or, with `runtime`, the runtime release by reference) too, else only staged on the line.
+ */
 function writeGit(w, { tagged, runtime = false }) {
   if (runtime) {
     const baseText = fs.readFileSync(path.join(w.stage, BASE_ID, "release.json"), "utf8");
     const rtText = fs.readFileSync(path.join(w.stage, RT_ID, "release.json"), "utf8");
-    const tags = { [`refs/tags/${BASE_ID}`]: TAGOBJ.base, [`refs/tags/${RT_ID}`]: TAGOBJ.rt };
+    const tip = tagged ? C.rt : C.rtTools;
+    const tags = { [`refs/tags/${BASE_ID}`]: TAGOBJ.base, ...(tagged ? { [`refs/tags/${RT_ID}`]: TAGOBJ.rt } : {}) };
     writeJson(path.join(w.state, "git.json"), {
       head: `refs/heads/${LINE}`,
       commits: [
-        { sha: C.root, subject: "root", adds: { README: "sandbox\n" } },
+        ROOT,
         { sha: C.kernel, subject: "the kernel commit", adds: { "kernel.txt": "kernel\n" } },
         { sha: C.base, subject: `release ${BASE_ID}`, adds: { [`wasm64-build/releases/${BASE_ID}.json`]: baseText } },
-        { sha: C.kernel2, subject: "the 0040 kernel commit", adds: { "kernel.txt": "kernel 0040\n" } },
+        { sha: C.kernel2, subject: "the 0040 kernel commit", adds: { "kernel.txt": "kernel 0040\n", "src/runtime/object.cpp": "0040\n" } },
         { sha: C.rtTools, subject: "the tools of 0040", adds: { "tools.txt": "0040\n" } },
-        { sha: C.rt, subject: `release ${RT_ID}`, adds: { [`wasm64-build/releases/${RT_ID}.json`]: rtText } },
+        ...(tagged ? [{ sha: C.rt, subject: `release ${RT_ID}`, adds: { [`wasm64-build/releases/${RT_ID}.json`]: rtText } }] : []),
       ],
-      refs: { [`refs/heads/${LINE}`]: C.rt, [`refs/remotes/origin/${LINE}`]: C.rt, ...tags },
-      origin: { [`refs/heads/${LINE}`]: C.rt, ...tags },
-      tags: { [TAGOBJ.base]: C.base, [TAGOBJ.rt]: C.rt },
+      refs: { [`refs/heads/${LINE}`]: tip, [`refs/remotes/origin/${LINE}`]: tip, ...tags },
+      origin: { [`refs/heads/${LINE}`]: tip, ...tags },
+      tags: { [TAGOBJ.base]: C.base, ...(tagged ? { [TAGOBJ.rt]: C.rt } : {}) },
     });
     return;
   }
@@ -229,7 +235,7 @@ function writeGit(w, { tagged, runtime = false }) {
   writeJson(path.join(w.state, "git.json"), {
     head: `refs/heads/${LINE}`,
     commits: [
-      { sha: C.root, subject: "root", adds: { README: "sandbox\n" } },
+      ROOT,
       { sha: C.kernel, subject: "the kernel commit", adds: { "kernel.txt": "kernel\n" } },
       { sha: C.base, subject: `release ${BASE_ID}`, adds: { [`wasm64-build/releases/${BASE_ID}.json`]: baseText } },
       { sha: C.tools, subject: "the tools of the re-cut", adds: { "tools.txt": "-r3\n" } },
@@ -278,7 +284,8 @@ before(() => {
   // published in the fakes, the -r3 staged
   const g = paths(GOLDEN);
   fs.mkdirSync(path.join(g.repo, "wasm64-build"), { recursive: true });
-  fs.copyFileSync(path.join(WB, "publish-release.mjs"), path.join(g.repo, "wasm64-build", "publish-release.mjs"));
+  // (stage-by-reference.mjs: publish runs its pairing guards on a runtime release by reference)
+  for (const f of ["publish-release.mjs", "stage-by-reference.mjs"]) fs.copyFileSync(path.join(WB, f), path.join(g.repo, "wasm64-build", f));
   fs.cpSync(path.join(WB, "js"), g.js, { recursive: true, filter: (s) => !/[/\\](test|node_modules)$/.test(s) });
   for (const d of [g.stage, g.state, g.tmp]) fs.mkdirSync(d, { recursive: true });
   stageBase(g.js, path.join(g.stage, BASE_ID));
@@ -288,7 +295,7 @@ before(() => {
 });
 
 let worlds = 0;
-/** A fresh copy of the golden world; `tagged`: the -r3 already recorded, tagged and pushed (GitHub has its tag); `runtime`: the runtime release by reference instead. */
+/** A fresh copy of the golden world; `tagged`: the -r3 (with `runtime`: the runtime release by reference) already recorded, tagged and pushed (GitHub has its tag). */
 function world({ tagged = false, runtime = false } = {}) {
   const w = paths(path.join(TOP, `w${++worlds}`));
   fs.cpSync(GOLDEN, w.root, { recursive: true });
@@ -320,7 +327,7 @@ const RCLONE_READS = ["version", "listremotes", "lsjson", "cat", "check", "hashs
 function isWrite({ tool, argv }) {
   if (tool === "git") {
     const [c, ...rest] = argv[0] === "-C" ? argv.slice(2) : argv;
-    return !["--version", "rev-parse", "symbolic-ref", "cat-file", "merge-base", "show", "ls-remote", "log", "branch", "fetch"].includes(c)
+    return !["--version", "rev-parse", "symbolic-ref", "cat-file", "merge-base", "show", "ls-remote", "log", "diff", "branch", "fetch"].includes(c)
       || (c === "fetch" && rest.some((x) => x.includes(":"))) || (c === "branch" && !rest.includes("--contains"));
   }
   if (tool === "gh") return (argv[0] === "release" && argv[1] !== "download") || (argv[0] === "api" && argv.includes("-X"));
@@ -541,7 +548,7 @@ describe("publish-release.mjs on a re-cut by reference, against fake git, gh and
   });
 
   test("a recorded runtime release by reference: the real publish uploads its own files, copies the shared ones server-side, puts its own by list, and fetches", async () => {
-    const w = world({ runtime: true });
+    const w = world({ runtime: true, tagged: true });
     const rel = path.join(w.stage, RT_ID);
     const record = readJson(path.join(rel, "release.json"));
     const base = readJson(path.join(w.stage, BASE_ID, "release.json"));
@@ -587,5 +594,37 @@ describe("publish-release.mjs on a re-cut by reference, against fake git, gh and
     assert.ok(fetched.includes(`${BASE_ID}/release.json`) && fetched.includes(`${BASE_ID}/essential-modules.txt`), fetched.join("\n"));
     assert.ok(!fetched.some((f) => f.startsWith(`${BASE_ID}/lean.`)), "no runtime chunk from the base");
     assert.deepEqual(calls(w).filter((c) => c.tool === "git" && isWrite(c)), [], "recorded and pushed already");
+  });
+
+  test("a staged runtime release by reference: the dry run checks its base and the pairing guards, plans the record, push and release, and changes nothing", async () => {
+    const w = world({ runtime: true });
+    const before = snapshot(w);
+    const r = await publish(w, ["--dry-run"], {}, RT_ID);
+    assert.equal(r.status, 0, r.all);
+    assert.match(r.out, /\nDRY RUN: nothing was changed/);
+    assertNoWrite(w, "a dry run");
+    assert.equal(snapshot(w), before, "a dry run changes no state");
+    assert.match(r.out, new RegExp(`its runtime pairs with ${esc(BASE_ID)}'s files: kernel ${C.kernel2.slice(0, 10)} descends from ${C.kernel.slice(0, 10)}, the same docker-wasm64 recipe, the olean format's C\\+\\+ unchanged`));
+    assert.match(r.out, /the reader it ships: lean4-wasm64@4\.34\.0-[0-9a-f]{7} from the staged tools\/\S+\.tgz — its own verify --base: RELEASE VERIFIED/);
+    for (const c of [/would run: git -C \S+ add wasm64-build\/releases\//, /would run: git -C \S+ commit -m /, /would run: git -C \S+ tag -a /,
+      /would run: git -C \S+ push --atomic origin /]) assert.match(r.out, c);
+    assert.match(r.out, /the record and push steps come first; planning only/);
+    // the guards asked git what staging asks: the olean format, then the stdlib's sources, between the two kernels
+    const diffs = calls(w).filter((c) => c.tool === "git" && c.argv.includes("diff")).map((c) => c.argv.slice(c.argv.indexOf("diff")));
+    assert.deepEqual(diffs.map((a) => a.slice(0, 4)), [["diff", "--quiet", C.kernel, C.kernel2], ["diff", "--name-only", C.kernel, C.kernel2]]);
+  });
+
+  test("a runtime release by reference whose kernel changed the Docker recipe and the olean format's C++ stops in preflight, whatever wrote its record", async () => {
+    const w = world({ runtime: true, tagged: true });
+    const g = readJson(path.join(w.state, "git.json"));
+    Object.assign(g.commits.find((c) => c.sha === C.kernel2).adds, { "docker-wasm64/Dockerfile": "FROM another\n", "src/runtime/object.h": "another layout\n" });
+    writeJson(path.join(w.state, "git.json"), g);
+    for (const args of [["--dry-run"], ["--only", "fetch", "--yes"]]) {
+      const r = await publish(w, args, {}, RT_ID);
+      assertStoppedInPreflight(r, args.join(" "), new RegExp(`${esc(RT_ID)}'s runtime cannot share ${esc(BASE_ID)}'s files \\(the guards of stage-release\\.sh, run on the record\\):`
+        + `\\n  docker-wasm64 at ${C.kernel2.slice(0, 10)} is not the base's recipe \\(${C.root.slice(0, 10)}\\): `
+        + `.*\\n  the olean format's C\\+\\+ \\(src/include/lean/lean\\.h .*\\) changed since the base's kernel ${C.kernel.slice(0, 10)}: `));
+    }
+    assertNoWrite(w, "a runtime that does not pair with its base");
   });
 });

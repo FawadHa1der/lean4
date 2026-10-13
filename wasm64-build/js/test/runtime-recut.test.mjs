@@ -148,12 +148,16 @@ test("may differ: each field of the spec's runtime line, changed (binding rules 
   }
 });
 
-test("E3/E4: the base's runtime, another package, the base's tools version, a shared file's bytes, a missing and an extra file are refused", () => {
+test("E3/E4: the base's runtime, an earlier patch, another package, the base's tools version, a shared file's bytes, a missing and an extra file are refused", () => {
   const refused = (r, re, label) => { const p = checkRecutBase(r, E1); assert.ok(p.some((q) => re.test(q)), `${label}: ${JSON.stringify(p)}`); };
   // the base's own lean.wasm, re-signed with a gate and lean-lib bound to it: a tools re-cut's job
   const same = runtimeRecutOf(E1, { wasmSha256: E1.gate.wasmSha256 });
   assert.deepEqual(checkReleaseRecord(same), []);
   assert.deepEqual(checkRecutBase(same, E1), [`runtime.buildId ${E1.runtime.buildId} is the base's: a runtime release by reference ships its own runtime (a tools re-cut, -rN, keeps the base's)`]);
+  // a later build of the base's line: its patch id never precedes the base's (the base's own is fine: a kernel
+  // commit with no PATCHES.md entry of its own); staging and publish check the ancestry with git
+  assert.deepEqual(checkRecutBase(runtimeRecutOf(E1, { patch: "0030" }), E1), ["kernel.patch 0030 precedes the base's 0037: a runtime release by reference is a later build of the base's line"]);
+  assert.deepEqual(checkRecutBase(runtimeRecutOf(E1, { patch: E1.kernel.patch }), E1), []);
   refused(runtimeRecutOf(E1, { edit: (r) => ({ ...r, tools: { ...r.tools, package: "other" } }) }), /^tools\.package "other" is not the base's "lean4-wasm64"$/, "package");
   refused(runtimeRecutOf(E1, { edit: (r) => ({ ...r, tools: { ...r.tools, version: E1.tools.version } }) }), /^tools\.version 4\.34\.0-e1a79c1 is the base's: a release by reference ships its own tools$/, "version");
   refused(runtimeRecutOf(E1, { edit: (r) => ({ ...r, files: r.files.map((f) => (f.path === "lists/extra-modules.txt" ? { ...f, bytes: f.bytes + 1 } : f)) }) }), /^files\[\]: lists\/extra-modules\.txt is not the base's bytes$/, "bytes");

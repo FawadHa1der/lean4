@@ -19,8 +19,8 @@ import { buildIdFromSha256 } from "../artifact-id.mjs";
 import { K0040, WASM0040, runtimeRecutOf } from "./runtime-recut-fixture.mjs";
 import { olean } from "./olean-fixture.mjs";
 import {
-  baseFields, baseProblems, checkMirror, cloneShared, finalCheck, isWithin, mirrorMisses, mirrorOverlaps, physicalPath,
-  recutConfig, writeRecutConfig,
+  OLEAN_FORMAT, STDLIB_SOURCES, baseFields, baseProblems, checkMirror, cloneShared, finalCheck, isWithin, mirrorMisses, mirrorOverlaps,
+  pairing, physicalPath, recutConfig, writeRecutConfig,
 } from "../../stage-by-reference.mjs";
 import { contentTypeOf } from "../../publish-release.mjs";
 
@@ -77,15 +77,64 @@ const filesUnder = (d) => snapshot(d).filter((l) => !l.endsWith("/")).map((l) =>
 test("base: the committed e1a79c1 record is a base of v4.34.0; the step prints the fields the script reads", () => {
   assert.deepEqual(baseProblems(E1, "v4.34.0"), []);
   const fields = baseFields(E1_FILE, "v4.34.0");
-  assert.equal(fields, [E1.id, E1.digest, E1.kernel.commit, E1.gate.wasmSha256, E1.packs.find((k) => k.id === "lean-lib").rawSha256, E1.docker.recipeCommit].join(" "));
-  assert.equal(fields.split(" ").length, 6, "the script reads 6 fields");
-  // a base without a recipe commit prints "-" (the runtime kind then refuses it)
-  const root = mkdtemp("l4w-sbr-fields-");
-  const file = path.join(root, "release.json");
+  assert.equal(fields, [E1.id, E1.digest, E1.kernel.commit, E1.gate.wasmSha256, E1.packs.find((k) => k.id === "lean-lib").rawSha256].join(" "));
+  assert.equal(fields.split(" ").length, 5, "the script reads 5 fields");
+});
+
+// ---------- pairing ----------
+
+/** A git for pairing(): every commit known and an ancestor, the base's recipe, `changed` the paths between the two kernels. */
+function pairingGit({ unknown = [], notAncestor = false, recipe = E1.docker.recipeCommit, changed = [] } = {}) {
+  const asked = [];
+  const git = (args) => {
+    asked.push(args);
+    const specs = args.includes("--") ? args.slice(args.indexOf("--") + 1) : [];
+    const hit = changed.filter((p) => specs.some((q) => p === q || p.startsWith(`${q}/`)));
+    switch (args[0]) {
+      case "cat-file": return { status: unknown.some((c) => args[2] === `${c}^{commit}`) ? 128 : 0, stdout: "" };
+      case "merge-base": return { status: notAncestor ? 1 : 0, stdout: "" };
+      case "log": return { status: 0, stdout: `${recipe}\n` };
+      case "diff": return args.includes("--quiet") ? { status: hit.length ? 1 : 0, stdout: "" } : { status: 0, stdout: hit.map((p) => `${p}\n`).join("") };
+      default: throw new Error(`unexpected git ${args.join(" ")}`);
+    }
+  };
+  return { git, asked };
+}
+
+test("pairing: what it asks git, and a kernel whose other C++ changed shares the base's files with no drift", () => {
+  const { git, asked } = pairingGit({ changed: ["src/runtime/object.cpp", "src/runtime/stackinfo.cpp", "src/CMakeLists.txt"] });
+  assert.deepEqual(pairing(E1, K0040, git), { problems: [], drift: [] });
+  const k = E1.kernel.commit;
+  assert.deepEqual(asked, [
+    ["cat-file", "-e", `${k}^{commit}`], ["cat-file", "-e", `${K0040}^{commit}`],
+    ["merge-base", "--is-ancestor", k, K0040],
+    ["log", "-1", "--format=%H", K0040, "--", "docker-wasm64"],
+    ["diff", "--quiet", k, K0040, "--", ...OLEAN_FORMAT],
+    ["diff", "--name-only", k, K0040, "--", ...STDLIB_SOURCES],
+  ]);
+  assert.deepEqual(OLEAN_FORMAT, ["src/include/lean/lean.h", "src/runtime/object.h", "src/runtime/compact.h", "src/runtime/compact.cpp", "src/library/module.cpp"]);
+  // the stdlib's sources: the library's modules, Lake's (mathlib-game-extra carries Lake.Util.Casing) and stage0, the compiler that compiles them
+  assert.deepEqual(STDLIB_SOURCES, ["src/Init", "src/Init.lean", "src/Std", "src/Std.lean", "src/Lean", "src/Lean.lean", "src/lake", "stage0"]);
+});
+
+test("pairing: drift is the stdlib's sources that changed (src/lake and stage0 included), never a refusal", () => {
+  const changed = ["src/Lean/Shell.lean", "src/lake/Lake/Util/Casing.lean", "stage0/stdlib/Init/Prelude.c", "src/runtime/object.cpp", "src/Leanc.lean"];
+  assert.deepEqual(pairing(E1, K0040, pairingGit({ changed }).git), { problems: [], drift: changed.slice(0, 3) });
+});
+
+test("pairing: an unknown commit, another line, another Docker recipe (or none recorded), an olean-format change — each refused by its message", () => {
+  const problems = (o, b = E1) => pairing(b, K0040, pairingGit(o).git).problems;
+  const k10 = E1.kernel.commit.slice(0, 10), c10 = K0040.slice(0, 10);
+  assert.deepEqual(problems({ unknown: [K0040] }), [`kernel commit ${K0040} is not in this repository`]);
+  assert.deepEqual(problems({ unknown: [E1.kernel.commit, K0040] }).length, 2);
+  assert.deepEqual(problems({ notAncestor: true }), [`kernel commit ${c10} does not descend from the base's kernel ${k10}: a runtime release by reference is a later build of the base's line`]);
+  const recipe = (r) => `docker-wasm64 at ${c10} is not the base's recipe (${r}): the base's docker record would not describe this runtime's toolchain — a full import (RELEASE-PIPELINE.md)`;
+  assert.deepEqual(problems({ recipe: "0".repeat(40) }), [recipe("974ee228b0")]);
   const { recipeCommit: _r, ...docker } = E1.docker;
-  const { digest: _d, ...rest } = E1;
-  fs.writeFileSync(file, JSON.stringify(canonicalRelease({ ...rest, docker })));
-  assert.equal(baseFields(file, "v4.34.0").split(" ").at(-1), "-");
+  assert.deepEqual(problems({}, { ...E1, docker }), [recipe("none recorded")]);
+  assert.deepEqual(problems({ changed: ["src/include/lean/lean.h"] }), [`the olean format's C++ (${OLEAN_FORMAT.join(" ")}) changed since the base's kernel ${k10}: this runtime could misread the shared packs (their githash check is compiled off) — a full import (RELEASE-PIPELINE.md)`]);
+  // every guard at once: each named
+  assert.equal(problems({ notAncestor: true, recipe: "0".repeat(40), changed: ["src/runtime/compact.cpp"] }).length, 3);
 });
 
 test("base: refuses another tag, a re-cut, a base with a base, another package, no lean-lib — naming the file", () => {
@@ -360,7 +409,7 @@ test("the step runner: usage exits 2, a refusal 1 with its reason on stderr, a s
   const run = (...args) => spawnSync(process.execPath, [SBR, ...args], { encoding: "utf8", timeout: 60_000 });
   let r = run();
   assert.equal(r.status, 2, r.stderr);
-  assert.match(r.stderr, /^usage: stage-by-reference\.mjs <base\|mirror\|clone\|config\|final>/);
+  assert.match(r.stderr, /^usage: stage-by-reference\.mjs <base\|pairing\|mirror\|clone\|config\|final>/);
   r = run("config", E1_FILE, "x", "y");
   assert.equal(r.status, 2);
   r = run("base", E1_FILE, "v4.34.0");
@@ -795,27 +844,34 @@ test("stage-release.sh --base --runtime: every refusal comes before any write, w
   };
   const noGate = variant("no gate", (d) => fs.rmSync(path.join(d, "GATE-PASSED")));
   const otherGate = variant("other gate", (d) => fs.writeFileSync(path.join(d, "GATE-PASSED"), `${RT_KERNEL}\n${"0".repeat(64)}\n`));
-  const baseKernel = variant("base kernel", (d) => {
-    fs.writeFileSync(path.join(d, "BUILT-COMMIT"), `${KERNEL}\n`);
-    fs.writeFileSync(path.join(d, "GATE-PASSED"), `${KERNEL}\n${w.wasmSha}\n`);
-  });
+  const builtAt = (c) => (d) => {
+    fs.writeFileSync(path.join(d, "BUILT-COMMIT"), `${c}\n`);
+    fs.writeFileSync(path.join(d, "GATE-PASSED"), `${c}\n${w.wasmSha}\n`);
+  };
+  const baseKernel = variant("base kernel", builtAt(KERNEL));
+  const basePrefix = variant("base prefix", builtAt(`${KERNEL.slice(0, 7)}${"0".repeat(33)}`));
   const P = { STAGE_TEST_PATCHES: w.patches };
   const pj = path.join(w.rtRepo, "wasm64-build", "js", "package.json");
   const pjText = fs.readFileSync(pj, "utf8");
   const cases = [
     ["--recut with --runtime", (o) => [...rtArgs(w, o), "--recut", "2"], {}, 2, /^stage-release: --base with --runtime is a runtime release by reference, the first cut of its kernel commit: drop --recut/m],
-    ["--base alone", (o) => ["--base", w.mirror, "--note", "x", "--out", o], {}, 2, /^stage-release: --base needs --recut <n> \(a tools-only re-cut\) or --runtime <build dir> \(a runtime release by reference\)$/m],
+    ["--base alone", (o) => ["--base", w.mirror, "--note", "x", "--out", o], {}, 2, /^stage-release: --base needs --recut <n> \(a tools re-cut\) or --runtime <build dir> \(a runtime release by reference\)$/m],
     ["--packs-from with --base --runtime", (o) => [...rtArgs(w, o), "--packs-from", w.mirror], {}, 2, /^stage-release: --base excludes --packs-from: a release by reference takes every file and field it does not own from its base$/m],
     ["no --note", (o) => ["--runtime", w.rtBuild, "--base", w.mirror, "--out", o], {}, 2, /^stage-release: --base needs at least one --note/m],
     ["--stdlib-drift without --base", (o) => ["--runtime", w.rtBuild, "--stdlib-drift", "x", "--note", "x", "--out", o], {}, 2, /^stage-release: --stdlib-drift goes with --runtime <build dir> --base <mirror> \(a runtime release by reference\)$/m],
-    ["--stdlib-drift with no drift", (o) => rtArgs(w, o, ["--stdlib-drift", "x"]), P, 2, /^stage-release: no stdlib Lean source changed since the base's kernel abcdef1234: drop --stdlib-drift$/m],
+    ["--stdlib-drift with --recut", (o) => ["--base", w.mirror, "--recut", "3", "--stdlib-drift", "x", "--note", "x", "--out", o], {}, 2, /^stage-release: --stdlib-drift goes with --runtime <build dir> --base <mirror> \(a runtime release by reference\)$/m],
+    ["--stdlib-drift with no drift", (o) => rtArgs(w, o, ["--stdlib-drift", "x"]), P, 2, /^stage-release: none of the stdlib's sources changed since the base's kernel abcdef1234: drop --stdlib-drift$/m],
     ["no GATE-PASSED", (o) => ["--runtime", noGate, "--base", w.mirror, "--note", "x", "--out", o], P, 31, /has no passing gate for commit 1234567890 and this lean\.wasm/],
     ["GATE-PASSED naming another lean.wasm", (o) => ["--runtime", otherGate, "--base", w.mirror, "--note", "x", "--out", o], P, 31, /has no passing gate for commit 1234567890 and this lean\.wasm/],
-    ["a build of the base's kernel", (o) => ["--runtime", baseKernel, "--base", w.mirror, "--note", "x", "--out", o], P, 1, /is a build of the base's kernel abcdef1234: a tools-only re-cut keeps the runtime \(--recut <n> without --runtime\)$/m],
-    ["not descending from the base's kernel", (o) => rtArgs(w, o), { ...P, STAGE_TEST_NOT_ANCESTOR: `${KERNEL} ${RT_KERNEL}` }, 1, /^stage-release: kernel commit 1234567890 does not descend from the base's kernel abcdef1234: /m],
-    ["another Docker recipe", (o) => rtArgs(w, o), { ...P, STAGE_TEST_RECIPE: "0".repeat(40) }, 1, /^stage-release: docker-wasm64 at 1234567890 is not the base's recipe \(974ee228b0\): the base's docker record would not describe this runtime's toolchain — a full import \(RELEASE-PIPELINE\.md\)$/m],
-    ["an olean-format change", (o) => rtArgs(w, o), { ...P, STAGE_TEST_FORMAT_DIFF: "src/runtime/object.h" }, 1, /^stage-release: the olean format's C\+\+ \(src\/include\/lean\/lean\.h .*\) changed since the base's kernel abcdef1234: this runtime could misread the shared packs .* a full import \(RELEASE-PIPELINE\.md\)$/m],
-    ["a stdlib change without --stdlib-drift", (o) => rtArgs(w, o), { ...P, STAGE_TEST_STDLIB_DIFF: "src/Lean/Shell.lean,src/Init/Prelude.lean" }, 1, /^stage-release: stdlib Lean sources changed since the base's kernel abcdef1234 \(2 files, e\.g\. src\/Lean\/Shell\.lean src\/Init\/Prelude\.lean\): .* say why: --stdlib-drift <note>, which is recorded in notes$/m],
+    ["a build of the base's kernel", (o) => ["--runtime", baseKernel, "--base", w.mirror, "--note", "x", "--out", o], P, 1, /is a build of the base's kernel abcdef1234: a tools re-cut keeps the runtime \(--recut <n> without --runtime\)$/m],
+    ["a kernel with the base's 7-hex prefix", (o) => ["--runtime", basePrefix, "--base", w.mirror, "--note", "x", "--out", o], P, 1, /^stage-release: kernel commit abcdef1000 has the base's 7-hex prefix \(abcdef1234\): its release id would be the base's, lean-v4\.34\.0-abcdef1$/m],
+    // the pairing guards (the node step, which publish runs again on the record), then the script's own line
+    ["not descending from the base's kernel", (o) => rtArgs(w, o), { ...P, STAGE_TEST_NOT_ANCESTOR: `${KERNEL} ${RT_KERNEL}` }, 1, /^stage-by-reference pairing: kernel commit 1234567890 does not descend from the base's kernel abcdef1234: [^\n]*\nstage-release: the runtime at 1234567890 cannot share lean-v4\.34\.0-abcdef1's packs, native64 and lists \(reason above\)$/m],
+    ["another Docker recipe", (o) => rtArgs(w, o), { ...P, STAGE_TEST_RECIPE: "0".repeat(40) }, 1, /^stage-by-reference pairing: docker-wasm64 at 1234567890 is not the base's recipe \(974ee228b0\): the base's docker record would not describe this runtime's toolchain — a full import \(RELEASE-PIPELINE\.md\)$/m],
+    ["an olean-format change", (o) => rtArgs(w, o), { ...P, STAGE_TEST_FORMAT_DIFF: "src/runtime/object.h" }, 1, /^stage-by-reference pairing: the olean format's C\+\+ \(src\/include\/lean\/lean\.h .*\) changed since the base's kernel abcdef1234: this runtime could misread the shared packs .* a full import \(RELEASE-PIPELINE\.md\)$/m],
+    ["a stdlib change without --stdlib-drift", (o) => rtArgs(w, o), { ...P, STAGE_TEST_STDLIB_DIFF: "src/Lean/Shell.lean,src/Init/Prelude.lean" }, 1, /^stage-release: the stdlib's sources changed since the base's kernel abcdef1234 \(2 files, e\.g\. src\/Lean\/Shell\.lean src\/Init\/Prelude\.lean\): .* say why: --stdlib-drift <note>, which is recorded in notes$/m],
+    // the line first: an unknown kernel commit is named as one, before any guard reads it
+    ["an unknown kernel", (o) => rtArgs(w, o), { ...P, STAGE_TEST_UNKNOWN_COMMIT: RT_KERNEL }, 1, new RegExp(`^stage-release: kernel commit ${RT_KERNEL} is not in this repository$`, "m")],
     ["the kernel not on the line", (o) => rtArgs(w, o), { ...P, STAGE_TEST_NOT_ANCESTOR: `${RT_KERNEL} qed64-wasm64` }, 1, new RegExp(`^stage-release: kernel commit ${RT_KERNEL} is not on qed64-wasm64$`, "m")],
     ["a package version with -r2", (o) => rtArgs(w, o), { ...P, PKG: `${RT_VERSION}-r2` }, 1, new RegExp(`^stage-release: wasm64-build/js/package\\.json version is ${RT_VERSION}-r2, the release needs ${RT_VERSION} \\(bump and commit it first\\)$`, "m")],
   ];

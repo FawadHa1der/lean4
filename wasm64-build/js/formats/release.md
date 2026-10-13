@@ -125,7 +125,8 @@ When `base` is present:
   So `packs` covers which packs exist, their order and every shared entry. A
   field that differs is named alone: `<field> differs from the base's`.
 - **E3** `tools.package` is the base's; `tools.version` is not. A runtime
-  release by reference's `runtime.buildId` is not the base's either.
+  release by reference's `runtime.buildId` is not the base's either, and its
+  `kernel.patch` does not precede the base's (`comparePatchIds`).
 - **E4** `files[]` outside what the release owns is exactly the base's
   `files[]` outside it: the same paths, and for each path the same `bytes` and
   `sha256`. No path is missing and none is extra.
@@ -139,6 +140,16 @@ needs a full release by value (RELEASE-PIPELINE.md):
 The rules above bind each of those to the rest: `gate` to `kernel.commit` and
 `lean.wasm`, `runtime.buildId` to `lean.wasm`, the `lean-lib` entry to the
 kernel and build id (S6), and `tools.version` to the id (S5).
+
+**Pairing (git, not a record rule).** Whether a runtime release by reference's
+runtime may share its base's packs, `native64` and lists needs the kernel
+repository, so readers do not check it; staging (`stage-release.sh`) and
+`publish-release.mjs` do, both through `pairing` in `stage-by-reference.mjs`:
+`kernel.commit` descends from the base's, `docker-wasm64/` at it is the base's
+`docker.recipeCommit`, and the olean format's C++ is unchanged between the two.
+Staging also refuses a change to the stdlib's sources (`src/Init`, `src/Std`,
+`src/Lean`, `src/lake`, `stage0`) unless a note says why it is harmless; the
+note is recorded in `notes` (RELEASE.md).
 
 **Notes.** By convention `notes` lists the release's own notes first, then
 the base's notes verbatim. A runtime release by reference's staging inserts a

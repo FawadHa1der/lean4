@@ -7,7 +7,7 @@
 // "sha256:" + sha256(JSON.stringify(record without `digest`, null, 2)), so a
 // reader recomputes it from the parsed object (JSON.parse keeps key order).
 import { createHash } from "node:crypto";
-import { RELEASE_SCHEMA, buildIdFromSha256, isBuildId, isSha256Hex, parsePatchId } from "./artifact-id.mjs";
+import { RELEASE_SCHEMA, buildIdFromSha256, comparePatchIds, isBuildId, isSha256Hex, parsePatchId } from "./artifact-id.mjs";
 
 export const RELEASE_KEY_ORDER = Object.freeze([
   "schema", "id", "base", "lean", "kernel", "gate", "runtime", "packs", "native64",
@@ -74,7 +74,7 @@ function shared(k, r) {
  * checked first, so any other record is refused on that alone) and names no base of its own (E1);
  * it passes checkReleaseRecord; the fields the record's kind shares with its base equal the base's
  * (E2); tools.package is the base's, tools.version is not and, for a runtime release by reference,
- * runtime.buildId is not (E3); and the files it does not own are exactly the base's files outside
+ * runtime.buildId is not and kernel.patch does not precede the base's (E3); and the files it does not own are exactly the base's files outside
  * them (path, bytes, sha256: none missing, none extra; E4). Returns the problems (empty = the rule
  * holds), whatever the base's release.json holds. Pure: the caller reads the base's record from
  * wherever the base is.
@@ -102,6 +102,11 @@ export function checkRecutBase(r, b) {
   if (k === "runtime" && r.runtime?.buildId === b.runtime?.buildId) {
     p.push(`runtime.buildId ${r.runtime?.buildId} is the base's: a runtime release by reference ships its own runtime (a tools re-cut, -rN, keeps the base's)`);
   }
+  // ... and is a later build of the base's line: its patch id never precedes the base's (a malformed
+  // id is checkReleaseRecord's problem)
+  let earlier = false;
+  try { earlier = k === "runtime" && comparePatchIds(r.kernel?.patch, b.kernel?.patch) < 0; } catch {}
+  if (earlier) p.push(`kernel.patch ${r.kernel.patch} precedes the base's ${b.kernel.patch}: a runtime release by reference is a later build of the base's line`);
   // E4: an entry that is no object (null, say) is the base's structural problem above, never a crash here
   const theirFiles = new Map((Array.isArray(b.files) ? b.files : []).filter((f) => f && typeof f === "object" && !isOwnPath(r, f.path)).map((f) => [f.path, f]));
   for (const f of Array.isArray(r.files) ? r.files : []) {

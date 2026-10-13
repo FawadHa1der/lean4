@@ -33,9 +33,9 @@
 #                                                     recipe, an unchanged olean format, a kernel that
 #                                                     descends from the base's): its runtime/ and
 #                                                     lean-lib are rebuilt over the clones
-#   --stdlib-drift <note>   with --base --runtime: stdlib Lean sources (src/Init, src/Std, src/Lean)
-#                           changed since the base's kernel, and <note> says why that is harmless
-#                           (recorded in notes); refused when nothing changed
+#   --stdlib-drift <note>   with --base --runtime: the stdlib's sources (src/Init, src/Std, src/Lean,
+#                           src/lake, stage0) changed since the base's kernel, and <note> says why
+#                           that is harmless (recorded in notes); refused when nothing changed
 #   --out <dir>             parent of the release dir (default ../wasm64-lean-kernel-release)
 #
 # The release dir is <out>/<id>; beside it sit <id>.config.json (the release
@@ -194,7 +194,7 @@ SBR="$REPO/wasm64-build/stage-by-reference.mjs"   # the node steps (unit-tested:
 # the base: a first cut of $TAG, the record its tag holds, and HEAD descends from that tag
 pin_base() {
   BASE_REC_FIELDS="$(node "$SBR" base "$BASE_REC_FILE" "$TAG")" || die "the base at $BASE_REC_DIR cannot be the base of a release by reference (reason above)"
-  read -r BASE_REC_ID BASE_REC_DIGEST BASE_K BASE_WASM BASE_REC_LIB BASE_RECIPE <<<"$BASE_REC_FIELDS"
+  read -r BASE_REC_ID BASE_REC_DIGEST BASE_K BASE_WASM BASE_REC_LIB <<<"$BASE_REC_FIELDS"
   git rev-parse -q --verify "refs/tags/$BASE_REC_ID" >/dev/null \
     || die "tag $BASE_REC_ID is not in this repository (the base is pinned by its own tag): git fetch --no-tags origin refs/tags/$BASE_REC_ID:refs/tags/$BASE_REC_ID"
   git show "refs/tags/$BASE_REC_ID:wasm64-build/releases/$BASE_REC_ID.json" 2>/dev/null | cmp -s - "$BASE_REC_FILE" \
@@ -203,9 +203,9 @@ pin_base() {
     || die "HEAD does not descend from $BASE_REC_ID's record commit: cut the release on $LINE or on a branch off its base (publish refuses it otherwise)"
 }
 
-# the id is free, the tools come from a clean HEAD, and their version is $1
+# the id is free (else $2, a hint), the tools come from a clean HEAD, and their version is $1
 check_release_id() {
-  ! git rev-parse -q --verify "refs/tags/$ID" >/dev/null || die "tag $ID exists: that release is cut and immutable"
+  ! git rev-parse -q --verify "refs/tags/$ID" >/dev/null || die "tag $ID exists: that release is cut and immutable${2:+ ($2)}"
   [ -z "$(git status --porcelain -- wasm64-build/js wasm64-build/PATCHES.md)" ] || die "wasm64-build/js or PATCHES.md has uncommitted changes: the tools tarball comes from HEAD — commit them first"
   TOOLS_COMMIT="$(git rev-parse HEAD)"
   PKG_VERSION="$(node -p 'require(process.argv[1]).version' "$JS/package.json")"
@@ -273,7 +273,7 @@ stage_tools_by_reference() {
   C="$BASE_K"; WASM_SHA="$BASE_WASM"
   on_line "$C"
   K7="${C:0:7}"; ID="$BASE_REC_ID-r$RECUT"
-  check_release_id "$V-$K7-r$RECUT"
+  check_release_id "$V-$K7-r$RECUT" "re-cut with another --recut <n>"
   say "re-cut by reference $ID of $BASE_REC_ID (${BASE_REC_DIGEST:0:23}…): kernel ${C:0:10}, tools $PKG_VERSION at ${TOOLS_COMMIT:0:10}, mirror $BASE_REC_DIR"
   clone_base
   pack_tools
@@ -357,26 +357,22 @@ stage_runtime_by_reference() {
   [ -d "$R" ] || die "runtime build dir $R missing"
   R="$(cd "$R" && pwd)"
   runtime_identity
+  on_line "$C"
   # ---------- the guards: this runtime may share the base's packs, native64 and lists ----------
+  [ "$C" != "$BASE_K" ] \
+    || die "$R is a build of the base's kernel ${BASE_K:0:10}: a tools re-cut keeps the runtime (--recut <n> without --runtime)"
   [ "${C:0:7}" != "${BASE_K:0:7}" ] \
-    || die "$R is a build of the base's kernel ${BASE_K:0:10}: a tools-only re-cut keeps the runtime (--recut <n> without --runtime)"
-  git merge-base --is-ancestor "$BASE_K" "$C" 2>/dev/null \
-    || die "kernel commit ${C:0:10} does not descend from the base's kernel ${BASE_K:0:10}: a runtime release by reference is a later build of the base's line"
-  [ "$BASE_RECIPE" != - ] && [ "$(git log -1 --format=%H "$C" -- docker-wasm64)" = "$BASE_RECIPE" ] \
-    || die "docker-wasm64 at ${C:0:10} is not the base's recipe (${BASE_RECIPE:0:10}): the base's docker record would not describe this runtime's toolchain — a full import (RELEASE-PIPELINE.md)"
-  OLEAN_FORMAT=(src/include/lean/lean.h src/runtime/object.h src/runtime/compact.h src/runtime/compact.cpp src/library/module.cpp)
-  git diff --quiet "$BASE_K" "$C" -- "${OLEAN_FORMAT[@]}" \
-    || die "the olean format's C++ (${OLEAN_FORMAT[*]}) changed since the base's kernel ${BASE_K:0:10}: this runtime could misread the shared packs (their githash check is compiled off) — a full import (RELEASE-PIPELINE.md)"
-  DRIFT="$(git diff --name-only "$BASE_K" "$C" -- src/Init src/Init.lean src/Std src/Std.lean src/Lean src/Lean.lean)" \
-    || die "git diff $BASE_K $C failed (above)"
+    || die "kernel commit ${C:0:10} has the base's 7-hex prefix (${BASE_K:0:10}): its release id would be the base's, lean-$TAG-${C:0:7}"
+  # the guards publish runs again on the record: ancestry, the Docker recipe, the olean format; then the drift
+  DRIFT="$(node "$SBR" pairing "$BASE_REC_FILE" "$C")" \
+    || die "the runtime at ${C:0:10} cannot share $BASE_REC_ID's packs, native64 and lists (reason above)"
   if [ -n "$DRIFT" ] && [ -z "$STDLIB_DRIFT" ]; then
-    die "stdlib Lean sources changed since the base's kernel ${BASE_K:0:10} ($(printf '%s\n' "$DRIFT" | wc -l | tr -d ' ') files, e.g. $(printf '%s\n' "$DRIFT" | head -3 | paste -sd ' ' -)): the shared packs' oleans of those modules would lag this runtime's library further than the base's notes record. If that is harmless (the runtime runs its own compiled code for them), say why: --stdlib-drift <note>, which is recorded in notes"
+    die "the stdlib's sources changed since the base's kernel ${BASE_K:0:10} ($(printf '%s\n' "$DRIFT" | wc -l | tr -d ' ') files, e.g. $(printf '%s\n' "$DRIFT" | head -3 | paste -sd ' ' -)): the shared packs' oleans of those modules would lag this runtime's library further than the base's notes record. If that is harmless (the runtime runs its own compiled code for them), say why: --stdlib-drift <note>, which is recorded in notes"
   elif [ -n "$DRIFT" ]; then
     NOTES+=("$STDLIB_DRIFT")
   elif [ -n "$STDLIB_DRIFT" ]; then
-    die "no stdlib Lean source changed since the base's kernel ${BASE_K:0:10}: drop --stdlib-drift" 2
+    die "none of the stdlib's sources changed since the base's kernel ${BASE_K:0:10}: drop --stdlib-drift" 2
   fi
-  on_line "$C"
   PATCH="$(patch_id_of "$C")" || die "the patch id of $C cannot be placed from PATCHES.md at HEAD (reason above)"
   K7="${C:0:7}"; ID="lean-$TAG-$K7"
   check_release_id "$V-$K7"
@@ -409,14 +405,13 @@ R2 (the shared files copied server-side from the base's prefix, then the own fil
 EOF
 }
 
-if [ -z "$BASE_REC_DIR" ]; then
-  [ -z "$STDLIB_DRIFT" ] || die "--stdlib-drift goes with --runtime <build dir> --base <mirror> (a runtime release by reference)" 2
-else
+[ -z "$STDLIB_DRIFT" ] || { [ -n "$BASE_REC_DIR" ] && [ -z "$RECUT" ]; } \
+  || die "--stdlib-drift goes with --runtime <build dir> --base <mirror> (a runtime release by reference)" 2
+if [ -n "$BASE_REC_DIR" ]; then
   [ -z "$RECUT" ] || [ -z "$R_GIVEN" ] \
-    || die "--base with --runtime is a runtime release by reference, the first cut of its kernel commit: drop --recut (a tools-only re-cut keeps the base's runtime: --recut without --runtime)" 2
-  [ -n "$RECUT" ] || [ -n "$R_GIVEN" ] || die "--base needs --recut <n> (a tools-only re-cut) or --runtime <build dir> (a runtime release by reference)" 2
+    || die "--base with --runtime is a runtime release by reference, the first cut of its kernel commit: drop --recut (a tools re-cut keeps the base's runtime: --recut without --runtime)" 2
+  [ -n "$RECUT" ] || [ -n "$R_GIVEN" ] || die "--base needs --recut <n> (a tools re-cut) or --runtime <build dir> (a runtime release by reference)" 2
   [ ${#BY_VALUE[@]} -eq 0 ] || die "--base excludes ${BY_VALUE[0]}: a release by reference takes every file and field it does not own from its base" 2
-  [ -z "$STDLIB_DRIFT" ] || [ -z "$RECUT" ] || die "--stdlib-drift goes with --runtime <build dir> --base <mirror> (a runtime release by reference)" 2
   [ ${#NOTES[@]} -gt 0 ] || die "--base needs at least one --note: what this release changes (the base's notes follow)" 2
   for n in "${NOTES[@]}"; do [ -n "$n" ] || die "--note needs a text" 2; done
   # QED64_BUILD_DIR, the import build dir and Docker are not read
