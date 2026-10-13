@@ -890,7 +890,34 @@ exist (`-mllvm -enable-scalar-pre=false`, `-mllvm -jump-threading-threshold=0`) 
 - 0036's engine-stack probe catches its own RangeError in JS and is unaffected; unwinding a C++
   throw near the limit needs ~0.6 KB instead of 25–47 KB, so the guard's 128 KiB reserve only gains.
 
-**Gate**: the kernel deep-recursion probe no longer overflows Chrome's stack at its old size (the
-kernel's own check got ~2x cheaper in stack): re-sized (below) so the two kernel checks keep testing
-the guard. **To be measured on the first build**: sizes, gate, stack margins (stack-margin.mjs),
-the perf A/B, the persistent-mode case, the guard's own run time.
+**Gate**: the kernel deep-recursion probe (`js/probes/deep-recursion-kernel.lean`) no longer
+overflowed Chrome's stack at Fin 120 — the kernel's check got ~2x cheaper in stack — so it is
+Fin 320 now (on 0040: Fin 160-320 trip the guard at 0.68 MiB, Fin 240 checks at 0.9, Fin 320 still
+trips at 1.0), and the two kernel checks (the kernel's error; the kernel guard's counted refusal)
+keep testing the guard. Every other check passes unchanged.
+
+**Measured** on the first build (64d6ebb7b4, build id `wasm64-086ef19b1135d43b`, 2026-10-13, host
+Node 26.3), against 0039b's (570d16f926):
+- Sizes: `lean.wasm` 106,335,440 bytes (108,059,248), `lean.js` 119,980 (146,441). The link adds no
+  undefined symbol; the funclet guard passed: 3 controls differ; 123 C++ translation units, libc++
+  57, libc++abi 19 and libunwind 1 sources identical. Gate: 56 checks passed.
+- Speed (one file, `Elab.async false`, 3 alternating runs each, phases by `IO.monoMsNow`; same
+  output): interpreted `#eval fib 27` 948-951 ms → 164-167 ms; 30 `omega` + 2 `simp` + `decide`
+  over Fin 6 1112-1124 → 452-503 ms; `decide +kernel` over Fin 60 × Fin 60 2182-2219 → 644 ms (one
+  run 1058); the whole run 7.4-8.8 s → 4.0-4.6 s. Boot and `import Lean` unchanged.
+- Stack margins (`stack-margin.mjs`, MiB, survives / passes; Chrome 0.68):
+
+  | probe | 0039b | 0040 |
+  |---|---|---|
+  | `decide`, Fin 40 × Fin 40 | 0.427 / 0.998 | 0.427 / 1.042 |
+  | 25 nested `have … := by` | 0.661 / 2.917 | 0.661 / 2.683 |
+  | `<;>` chain of 25 `trivial` | 0.427 / 1.174 | 0.427 / 1.086 |
+  | `decide +kernel`, Fin 120 × Fin 120 | 0.427 / 1.233 | 0.427 / 0.647 |
+
+  The guard's floor does not move; the kernel check now fits Chrome's stack at that size; the
+  elaborator probes need 7-8% less; the Meta `decide` probe 4% more (deterministic; not explained).
+- Persistent mode (`persistent-probe --cases ok, task overflow, ok`): 0039b ends the overflow case
+  in `unwind` and goes on; 0040 aborts (`ABORT:`), as described above.
+
+**Still to be measured** (by the hosts, on the staged release): Chrome and Firefox (QED64), the
+lean4game lanes, the proof sheets' Chrome lane.
