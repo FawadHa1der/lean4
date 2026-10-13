@@ -87,16 +87,20 @@ for l in "${LIBS[@]}"; do
   python3 - "$OUT/libs/$l.log" "$OUT/libs/$l" "$LIBCWD" "$NOCLN" > "$OUT/libs/$l.jobs.sh" <<'PY'
 import os, shlex, sys
 log, out, cwd, nocln = sys.argv[1:5]
+# a line is `"<emscripten>/em++" -c <flags> <sources...>` (quoted or not; libc++ batches many sources)
 n = 0
 for line in open(log):
     a = line.strip()
-    if not a.startswith('"') or " -c " not in f" {a} ": continue
+    if not a.startswith(('"', '/')) or " -c " not in f" {a} ": continue
     args = shlex.split(a)
     if not os.path.basename(args[0]).startswith(("emcc", "em++")): continue
-    src = args[-1]; n += 1
-    for mode, extra in (("base", []), ("nocln", nocln.split())):
-        o = os.path.join(out, mode, f"{n:04d}-{os.path.basename(src)}.o")
-        print(f"mkdir -p {shlex.quote(os.path.dirname(o))} && cd {shlex.quote(cwd)} && {shlex.join(args + extra + ['-o', o])}")
+    srcs = [x for x in args[1:] if not x.startswith("-") and x.endswith((".c", ".cpp", ".cc", ".cxx", ".S", ".s"))]
+    flags = [x for x in args if x not in srcs]
+    for src in srcs:
+        n += 1
+        for mode, extra in (("base", []), ("nocln", nocln.split())):
+            o = os.path.join(out, mode, f"{n:04d}-{os.path.basename(src)}.o")
+            print(f"mkdir -p {shlex.quote(os.path.dirname(o))} && cd {shlex.quote(cwd)} && {shlex.join(flags + [src] + extra + ['-o', o])}")
 PY
   NL="$(grep -c . "$OUT/libs/$l.jobs.sh" || true)"
   [ "$NL" -gt 0 ] || { say "$l: no compile commands in embuilder -v output ($OUT/libs/$l.log): method blind"; fail=1; continue; }
