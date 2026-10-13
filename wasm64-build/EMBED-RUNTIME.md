@@ -338,11 +338,9 @@ array throws exactly when that much stack is no longer free) at its recursion ch
 kernel's depth guard and Meta's `Core.checkSystem` — and raises its own error there: Meta's
 max-recursion error, or the kernel's "the WebAssembly engine's stack is exhausted". So a proof that
 recurses deeper than a browser allows fails with an error, and the session survives; whether it
-fits depends on the engine, and since 0039 a little on how warm the session is: V8 enters a wasm
-function from the runtime's C++-exception trampolines through its generic wrapper until it has
-done so 1,000 times, which costs the elaborator ~5% more stack per level in a session's first
-proofs (r3's ~106k exports had those wrappers compiled at instantiation; PATCHES.md 0039).
-Recursion that passes no checkpoint (the IR interpreter, some
+fits depends on the engine. (0039's runtime alone needed ~5% more stack in a session's first
+proofs, from V8's generic wrapper on the C++-exception trampolines; 0040's native exceptions have
+no trampolines. PATCHES.md 0039, 0040.) Recursion that passes no checkpoint (the IR interpreter, some
 expression traversals) can still overflow, as native Lean can abort there. Headless, the
 node-runner knob `LEAN4_WASM64_PTHREAD_STACK_MB=0.68` gives the pthreads Chrome's budget. Since
 0038 a host can read how often the guard asked and refused: `_lean_wasm_engine_probes()` and
@@ -363,6 +361,19 @@ node-runner knob `LEAN4_WASM64_PTHREAD_STACK_MB=0.68` gives the pthreads Chrome'
   re-load `lean.js` as a CommonJS script; under a `"type": "module"` package
   each dies with `require is not defined`). `lean4-wasm64 fetch --only runtime`
   writes it.
+
+**C++ exceptions are native Wasm exceptions (0040), legacy encoding.** No JS trampolines sit
+between the runtime's wasm frames any more. What a host can observe differently from 0039 and
+before (PATCHES.md 0040):
+- `abort()` escapes as `RuntimeError: unreachable` (was `Aborted(...)`); `onAbort` and its printed
+  line are unchanged — classify aborts by `onAbort`, not by the error text.
+- A V8 stack overflow still kills only its pthread (no C++ handler runs); an Emscripten `"unwind"`
+  or `ExitStatus` now runs C++ destructors on its way out, and one crossing a `noexcept` frame
+  aborts the runtime: in persistent mode (`lean_wasm_compile`) a task pthread that overflows while
+  the main runtime thread waits in `Task.get` gives `onAbort`, not a survivable `unwind`.
+- Firefox logs a legacy-EH deprecation warning each time `lean.wasm` is instantiated (the host's
+  worker and each pthread Worker). Browser floors are unchanged (Memory64's).
+- An uncaught C++ exception reaches JS as a `WebAssembly.Exception`.
 
 ## 7. QED64 behaviour inside the runtime
 

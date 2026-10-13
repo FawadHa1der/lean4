@@ -119,8 +119,10 @@ re-derived on any future base revision.
 
 ## Explicitly unchanged
 
-- JS-exception mode stays (`-sDISABLE_EXCEPTION_CATCHING=0`);
-  `-fwasm-exceptions` is a known miscompile on this tree under emsdk 6.
+- ~~JS-exception mode stays (`-sDISABLE_EXCEPTION_CATCHING=0`);
+  `-fwasm-exceptions` is a known miscompile on this tree under emsdk 6.~~
+  Replaced by 0040: native Wasm exceptions, legacy encoding. The "miscompile" was wasm-ld's
+  signature-mismatch stubs (fixed by aaa039aec9 and b6b649fe64), which trap in every EH mode.
 - ~~`MAIN_MODULE=2` + explicit exports stays (the interpreter's dlsym contract).~~
   Replaced by 0039: a static link, the native-symbol table for the interpreter,
   and exports that are the JavaScript contract.
@@ -746,9 +748,8 @@ stack it survives and passes with: r3 against the first build below.
   `--no-wasm-generic-wrapper` the two builds reach the same depth (25 nested `have` at 2.0 MiB:
   206 and 206 levels with default tiering, 194 and 194 Liftoff-only; the chain at 0.9 MiB: 90 and
   90), against 206 / 195 and 90 / 84 without. So only the first ~1,000 entries of a function
-  through a trampoline cost the extra stack: the first proofs of a session. Left as it is; the
-  remedies would be exports kept for their signatures only, or native Wasm exceptions (no
-  trampolines at all), each a change of its own.
+  through a trampoline cost the extra stack: the first proofs of a session. Left as it is in
+  0039; 0040 (native Wasm exceptions) removes the trampolines, and with them this effect.
 - **Gate**: G6 `symtabProbe 20000` 24 ms (0039b: native `Lean.Name.append`).
 
 **Still to be measured**: the per-Worker JS heap and renderer RSS in Chrome (QED64's HARDENING #55
@@ -830,3 +831,66 @@ finding to explain (above), not to recalibrate away.
 separate): G6 24 ms; the stack margins, whose overflow traces show no interpreter frame, so 0039b
 does not move them. **Still to be measured**: the persistent compile and init replay timings
 against r3, QED64's compiler battery.
+
+## 0040 — wasm: native Wasm exceptions (legacy encoding), with a per-build funclet guard (45f3669d64)
+
+The runtime's C++ (kernel, IR interpreter, task manager, compactor, libc++) is compiled with
+`-fwasm-exceptions -sWASM_LEGACY_EXCEPTIONS=1` instead of Emscripten's JS-based exceptions
+(`-sDISABLE_EXCEPTION_CATCHING=0`). Under the JS mode every call out of a C++ frame with a landing
+pad (a destructor or a `catch`; 6,124 call sites in 679 functions of the 0039b binary) went
+wasm → JS `invoke_<sig>` trampoline → JS-to-wasm → callee, ~40 ns and three extra engine frames
+each, with BigInt conversion of every 64-bit argument; a C++ throw was a JS throw caught by the
+nearest trampoline. Now a throw is a wasm `throw` with the C++ tag and the engine unwinds. Generated
+Lean C has no EH and compiles to the same objects (only function indices shift in the link).
+Research and measurements behind the decision (2026-10-13, scratch relinks of 0039b's tree, Node
+26.3): interpreted code ~6x, elaboration ~2.4x and `decide +kernel` ~3.4x faster, import unchanged;
+glue −26 KB, `lean.wasm` −1.8%; 95 `invoke_*` and 13 EH-helper imports gone.
+
+**Why the legacy encoding.** It keeps the floors (Chrome/Edge 95+, Firefox 100+, Node 17+; this
+runtime's own floor stays Memory64's: Chrome 133, Firefox 134, Node 24); exnref, the standardised
+encoding, would raise Chrome/Edge to 137 and Node to 24.15, and Emscripten's maintainers call it less
+mature. Legacy is "deprecated" in the spec but shipped by V8 and SpiderMonkey with no removal date;
+SpiderMonkey logs a deprecation warning per instantiation (console noise). The flag is pinned so
+an Emscripten default flip cannot move the floor; a later move to exnref is a recompile of the C++.
+
+**The old "miscompile"** (the comment this patch replaces; PATCHES "Explicitly unchanged"): both
+recorded traps — `initialize_Lean_Shell` (upstream 1aa6036d1f, 2026-01) and
+`readModuleDataPartsOfMod` (780a1d556f, 2026-07) — were direct calls from generated C to externs
+with another arity. wasm-ld binds such a call to a `signature_mismatch:` stub whose body is
+`unreachable` (a warning, not an error) and Binaryen inlines it at -O3; that traps in every EH mode
+and was fixed by correcting the externs (aaa039aec9, b6b649fe64). Native EH was not retried after.
+0039's check-link (B3) fails a build on such a stub, and today's tree has none.
+
+**The funclet guard** (`check-eh-funclets.sh`, build.sh step 5b). Wasm EH uses LLVM's funclet IR,
+where WinEHPrepare rewrites a call inside a catch handler that lacks its funclet bundle into
+`unreachable`; two open LLVM bugs create such calls (#226286 GVN scalar PRE, #229448 JumpThreading;
+both reproduce on emsdk 6.0.5 at -O2/-O3, silently). The guard compiles every C++ translation unit
+of the build (exact commands from `compile_commands.json`, now exported) and the EH-mode system
+libraries (libc++, libc++abi, libunwind via embuilder) a second time with `-mllvm -disable-cleanups`,
+which switches that rewrite off: the objects must be identical, and three positive controls
+(`eh-funclet-controls/`, the two bugs' shapes) must differ, or the build fails. Workaround flags
+exist (`-mllvm -enable-scalar-pre=false`, `-mllvm -jump-threading-threshold=0`) if it ever fires.
+
+**What changes on failure paths** (hosts: EMBED-RUNTIME.md §6):
+- A V8 stack overflow (`RangeError`) is unchanged: V8 marks it uncatchable by wasm, so no C++
+  handler or destructor runs and the pthread dies as before; traps likewise.
+- A catchable JS exception crossing C++ frames — Emscripten's `"unwind"` (a pthread's `exit()`, a
+  thread woken after another thread crashed) or `ExitStatus` — now runs the destructors of the frames
+  it crosses (it passed through untouched before); `catch (...)` still does not catch it.
+- Such an exception crossing a `noexcept` frame now ends in `std::terminate` → `abort()`. Measured:
+  in persistent mode (`lean_wasm_compile` on the main runtime thread, 0037), a task pthread that
+  overflows while the main thread waits in `Task.get` (libc++ `condition_variable::wait`, noexcept)
+  now aborts the runtime (`onAbort`) where it ended in `unwind` before. QED64 decided (2026-10-13)
+  to report it as a runtime abort (its persistent mode runs only the header compile in the browser).
+- `abort()` escapes as `RuntimeError: unreachable` instead of `RuntimeError: Aborted(...)`;
+  `onAbort` and its printed line are unchanged. An uncaught C++ exception reaches JS as a
+  `WebAssembly.Exception` (before: Emscripten's `CppException`), both without a message.
+- An indirect call with the wrong arity traps in `call_indirect`; through a JS trampoline surplus
+  arguments used to be dropped silently.
+- 0036's engine-stack probe catches its own RangeError in JS and is unaffected; unwinding a C++
+  throw near the limit needs ~0.6 KB instead of 25–47 KB, so the guard's 128 KiB reserve only gains.
+
+**Gate**: the kernel deep-recursion probe no longer overflows Chrome's stack at its old size (the
+kernel's own check got ~2x cheaper in stack): re-sized (below) so the two kernel checks keep testing
+the guard. **To be measured on the first build**: sizes, gate, stack margins (stack-margin.mjs),
+the perf A/B, the persistent-mode case, the guard's own run time.
