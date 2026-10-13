@@ -40,7 +40,8 @@ test("committed records: valid, digests unchanged now that `base` is in the key 
   for (const r of committed) {
     assert.deepEqual(checkReleaseRecord(r), [], r.id);
     assert.equal(resign(r).digest, r.digest, r.id);
-    assert.equal(r.base, undefined, r.id);
+    // a committed release by reference (r3) also passes the comparison with its committed base
+    if (r.base !== undefined) assert.deepEqual(checkRecutBase(r, byId(r.base.id)), [], r.id);
   }
   assert.deepEqual(RELEASE_KEY_ORDER.slice(0, 3), ["schema", "id", "base"]);
   for (const a of [RELEASE_KEY_ORDER, RECUT_OWN_DIRS, RECUT_SAME_KEYS, RECUT_SAME_GATE_KEYS]) assert.ok(Object.isFrozen(a));
@@ -216,5 +217,7 @@ test("older readers fail closed: -r2's own checker refuses `base` (unknown key)"
   const r = recutOf(BASE);
   const p = olderReader.checkReleaseRecord(r);
   assert.ok(p.some((q) => /unknown keys: base/.test(q)), JSON.stringify(p));
-  for (const old of committed) assert.deepEqual(olderReader.checkReleaseRecord(old), [], old.id); // and nothing else changed for it
+  // and nothing else changed for the records without base; the committed r3 it refuses on `base`
+  for (const old of committed.filter((x) => x.base === undefined)) assert.deepEqual(olderReader.checkReleaseRecord(old), [], old.id);
+  for (const r3 of committed.filter((x) => x.base !== undefined)) assert.ok(olderReader.checkReleaseRecord(r3).includes("unknown keys: base"), r3.id);
 });
