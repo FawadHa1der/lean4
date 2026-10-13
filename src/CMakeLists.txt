@@ -201,32 +201,35 @@ if(CMAKE_SYSTEM_NAME MATCHES "Emscripten")
 
   # From https://emscripten.org/docs/compiling/WebAssembly.html#backends:
   # > The simple and safe thing is to pass all -s flags at both compile and link time.
-  # -fwasm-exceptions uses native WASM exception handling instead of the
-  # JS-emulated kind (-sDISABLE_EXCEPTION_CATCHING=0), which routes every
-  # potentially-throwing call through a JS invoke_* trampoline. Lean's
-  # runtime is exception-heavy, so the emulated mode dominated profiles of
-  # olean import loading in the browser.
-  # No -flto: it OOMs the CI runner during the LTO link, so -mtail-call stands in
-  # as the codegen optimization. The maximum is configured below: wasm32 uses
-  # 4GB, while wasm64 defaults to a 12GB operational ceiling. Current engines
-  # and Emscripten can grow shared memory; keep INITIAL_MEMORY modest so startup
-  # does not commit the full working set.
+  # No -flto: it OOMs the CI runner during the LTO link. The maximum is
+  # configured below: wasm32 uses 4GB, while wasm64 defaults to a 12GB
+  # operational ceiling. Current engines and Emscripten can grow shared memory;
+  # keep INITIAL_MEMORY modest so startup does not commit the full working set.
   # INCOMING_MODULE_JS_API: emsdk 6 strictly validates Module keys supplied by
     # the embedder; the playground workers set all of these before load.
     # Threads: 4.33's import machinery creates IO.Promises during env
     # realization, and without LEAN_MULTI_THREAD the task manager is a no-op,
     # so Promise.new panics by design. A single-thread (no COOP/COEP, phone-
     # sized) build needs a sequential task manager upstream first.
-    # JS-based EH: -fwasm-exceptions still miscompiles this tree on emsdk 6 —
-    # the first compile traps `unreachable` inside readModuleDataPartsOfMod
-    # (exception-heavy part-probing) in 10ms, silently, heap tiny, in both the
-    # pthread and single-thread configs; the native i386 build of the same
-    # sources is fine. Same class of bug 1aa6036d1f dodged on emcc 4.0.22.
+    # Native Wasm exception handling (patch 0040), in the legacy encoding
+    # (try/catch/rethrow: Chrome 95+, Firefox 100+, Node 17+; exnref would need
+    # Chrome 137), pinned so that an Emscripten default flip cannot move the
+    # browser floor. The JS-based mode (-sDISABLE_EXCEPTION_CATCHING=0) routed
+    # every call out of a C++ frame with a landing pad through a JS invoke_*
+    # trampoline: ~40 ns and a JS frame plus two wrapper frames each. The old
+    # note here that -fwasm-exceptions "miscompiles this tree" was a misreading:
+    # both recorded traps (1aa6036d1f, 780a1d556f) were wasm-ld signature-mismatch
+    # stubs inlined at -O3, in every EH mode, fixed by aaa039aec9 and b6b649fe64.
+    # Two open LLVM bugs (#226286, #229448) can turn a call in a catch handler
+    # into `unreachable` under native EH: wasm64-build/check-eh-funclets.sh
+    # (build.sh step 5b) proves per build that they did not fire.
     # EMSCRIPTEN_SETTINGS holds only flags that change CODEGEN and therefore
     # must reach every compile: -pthread (atomics/TLS) and the EH mode. Flags
     # that only shape the final JS/wasm output live in EMSCRIPTEN_LINK_SETTINGS
     # so that link-only experiments keep the ccache'd objects valid.
-    set(EMSCRIPTEN_SETTINGS "-sDISABLE_EXCEPTION_CATCHING=0 -pthread")
+    set(EMSCRIPTEN_SETTINGS "-fwasm-exceptions -sWASM_LEGACY_EXCEPTIONS=1 -pthread")
+    # the funclet guard recompiles every C++ translation unit with its exact command
+    set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
     if(CMAKE_SIZEOF_VOID_P EQUAL 8)
       # CMAKE_{C,CXX}_FLAGS=-m64 must also be present at configure time so
       # CMake detects the target pointer width correctly. Repeating it here

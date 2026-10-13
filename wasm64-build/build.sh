@@ -66,6 +66,11 @@ ls -la "$BUILD_DIR/build/stage1/bin/" | grep -E "lean\.(js|wasm)"
 # map it reads, bin/lean.js.symbols, stays in the build tree (the crash-triage map; not released).
 python3 "$REPO/wasm64-build/check-link.py" "$BUILD_DIR/make-lean.log" "$BUILD_DIR/build/stage1/bin" \
   "$STAGE1_TEMP/lean_wasm_symtab.c" "$REPO/wasm64-build/link-undefined-allowlist.txt"
+echo "=== [5b/5] native-EH funclet guard ==="
+# Patch 0040: no catch-handler call may have become `unreachable` (open LLVM bugs #226286, #229448):
+# every C++ translation unit and the EH-mode system libraries, compiled again with the rewrite off,
+# must be identical. Fails the build otherwise; skips itself on a JS-EH build.
+run "/lean4/wasm64-build/check-eh-funclets.sh /build/stage1 /build/eh-funclet-check" 2>&1 | tee "$BUILD_DIR/eh-funclet-check.log"
 # docs or tools may be committed during a long build; the sources may not move
 EMBEDDED="$(sed -n 's/^#define LEAN_GITHASH "\([0-9a-f]*\)".*/\1/p' "$BUILD_DIR/build/stage1/githash.h" 2>/dev/null || true)"
 if [ -n "$START_COMMIT" ] && clean_sources && git -C "$REPO" diff --quiet "$START_COMMIT" HEAD -- "${SRC_PATHS[@]}" \
