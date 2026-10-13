@@ -53,7 +53,7 @@ export function baseProblems(b, tag) {
   if (!m || m[1] !== tag || m[3]) p.push(`it is ${b?.id}, not a first cut of ${tag} (lean-${tag}-<kernel7>): a release by reference names a first cut`);
   if (b?.base !== undefined) p.push(`it names a base of its own (${b.base?.id}): a base names no base of its own`);
   if (b?.tools?.package !== "lean4-wasm64") p.push(`its tools are ${JSON.stringify(b?.tools?.package)}, not lean4-wasm64: a release by reference ships the base's package`);
-  if (!(b?.packs ?? []).find((k) => k?.id === "lean-lib")) p.push("it has no lean-lib pack: the new tools are gated on the base's runtime and its lean-lib");
+  if (!(b?.packs ?? []).find((k) => k?.id === "lean-lib")) p.push("it has no lean-lib pack: a tools re-cut gates its tools on the base's lean-lib, and a runtime release by reference replaces it with its own");
   return p;
 }
 
@@ -227,7 +227,7 @@ export function byReferenceConfig(b, { id, recut, runtime = null, checks, versio
     id, upstreamTag: b.lean.upstreamTag, kernelCommit, kernelPatch: runtime ? runtime.kernelPatch : b.kernel.patch,
     kernelRepo: b.kernel.repo, kernelBranch: b.kernel.branch, ...(runtime ? {} : { recut: Number(recut) }), base: { id: b.id, digest: b.digest },
     leanVersion: b.lean.version,
-    gate: runtime ? { commit: kernelCommit, wasmSha256: runtime.wasmSha256, checks: count } : { commit: b.gate.commit, wasmSha256: b.gate.wasmSha256, checks: count },
+    gate: { commit: kernelCommit, wasmSha256: runtime?.wasmSha256 ?? b.gate.wasmSha256, checks: count },
     packs: b.packs.map((p) => (runtime && p.id === "lean-lib" ? { id: "lean-lib", compiler: kernelCommit } : entry(p))),
     native64: b.native64, docker: b.docker, mathlib: b.mathlib, modules: b.modules, hosting: b.hosting,
     tools: { package: "lean4-wasm64", version, tgz: `tools/${tgz}`, commit },

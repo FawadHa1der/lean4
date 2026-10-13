@@ -67,7 +67,9 @@ test("byReferenceKind / isOwnPath / ownLabel: the kind comes from id and base.id
   assert.equal(byReferenceKind({ ...r3, base: { ...r3.base, id: "lean-v4.34.0-41ec565" } }), "runtime");
   assert.equal(byReferenceKind({ id: BASE.id, base: null }), "runtime");
   for (const p of ["runtime/x", "profiles/lean-lib.manifest.json", "profiles/lean-lib.pack.gzip.a.part-000", "tools/t.tgz"]) assert.equal(isOwnPath(runtime, p), true, p);
-  for (const p of ["profiles/lean-core.manifest.json", "profiles/lean-libx.manifest.json", "lists/x", "native64/x", "runtimex/y", undefined, 7]) assert.equal(isOwnPath(runtime, p), false, String(p));
+  // lean-lib's files are pack-set's exact names: a pack whose id only starts with "lean-lib." is shared
+  for (const p of ["profiles/lean-core.manifest.json", "profiles/lean-libx.manifest.json", "profiles/lean-lib.extra.manifest.json",
+    "profiles/lean-lib.extra.pack.gzip.a.part-000", "profiles/lean-lib.pack", "lists/x", "native64/x", "runtimex/y", undefined, 7]) assert.equal(isOwnPath(runtime, p), false, String(p));
   for (const p of ["tools/x.tgz", "toolsx/y", "runtime/x", "profiles/lean-lib.manifest.json", "tools", undefined, 7]) assert.equal(isOwnPath(r3, p), isRecutOwnPath(p), String(p));
   for (const p of ["runtime/x", "lists/x", "anything", ""]) assert.equal(isOwnPath(BASE, p), true, p);
   assert.equal(isOwnPath(BASE, undefined), false);

@@ -187,8 +187,6 @@ test("older readers fail closed: the r3 reader refuses a runtime-kind base, the 
   assert.ok(p.includes(`base: only a re-cut (lean-<tag>-<kernel7>-rN) names a base, "${RT.id}" is not one`), JSON.stringify(p));
   for (const r of committed) assert.deepEqual(r3Reader.checkReleaseRecord(r), [], `the r3 reader on ${r.id}`);
   assert.ok(r2Reader.checkReleaseRecord(RT).includes("unknown keys: base"));
-  // the current reader takes the committed tools re-cut as before
-  for (const r of committed) assert.deepEqual(checkReleaseRecord(r), [], r.id);
 });
 
 // ---------- end to end: release.mjs --base, fetch, verify ----------

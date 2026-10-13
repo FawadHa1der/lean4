@@ -129,10 +129,10 @@ const own = source(from, arg("layout"));
 const { layout } = own;
 if (!["served", "flat"].includes(layout)) { console.error("fetch: --layout must be served or flat"); process.exit(2); }
 // A release by reference read from its flat (GitHub) release: every file it does not own is its
-// base's, routed by path, never by a fallback after a miss. Set once the base's record is checked
-// (ownFile: once the record is checked structurally).
+// base's, routed by path, never by a fallback after a miss. ownFile is set once the record is
+// checked structurally, baseSource (only after that) once the base's record is checked.
 let baseSource = null;
-let ownFile = () => true;
+let ownFile = null;
 const sourceOf = (relPath) => (baseSource && relPath !== "release.json" && !ownFile(relPath) ? baseSource : own);
 
 async function openSource(relPath, src = sourceOf(relPath)) {

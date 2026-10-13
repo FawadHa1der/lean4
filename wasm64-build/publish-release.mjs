@@ -222,9 +222,9 @@ export function splitFiles(record) {
  * The R2 lists of a release by reference, each split by the content type HOSTING.md serves it with:
  * its shared paths (`objects`, `manifests`: a server-side copy keeps each object's), and its own
  * paths but release.json and SHA256SUMS (`ownObjects`, `ownManifests`: uploaded with that type).
+ * `split` is splitFiles(record), when the caller has it.
  */
-export function r2Lists(record) {
-  const { own, shared } = splitFiles(record);
+export function r2Lists(record, { own, shared } = splitFiles(record)) {
   const mine = own.filter((p) => p !== "release.json" && p !== "SHA256SUMS");
   const of = (paths, type) => paths.filter((p) => contentTypeOf(p) === type);
   return { objects: of(shared, "application/octet-stream"), manifests: of(shared, "application/json"),
@@ -732,7 +732,8 @@ async function preflight(o) {
     }
     const dir = tempDir();
     const { own, shared } = splitFiles(record);
-    const { objects, manifests, ownObjects, ownManifests } = r2Lists(record);
+    const { objects, manifests, ownObjects, ownManifests } = r2Lists(record, { own, shared });
+    const sharedSet = new Set(shared);
     const lists = { dir, own: writeList(path.join(dir, "own.txt"), own), shared: writeList(path.join(dir, "shared.txt"), shared),
       objects: writeList(path.join(dir, "shared.objects"), objects), manifests: writeList(path.join(dir, "shared.manifests"), manifests),
       ownObjects: writeList(path.join(dir, "own.objects"), ownObjects),
@@ -742,7 +743,7 @@ async function preflight(o) {
     fs.writeFileSync(file, at.text);
     ctx.base = {
       id: record.base.id, digest: record.base.digest, record: at.record, text: at.text, where: at.where, file,
-      prefix: `${o.r2}/${record.base.id}/`, own, shared, sharedFiles: record.files.filter((f) => !isOwnPath(record, f.path)), lists,
+      prefix: `${o.r2}/${record.base.id}/`, own, shared, sharedFiles: record.files.filter((f) => sharedSet.has(f.path)), lists,
     };
   }
   // the staged bytes are what will be published: check them whole before anything else

@@ -433,6 +433,7 @@ const BASE_ID = "lean-v4.34.0-abcdef1", RECUT_ID = `${BASE_ID}-r3`, RECUT_TGZ = 
 // the runtime release by reference: a later kernel commit, its own build dir
 const RT_KERNEL = "1234567890abcdef1234567890abcdef12345678", RT_ID = "lean-v4.34.0-1234567", RT_VERSION = "4.34.0-1234567";
 const RT_TGZ = `lean4-wasm64-${RT_VERSION}.tgz`;
+const LEAN_CORE_COMPILER = "8d91aadcda8a0b231e47c42d4ff4b9b8360563aa"; // the base's shared pack's compiler (recorded, never compared)
 /** The runtime build's lib/lean: the 8 roots of packs.json's lean-lib, each with real imports inside the tree. */
 const LEAN_LIB = { Init: ["Init.Prelude"], "Init.Prelude": [], Std: ["Init"], Lean: ["Std"], Lake: ["Lean"], LakeMain: ["Lake"], LeanChecker: ["Lean"], LeanIR: ["Lean"], Leanc: ["Lean"] };
 // the script runs with PATH=<shims>:/usr/bin:/bin
@@ -499,6 +500,8 @@ fs.rmSync(tmp, { recursive: true, force: true });
 process.exitCode = r.status ?? 1;
 `,
   gh: `${SHIM_HEAD}log({ tool: "gh", argv: process.argv.slice(2) });\n`,
+  // staging by reference never calls Docker: a call is recorded (and fails)
+  docker: `${SHIM_HEAD}log({ tool: "docker", argv: process.argv.slice(2) }); process.exitCode = 97;\n`,
   rclone: `${SHIM_HEAD}log({ tool: "rclone", argv: process.argv.slice(2) });\n`,
 };
 const GATE_STANDIN = `import fs from "node:fs"; import path from "node:path";
@@ -521,7 +524,8 @@ function world() {
     const r = spawnSync(process.execPath, [path.join(pkg, script), ...args], { encoding: "utf8", timeout: 60_000 });
     assert.equal(r.status, 0, `${script}: ${r.stderr}${r.stdout}`);
   };
-  // the base: a small first cut, released by release.mjs (a lean-lib pack, so that the gate has its tree)
+  // the base: a small first cut, released by release.mjs (a lean-lib pack, so that the gate has its tree,
+  // and a shared pack, lean-core, which a runtime release by reference keeps beside its own lean-lib)
   const mirror = path.join(S, "base mirror", BASE_ID);
   const bin = path.join(S, "src", "bin");
   fs.mkdirSync(bin, { recursive: true });
@@ -537,6 +541,8 @@ function world() {
   fs.writeFileSync(path.join(lib, "Init", "Prelude.olean"), Buffer.alloc(1200, 5));
   run("pack.mjs", ["--lib", lib, "--id", "lean-lib", "--out", path.join(mirror, "profiles"), "--lean-version", "4.34.0",
     "--revision", KERNEL, "--roots", "Init", "--url-prefix", "/profiles/", "--no-imports"]);
+  run("pack.mjs", ["--lib", lib, "--id", "lean-core", "--out", path.join(mirror, "profiles"), "--lean-version", "4.34.0",
+    "--revision", LEAN_CORE_COMPILER.slice(0, 12), "--roots", "Init", "--url-prefix", "/profiles/", "--no-imports"]);
   for (const f of fs.readdirSync(path.join(mirror, "profiles"))) if (f.endsWith(".pack")) fs.rmSync(path.join(mirror, "profiles", f));
   fs.mkdirSync(path.join(mirror, "native64"));
   fs.writeFileSync(path.join(mirror, "native64", "native64.tar.gz"), "not really a tarball");
@@ -550,7 +556,7 @@ function world() {
   const config = {
     upstreamTag: "v4.34.0", kernelCommit: KERNEL, kernelPatch: "0037", leanVersion: "4.34.0",
     gate: { commit: KERNEL, wasmSha256: manifest.files["lean.wasm"].sha256, checks: 33 },
-    packs: [{ id: "lean-lib", compiler: KERNEL }],
+    packs: [{ id: "lean-core", compiler: LEAN_CORE_COMPILER, note: "transport copied from served bytes, not re-packed" }, { id: "lean-lib", compiler: KERNEL }],
     native64: { commit: "857544b439aa51633344d638dacc03d304b9ea96", os: "linux", arch: "aarch64", tar: "native64/native64.tar.gz" },
     docker: { tag: "qed64-toolchain:emsdk-6.0.5", recipeCommit: "974ee228b0c368f1d74f55ed4794ef60c15de4c2" },
     mathlib, modules: { essential: "lists/essential-modules.txt" },
@@ -798,6 +804,11 @@ test("stage-release.sh --base --runtime: stages a runtime release by reference f
   assert.equal(rec.runtime.sourceRevision, `qed64-wasm64@${RT_KERNEL.slice(0, 10)} (upstream v4.34.0)`);
   const lib = rec.packs.find((p) => p.id === "lean-lib");
   assert.deepEqual([lib.release, lib.lean.compiler, lib.lean.gitRevision, lib.modules], [`lean-lib-4.34.0-${rec.runtime.buildId}`, RT_KERNEL, RT_KERNEL.slice(0, 12), Object.keys(LEAN_LIB).length]);
+  // the shared pack beside pack-set's lean-lib re-pack: its entry (compiler, note) and its files are the base's
+  assert.deepEqual(rec.packs.map((p) => p.id), ["lean-core", "lean-lib"]);
+  assert.deepEqual(rec.packs[0], w.base.packs[0]);
+  assert.deepEqual([rec.packs[0].lean.compiler, rec.packs[0].note], [LEAN_CORE_COMPILER, "transport copied from served bytes, not re-packed"]);
+  assert.ok(rec.files.some((f) => f.path === "profiles/lean-core.manifest.json") && !isOwnPath(rec, "profiles/lean-core.manifest.json"));
   assert.equal(rec.notes[0], "the 0040 runtime, by reference");
   assert.match(rec.notes[1], new RegExp(`^Notes of ${BASE_ID} \\(the base, ${escapeRe(w.base.digest)}\\) follow verbatim: `));
   assert.deepEqual(rec.notes.slice(2), w.base.notes);
@@ -819,9 +830,10 @@ test("stage-release.sh --base --runtime: stages a runtime release by reference f
   const beside = fs.readdirSync(out).filter((n) => n !== RT_ID).sort();
   assert.deepEqual(beside, [`${RT_ID}.config.json`, `${RT_ID}.pack-set.json`, `${RT_ID}.tools`, `${RT_ID}.verify.json`, `${RT_ID}.verify.log`]);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(out, `${RT_ID}.pack-set.json`), "utf8")).packs.map((p) => [p.id, p.compiler]), [["lean-lib", RT_KERNEL]]);
-  // no Docker, no gate, no import build dir: only git, npm and the step runner were called
+  // no Docker, no gate, no import build dir: the default import build dir does not exist (a read of it
+  // would have failed the run), and of the shimmed tools (docker among them) only git and npm ran
+  assert.equal(fs.existsSync(path.join(w.S, "wasm64-lean-kernel-build-v4.34.0")), false);
   assert.deepEqual([...new Set(w.calls().map((c) => c.tool))].sort(), ["git", "npm"]);
-  assert.ok(!w.calls().some((c) => c.tool === "git" && JSON.stringify(c.argv).includes("wasm64-lean-kernel-build")));
   // the printed next step: the publish dry run only, runnable as printed from a path with spaces
   const steps = r.stdout.slice(r.stdout.indexOf("Next (RELEASE.md)")).split("\n").filter((l) => /^ {2}\S/.test(l) && !/^ {2}#/.test(l));
   assert.equal(steps.length, 1, steps.join("\n"));

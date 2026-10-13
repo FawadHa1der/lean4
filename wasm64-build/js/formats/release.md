@@ -81,7 +81,9 @@ records it):
 | Runtime release by reference | `lean-<tag>-<kernel7>`, base a first cut of the tag with another kernel commit | `runtime/`, `profiles/lean-lib.*`, `tools/` | the runtime projection of E2 | `tools.version`, `runtime.buildId` |
 
 What it owns are its own files (`isOwnPath`): its own GitHub assets. Every other
-file is the base's. A tools re-cut ships new tools for the base's runtime; a
+file is the base's. `profiles/lean-lib.*` means the `lean-lib` pack's files as
+`pack-set.mjs` names them, `profiles/lean-lib.manifest.json` and
+`profiles/lean-lib.pack.gzip.*`, not any pack whose id starts with `lean-lib.`. A tools re-cut ships new tools for the base's runtime; a
 runtime release by reference ships a new runtime of a later kernel commit with
 its own `lean-lib` (that build's `lib/lean`), and keeps the base's
 import-built packs (`lean-core`, `mathlib-essential`, `mathlib-game-extra`),

@@ -27,17 +27,25 @@ export const firstCutOf = (id) => {
 // ---------- a release by reference (formats/release.md, "Release by reference") ----------
 /** The only directory a tools re-cut changes; every other file is its base's. */
 export const RECUT_OWN_DIRS = Object.freeze(["tools"]);
-export const isRecutOwnPath = (p) => typeof p === "string" && RECUT_OWN_DIRS.some((d) => p.startsWith(`${d}/`));
 /** Record fields a tools re-cut has from its base, compared as JSON text (key order included). */
 export const RECUT_SAME_KEYS = Object.freeze(["schema", "lean", "kernel", "runtime", "packs", "native64", "docker", "mathlib", "modules", "hosting"]);
 /** gate fields that are the base's: the gate ran on the same binary (`checks` is the new tools' count). */
 export const RECUT_SAME_GATE_KEYS = Object.freeze(["passed", "commit", "wasmSha256"]);
+// Top-level record fields a runtime release by reference has from its base (with kernel.repo,
+// kernel.branch, runtime.target and packs but its lean-lib entry: shared() below)
+const RUNTIME_SAME_KEYS = Object.freeze(["schema", "lean", "native64", "docker", "mathlib", "modules", "hosting"]);
 
-// What each kind of release by reference owns: its own files (its own GitHub assets), by path prefix
+// What each kind of release by reference owns: its own files (its own GitHub assets), by path
+// prefix. lean-lib's are exactly the names pack-set.mjs gives it (its manifest and transport parts),
+// so a pack whose id merely starts with "lean-lib." stays shared.
+const TOOLS_OWN = RECUT_OWN_DIRS.map((d) => `${d}/`);
 const OWN = {
-  tools: { prefixes: ["tools/"], label: "tools/" },
-  runtime: { prefixes: ["runtime/", "profiles/lean-lib.", "tools/"], label: "runtime/, profiles/lean-lib.* and tools/" },
+  tools: { prefixes: TOOLS_OWN, label: "tools/" },
+  runtime: { prefixes: ["runtime/", "profiles/lean-lib.manifest.json", "profiles/lean-lib.pack.gzip.", ...TOOLS_OWN], label: "runtime/, profiles/lean-lib.* and tools/" },
 };
+const owns = (k, p) => typeof p === "string" && OWN[k].prefixes.some((d) => p.startsWith(d));
+/** Whether `p` is under tools/: a tools re-cut's own file, and the one directory every release by reference owns. */
+export const isRecutOwnPath = (p) => owns("tools", p);
 /**
  * The kind of a release by reference, from its id and base.id alone: "tools" (base.id is the id's
  * first cut: the same kernel commit, so the base's runtime: a tools re-cut), "runtime" (any other
@@ -51,7 +59,7 @@ export const byReferenceKind = (r) => {
 /** Whether `p` is one of the release's own files (its own GitHub asset). A release without base owns every file. */
 export const isOwnPath = (r, p) => {
   const k = byReferenceKind(r);
-  return typeof p === "string" && (!k || OWN[k].prefixes.some((d) => p.startsWith(d)));
+  return k ? owns(k, p) : typeof p === "string";
 };
 /** How messages name what a release owns. */
 export const ownLabel = (r) => { const k = byReferenceKind(r); return k ? OWN[k].label : "every file"; };
@@ -61,7 +69,7 @@ function shared(k, r) {
   const pick = (keys) => Object.fromEntries(keys.map((x) => [x, r?.[x]]));
   if (k === "tools") return { ...pick(RECUT_SAME_KEYS), ...Object.fromEntries(RECUT_SAME_GATE_KEYS.map((x) => [`gate.${x}`, r?.gate?.[x]])) };
   return {
-    ...pick(["schema", "lean", "native64", "docker", "mathlib", "modules", "hosting"]),
+    ...pick(RUNTIME_SAME_KEYS),
     "kernel.repo": r?.kernel?.repo, "kernel.branch": r?.kernel?.branch, "runtime.target": r?.runtime?.target,
     // which packs, in which order, each the base's entry — but lean-lib, the release's own (S6 binds it)
     packs: Array.isArray(r?.packs) ? r.packs.map((p) => (p?.id === "lean-lib" ? { id: p.id } : p)) : r?.packs,
@@ -274,10 +282,10 @@ export function checkReleaseRecord(r) {
     // S6: a runtime release by reference's lean-lib is its own build's lib/lean
     const lib = kind === "runtime" && Array.isArray(r.packs) ? r.packs.find((k) => k?.id === "lean-lib") : undefined;
     if (lib) {
-      const k40 = String(r.kernel?.commit);
+      const kernel = String(r.kernel?.commit);
       const bad = [];
       if (lib.lean?.compiler !== r.kernel?.commit) bad.push(`lean.compiler ${lib.lean?.compiler} is not kernel.commit ${r.kernel?.commit}`);
-      if (lib.lean?.gitRevision !== k40.slice(0, 12)) bad.push(`lean.gitRevision ${JSON.stringify(lib.lean?.gitRevision)} is not ${k40.slice(0, 12)}`);
+      if (lib.lean?.gitRevision !== kernel.slice(0, 12)) bad.push(`lean.gitRevision ${JSON.stringify(lib.lean?.gitRevision)} is not ${kernel.slice(0, 12)}`);
       const release = `lean-lib-${r.lean?.version}-${r.runtime?.buildId}`;
       if (lib.release !== release) bad.push(`release ${JSON.stringify(lib.release)} is not ${release}`);
       if (bad.length) p.push(`packs[lean-lib]: ${bad.join("; ")}: a runtime release by reference's lean-lib is its own build's lib/lean`);
