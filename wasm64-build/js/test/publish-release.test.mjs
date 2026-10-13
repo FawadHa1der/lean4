@@ -11,7 +11,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import {
-  repoSlug, chooseRelease, planAssets, contentTypeOf, checkR2Listing, releaseBody,
+  repoSlug, chooseRelease, relisted, RELIST_WAITS_MS, planAssets, contentTypeOf, checkR2Listing, releaseBody,
   splitFiles, r2Lists, r2Passes, checkBaseAssets, checkR2Copy, fetchPlan, main,
 } from "../../publish-release.mjs";
 import { canonicalRelease, checkRecutBase, checkReleaseRecord, isRecutOwnPath, serializeRelease } from "../release-record.mjs";
@@ -48,6 +48,25 @@ test("chooseRelease: none → create, one → use, more → stop naming the stra
   assert.match(c.reason, /2 releases exist for tag t/);
   assert.match(c.reason, /id 9: draft, 0 assets {3}— remove: gh api -X DELETE repos\/o\/r\/releases\/9/);
   assert.doesNotMatch(c.reason, /releases\/7/, "a published release is never offered for deletion");
+});
+
+test("relisted: re-reads GitHub's lagging listing until it settles, then gives up with the last read", async () => {
+  const slept = [];
+  const sleep = async (ms) => { slept.push(ms); };
+  const lists = [[], [], [{ id: 3, tag_name: "t", draft: true }]]; // the draft shows up on the third read
+  let reads = 0;
+  const read = () => chooseRelease(lists[Math.min(reads++, lists.length - 1)], "t", "o/r");
+  const c = await relisted(read, (x) => x.action !== "create", RELIST_WAITS_MS, sleep);
+  assert.equal(c.action, "use");
+  assert.equal(reads, 3);
+  assert.deepEqual(slept, RELIST_WAITS_MS.slice(0, 2));
+  // listed at once: no wait; never listed: every wait, then the last read
+  slept.length = 0;
+  assert.equal((await relisted(() => 1, (x) => x === 1, RELIST_WAITS_MS, sleep)), 1);
+  assert.deepEqual(slept, []);
+  assert.deepEqual(await relisted(() => ({ action: "create" }), (x) => x.action !== "create", RELIST_WAITS_MS, sleep), { action: "create" });
+  assert.deepEqual(slept, RELIST_WAITS_MS);
+  assert.equal(RELIST_WAITS_MS.reduce((a, b) => a + b, 0), 30000, "the Stop messages say 30 s");
 });
 
 const L = (name, size, sha256) => ({ name, size, sha256 });

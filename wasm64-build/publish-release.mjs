@@ -99,6 +99,24 @@ export function chooseRelease(releases, tag, slug) {
   return { action: "stop", reason: `${mine.length} releases exist for tag ${tag}; keep one:\n${lines.join("\n")}` };
 }
 
+/** Waits between re-reads of GitHub's release listing: 30 s in all. */
+export const RELIST_WAITS_MS = [1000, 2000, 4000, 8000, 15000];
+
+/**
+ * GitHub lists a release a few seconds after `gh release create` or `gh release edit` returns (the -r3
+ * publish stopped on "the new draft is not listed" that way): `read()` again, after each of `waits`, until
+ * `ok(value)`; the last value either way.
+ */
+export async function relisted(read, ok, waits = RELIST_WAITS_MS, sleep = (ms) => new Promise((r) => setTimeout(r, ms))) {
+  let value = read();
+  for (const ms of waits) {
+    if (ok(value)) break;
+    await sleep(ms);
+    value = read();
+  }
+  return value;
+}
+
 /**
  * Reconcile a release's assets with the staged files (flat, by basename).
  * local: [{name, size, sha256}]; assets: [{id, name, size, state, digest}] (GitHub's `digest` is
@@ -859,8 +877,8 @@ async function stepGithub(o, ctx) {
     fs.writeFileSync(notes, releaseBody(ctx.record));
     act(o, "gh", ["release", "create", o.id, "--repo", ctx.slug, "--draft", "--verify-tag", "--title", `lean4-wasm64 ${o.id}`, "--notes-file", notes]);
     if (o.dryRun) { say(`  (then upload ${files.length} files, verify each, publish)`); return; }
-    choice = chooseRelease(releases(), o.id, ctx.slug);
-    if (choice.action !== "use") throw new Stop(choice.reason ?? "the new draft is not listed");
+    choice = await relisted(() => chooseRelease(releases(), o.id, ctx.slug), (c) => c.action !== "create");
+    if (choice.action !== "use") throw new Stop(choice.reason ?? "GitHub does not list the new draft after 30 s; re-run later: the re-run adopts it once it is listed");
   }
   let rel = choice.release;
   say(`  release id ${rel.id}: ${rel.draft ? "draft" : "published"}`);
@@ -901,8 +919,8 @@ async function stepGithub(o, ctx) {
     if (!o.dryRun) requireTagged(o, ctx); // the tag on GitHub is still ours, at the moment that cannot be undone
     act(o, "gh", ["release", "edit", o.id, "--repo", ctx.slug, "--tag", o.id, "--verify-tag", "--draft=false"]);
     if (o.dryRun) return;
-    rel = chooseRelease(releases(), o.id, ctx.slug).release;
-    if (!rel || rel.draft) throw new Stop("the release is still a draft after the edit");
+    rel = (await relisted(() => chooseRelease(releases(), o.id, ctx.slug), (c) => c.release && !c.release.draft)).release;
+    if (!rel || rel.draft) throw new Stop("GitHub still lists the release as a draft 30 s after the edit; re-run to check it");
   }
   say(`  published: https://github.com/${ctx.slug}/releases/tag/${o.id}`);
 }
