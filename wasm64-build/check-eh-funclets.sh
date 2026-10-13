@@ -10,8 +10,8 @@
 # off exactly that rewrite); identical objects mean the rewrite never fired. Covered:
 #   1. positive controls (eh-funclet-controls/: the two bugs' shapes) must DIFFER, or the method is blind;
 #   2. every C++ translation unit of the stage1 build (its compile_commands.json, exact commands);
-#   3. the EH-mode Emscripten system libraries the link uses (libc++, libc++abi, libunwind: rebuilt
-#      twice with embuilder; the second build must show the flag in its commands).
+#   3. the EH-mode Emscripten system libraries the link uses (libc++, libc++abi, libunwind: their
+#      compile commands, from `embuilder -v`, replayed twice).
 # Generated Lean C has no EH IR, so it cannot be affected and is not compiled again.
 # Exit 0: clean, or the build is not native-EH (skipped, said so). Exit 1: a difference, a blind
 # method or a failed compile. ~1 min for 1-2, a few minutes for 3.
@@ -71,22 +71,42 @@ say "build C++: $same translation units identical, $diffs differ"
 
 # ---------- 3. the EH-mode system libraries ----------
 CACHE="$(em-config CACHE)"; LIBDIR="$CACHE/sysroot/lib/wasm64-emscripten"
-mkdir -p "$OUT/libs/base" "$OUT/libs/nocln"
+mkdir -p "$OUT/libs"
 printf '#include <string>\n#include <stdexcept>\nint main(int c, char**) { try { if (c > 5) throw std::runtime_error(std::string("x")); } catch (const std::exception &e) { return 1; } return 0; }\n' > "$OUT/libs/t.cpp"
 em++ -O3 -m64 -pthread $EHFLAGS "$OUT/libs/t.cpp" -o "$OUT/libs/t.js" > "$OUT/libs/link.log" 2>&1 || { say "the probe link failed ($OUT/libs/link.log)"; exit 1; }
 mapfile -t LIBS < <(cd "$LIBDIR" && ls *except*.a 2>/dev/null | grep -v noexcept | sed 's/\.a$//')
 [ "${#LIBS[@]}" -gt 0 ] || { say "no EH-mode system library in $LIBDIR after the probe link"; exit 1; }
+# Emscripten builds system libraries hermetically (it drops EMCC_CFLAGS), so the library's own
+# compile commands are taken from `embuilder -v` and replayed twice, as for the build's C++ above.
+# They name their sources relative to a build dir three levels below the Emscripten root.
+EMROOT="$(dirname "$(command -v emcc)")"; LIBCWD="$CACHE/build/eh-funclet-guard"; mkdir -p "$LIBCWD"
+[ "$(cd "$LIBCWD/../../.." && pwd -P)" = "$(cd "$EMROOT" && pwd -P)" ] \
+  || { say "the cache is not at <emscripten>/cache ($CACHE): cannot replay the library commands"; exit 1; }
 for l in "${LIBS[@]}"; do
-  cp "$LIBDIR/$l.a" "$OUT/libs/base/$l.a"
-  EMCC_CFLAGS="$NOCLN" embuilder build "$l" --wasm64 --force -v > "$OUT/libs/$l.nocln.log" 2>&1 || { say "embuilder $l failed"; tail -5 "$OUT/libs/$l.nocln.log"; exit 1; }
-  cp "$LIBDIR/$l.a" "$OUT/libs/nocln/$l.a"
-  grep -q -- '-disable-cleanups' "$OUT/libs/$l.nocln.log" || { say "$l: the rebuild did not carry $NOCLN (EMCC_CFLAGS ignored?): method blind"; fail=1; continue; }
-  for m in base nocln; do mkdir -p "$OUT/libs/$m/$l.x"; (cd "$OUT/libs/$m/$l.x" && emar x "../$l.a"); done
+  embuilder build "$l" --wasm64 --force -v > "$OUT/libs/$l.log" 2>&1 || { say "embuilder $l failed"; tail -5 "$OUT/libs/$l.log"; exit 1; }
+  python3 - "$OUT/libs/$l.log" "$OUT/libs/$l" "$LIBCWD" "$NOCLN" > "$OUT/libs/$l.jobs.sh" <<'PY'
+import os, shlex, sys
+log, out, cwd, nocln = sys.argv[1:5]
+n = 0
+for line in open(log):
+    a = line.strip()
+    if not a.startswith('"') or " -c " not in f" {a} ": continue
+    args = shlex.split(a)
+    if not os.path.basename(args[0]).startswith(("emcc", "em++")): continue
+    src = args[-1]; n += 1
+    for mode, extra in (("base", []), ("nocln", nocln.split())):
+        o = os.path.join(out, mode, f"{n:04d}-{os.path.basename(src)}.o")
+        print(f"mkdir -p {shlex.quote(os.path.dirname(o))} && cd {shlex.quote(cwd)} && {shlex.join(args + extra + ['-o', o])}")
+PY
+  NL="$(grep -c . "$OUT/libs/$l.jobs.sh" || true)"
+  [ "$NL" -gt 0 ] || { say "$l: no compile commands in embuilder -v output ($OUT/libs/$l.log): method blind"; fail=1; continue; }
+  tr '\n' '\0' < "$OUT/libs/$l.jobs.sh" | xargs -0 -P "$(nproc)" -I{} bash -c '{} || echo "COMPILE FAILED: {}"' > "$OUT/libs/$l.compile.log" 2>&1 || true
+  if grep -q 'COMPILE FAILED' "$OUT/libs/$l.compile.log"; then say "$l: replayed compiles failed ($OUT/libs/$l.compile.log)"; fail=1; continue; fi
   ld=0; ls=0
-  for o in "$OUT/libs/base/$l.x"/*; do
-    if cmp -s "$o" "$OUT/libs/nocln/$l.x/$(basename "$o")"; then ls=$((ls+1)); else say "DIFFERS: $l: $(basename "$o")"; ld=$((ld+1)); fi
+  for o in "$OUT/libs/$l/base"/*.o; do
+    if cmp -s "$o" "$OUT/libs/$l/nocln/$(basename "$o")"; then ls=$((ls+1)); else say "DIFFERS: $l: $(basename "$o")"; ld=$((ld+1)); fi
   done
-  say "system library $l: $ls members identical, $ld differ"
+  say "system library $l: $ls sources identical, $ld differ"
   [ "$ld" -eq 0 ] || fail=1
 done
 
