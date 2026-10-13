@@ -338,7 +338,11 @@ array throws exactly when that much stack is no longer free) at its recursion ch
 kernel's depth guard and Meta's `Core.checkSystem` — and raises its own error there: Meta's
 max-recursion error, or the kernel's "the WebAssembly engine's stack is exhausted". So a proof that
 recurses deeper than a browser allows fails with an error, and the session survives; whether it
-fits depends on the engine. Recursion that passes no checkpoint (the IR interpreter, some
+fits depends on the engine, and since 0039 a little on how warm the session is: V8 enters a wasm
+function from the runtime's C++-exception trampolines through its generic wrapper until it has
+done so 1,000 times, which costs the elaborator ~5% more stack per level in a session's first
+proofs (r3's ~106k exports had those wrappers compiled at instantiation; PATCHES.md 0039).
+Recursion that passes no checkpoint (the IR interpreter, some
 expression traversals) can still overflow, as native Lean can abort there. Headless, the
 node-runner knob `LEAN4_WASM64_PTHREAD_STACK_MB=0.68` gives the pthreads Chrome's budget. Since
 0038 a host can read how often the guard asked and refused: `_lean_wasm_engine_probes()` and
@@ -351,8 +355,9 @@ node-runner knob `LEAN4_WASM64_PTHREAD_STACK_MB=0.68` gives the pthreads Chrome'
   renderer. Until 0039 each cost ~129 MiB of JS heap (the 49 MB glue and the
   per-export bookkeeping of ~106k exports; QED64 HARDENING #55): about 30
   isolates was the ceiling. Since 0039 the glue is under 1 MiB and binds a few
-  dozen exports: the cost per Worker is to be measured (the trimmed-glue
-  experiment measured ~30 MiB; PATCHES.md 0039 records the number).
+  dozen exports: the cost per Worker in Chrome is to be measured (the
+  trimmed-glue experiment measured ~30 MiB). In Node the process with the
+  24-Worker pool went from ~10 GB to ~0.96 GB RSS (PATCHES.md 0039).
 - Node ≥ 24 (Memory64 without a flag), `node --stack-size=8192`, and
   `bin/package.json` = `{ "type": "commonjs" }` beside `lean.js` (pthreads
   re-load `lean.js` as a CommonJS script; under a `"type": "module"` package

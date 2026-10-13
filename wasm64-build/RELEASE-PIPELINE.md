@@ -79,8 +79,9 @@ check whether upstream absorbed the gates, then refresh it with
    trees>` over QED64, lean4game, the widgets showcase and the proof sheets: it
    must report every name covered, but for one known and dead reach-in,
    `globalThis.Module.HEAPU8` in QED64's resident probe and the proof sheets'
-   browser check (PATCHES.md, 0039). The first 0039 link also calibrates
-   `link-undefined-allowlist.txt` (its header says how).
+   browser check (PATCHES.md, 0039). `link-undefined-allowlist.txt` is
+   calibrated (from the first 0039 link: empty): a link that leaves a symbol
+   undefined fails until the name is reviewed and added there.
 5. **Library ports** — game patches in lean4game were validated against one
    Mathlib commit; expect a re-port pass per bump. Moved modules are the usual
    churn: rewrite imports to the new names rather than rely on shims (the

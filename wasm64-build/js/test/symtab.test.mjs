@@ -316,10 +316,10 @@ test("check-link.py: signature mismatches and undefined table entries fail; othe
   assert.equal(spawnSync(python, ["-I", CHECK, "a"], { encoding: "utf8" }).status, 2);
 });
 
-test("the shipped allowlist starts uncalibrated and says how it is calibrated", () => {
+test("the shipped allowlist is calibrated from the first 0039 link, which had no undefined symbol", () => {
   const text = fs.readFileSync(path.join(BUILD, "link-undefined-allowlist.txt"), "utf8");
-  assert.doesNotMatch(text, /^#\s*calibrated-from:/m);
-  assert.match(text, /NOT CALIBRATED YET/);
+  assert.match(text, /^#\s*calibrated-from:\s*[0-9a-f]{10}\b.*: 0 undefined symbols$/m);
+  assert.doesNotMatch(text, /NOT CALIBRATED/);
   assert.deepEqual(parseSeed(text), []);
 });
 

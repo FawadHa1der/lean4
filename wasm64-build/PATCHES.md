@@ -672,7 +672,7 @@ Docker on Linux leaves it root's, and `build.sh` then stops before the generator
 B3 after the link (`check-link.py`): a `signature mismatch` in the link log or a
 `signature_mismatch:` function in `lean.js.symbols`, or a table entry left undefined, fails the
 build; other undefined symbols are compared with `link-undefined-allowlist.txt`, which the first
-0039 link calibrates (until it says `# calibrated-from:`, differences are printed, not failed).
+0039 link calibrated (empty; with its `# calibrated-from:` line any difference fails the build).
 `import-release.sh build`'s `gen-exports.py --check` recomputes the selection and fails (exit 1)
 when it differs from the build's manifest or the export list on disk.
 
@@ -709,12 +709,50 @@ per import with extensions) no longer cross into JavaScript.
 native frame sizes — 537 C++ functions are no longer exported and may now be inlined
 (`lean_wasm_native_stack_ok` among them) — so `stack-margin.mjs` measures, per deep-recursion
 probe (Fin 40 `decide`, nested `have`, a `<;>` chain, `decide +kernel`), the smallest pthread
-stack it survives and passes with; record r3 vs 0039 here.
+stack it survives and passes with: r3 against the first build below.
 
-**To be measured on the first build** (not done: no runtime was built for this commit): `lean.js`,
-`lean.wasm` and section sizes; the per-Worker JS heap and renderer RSS (QED64's HARDENING #55
-method; EMBED-RUNTIME.md §6 says "to be measured"); Node boot and RSS; persistent compile and
-snapshot init-replay timings against r3; the stack margins above; the B3 allowlist.
+**Measured** on the first build, which is 0039b's runtime (570d16f926, build id
+`wasm64-992464a0796331dc`, 2026-10-12; 0039 alone was never built), against r3, host Node 26.3:
+
+- **Sizes.** `lean.js` 146,441 bytes (r3 48,975,090). `lean.wasm` 108,059,248 (r3 109,885,165);
+  its code section 95,052,459 bytes in 159,336 functions (r3 91,353,467 in 146,246: +3.70 MB,
+  +13,090 functions, the ones the table now keeps that wasm-opt could inline into an only caller
+  and drop before). The link reports no undefined symbol; `link-undefined-allowlist.txt` is
+  calibrated from it (empty).
+- **Node boot**, default 24-Worker pool, two runs each: `--version` printed after 0.58–0.61 s
+  (r3 3.04–3.20 s); the process's RSS 15 s later 0.95–0.96 GB (r3 9.95–10.17 GB).
+- **Stack margins** (`stack-margin.mjs`, smallest `LEAN4_WASM64_PTHREAD_STACK_MB` in MiB, ±0.02;
+  a Chrome Worker is 0.68):
+
+  | probe | r3 survives | r3 passes | 0039b survives | 0039b passes |
+  |---|---|---|---|---|
+  | `decide`, Fin 40 × Fin 40 | 0.427 | 0.998 | 0.427 | 0.998 |
+  | 25 nested `have … := by` | 0.69 | 2.771 | 0.661 | 2.917 |
+  | `<;>` chain of 25 `trivial` | 0.427 | 1.115 | 0.427 | 1.174 |
+  | `decide +kernel`, Fin 120 × Fin 120 | 0.427 | 1.233 | 0.427 | 1.233 |
+
+  At Chrome's 0.68 the nested `have` now ends in Lean's error where r3 lost the thread; the two
+  elaborator probes need ~5% more stack to pass. That 5% is V8's, not the code's (overflow traces
+  at a fixed stack with the guard's probe off, `node --stack-trace-limit`): both builds overflow
+  through the same functions, the same 34.8 frames per `evalTactic` level, and each of those
+  functions is byte-identical between them but for addresses and call indices; no interpreter
+  frame appears in either. What differs is how V8 enters wasm from JavaScript: each level passes
+  through one C++-exception trampoline (`invoke_jjj`, JS) that calls the wasm function by its
+  table index, and V8 makes that call through its generic JS-to-wasm wrapper, whose frame is
+  larger, until that function has been entered so 1,000 times (`--wasm-wrapper-tiering-budget`),
+  unless the wrapper for its signature was compiled when the module was instantiated, as V8 does
+  for exported functions. r3 exported ~106k functions, so every signature had a compiled wrapper
+  from the start; 0039 exports 27. With `--wasm-wrapper-tiering-budget=1` or
+  `--no-wasm-generic-wrapper` the two builds reach the same depth (25 nested `have` at 2.0 MiB:
+  206 and 206 levels with default tiering, 194 and 194 Liftoff-only; the chain at 0.9 MiB: 90 and
+  90), against 206 / 195 and 90 / 84 without. So only the first ~1,000 entries of a function
+  through a trampoline cost the extra stack: the first proofs of a session. Left as it is; the
+  remedies would be exports kept for their signatures only, or native Wasm exceptions (no
+  trampolines at all), each a change of its own.
+- **Gate**: G6 `symtabProbe 20000` 24 ms (0039b: native `Lean.Name.append`).
+
+**Still to be measured**: the per-Worker JS heap and renderer RSS in Chrome (QED64's HARDENING #55
+method; EMBED-RUNTIME.md §6); persistent compile and snapshot init-replay timings against r3.
 
 For hosts: the contract and every `Module["_x"]` name are as before. Do not reach a raw
 `wasmExports["x"]` (minified now); expect `Dynlib.load` to fail; rebake snapshots.
@@ -762,9 +800,9 @@ What changes for interpreted code:
   `eval_body` → `call` recursion, so interpreted recursion through core functions gains headroom.
   But the table takes the address of 29,538 more functions, so wasm-opt can no longer inline one
   into its only caller and drop it: a native path can gain a frame. 0036's guard is unchanged
-  (no edit to `stackinfo.cpp`, `interrupt.cpp`, `CoreM.lean`, the probe or the stack sizes);
-  `stack-margin.mjs` records r3 vs 0039 vs 0039b here, with the code growth (estimated at most
-  4.8 MB).
+  (no edit to `stackinfo.cpp`, `interrupt.cpp`, `CoreM.lean`, the probe or the stack sizes).
+  Measured with 0039 (above, one build for both): +3.70 MB of code against r3 (estimated at most
+  4.8 MB); on the paths of the four deep probes no frame was gained (the same frames per level).
 - **Snapshots.** A partial application of such a function made by interpreted code is a closure
   over its native address now, not an interpreter stub carrying the declaration, so snapshot bytes
   differ (they are rebaked for the new build id anyway).
@@ -788,5 +826,7 @@ G5 requires `[symtab] hit plain l_Lean_Name_append` and `x0.x1.x2` from `symtabP
 natively). Every other check must pass unchanged; a moved heartbeat limit in their output is a
 finding to explain (above), not to recalibrate away.
 
-**To be measured on the first build**: the code section against 0039, the stack margins, G6, the
-persistent compile and init replay timings against r3 and 0039, QED64's compiler battery.
+**Measured** with 0039 (above; 0039 alone was not built, so its share of the code section is not
+separate): G6 24 ms; the stack margins, whose overflow traces show no interpreter frame, so 0039b
+does not move them. **Still to be measured**: the persistent compile and init replay timings
+against r3, QED64's compiler battery.
