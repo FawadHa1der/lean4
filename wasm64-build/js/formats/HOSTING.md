@@ -107,7 +107,7 @@ release (baked with `lean4-wasm64 bake`, indexed as
 
 | Copy | Layout | Reachable by browsers? |
 |---|---|---|
-| GitHub Release `lean-<tag>-<kernel7>[-rN]` on `FawadHa1der/lean4` | flat, by basename (a re-cut by reference: only its tools tgz, `release.json` and `SHA256SUMS`; the rest are its base's assets) | No (other origin, no isolation headers). It is the public download for tools and CI: `lean4-wasm64 fetch --from https://github.com/FawadHa1der/lean4/releases/download/<id>/` |
+| GitHub Release `lean-<tag>-<kernel7>[-rN]` on `FawadHa1der/lean4` | flat, by basename (a release by reference: only its own files, `release.json` and `SHA256SUMS`; the rest are its base's assets) | No (other origin, no isolation headers). It is the public download for tools and CI: `lean4-wasm64 fetch --from https://github.com/FawadHa1der/lean4/releases/download/<id>/` |
 | R2 `qed64-artifacts/lean4-wasm64/<id>/` | served, complete for every release | Only through a site's own Worker, under the site's origin. The bucket is private; never enable its `r2.dev` URL |
 | a site's origin | served, mapped at `/runtime/*`, `/profiles/*` (but `/profiles/index.json`: the site's) | Yes |
 
@@ -141,15 +141,20 @@ browsers. An object uploaded earlier with a wrong type keeps it — `--checksum`
 skips equal bytes — and `--immutable` refuses to rewrite it: a release prefix
 is uploaded right the first time.)
 
-A re-cut by reference (release.md) gets a complete prefix of its own. The files
+A release by reference (release.md) gets a complete prefix of its own. The files
 it shares with its base are copied **server-side** from the base's prefix (same
 remote: S3 CopyObject; without `-M` rclone keeps each object's metadata,
-Content-Type included), then its own files go up as above, `release.json` last:
+Content-Type included), then its own files go up by content type (objects, then
+manifests), then `SHA256SUMS`, `release.json` last. `wasm64-build/import-release.sh
+publish <id>` derives every list from the record (`isOwnPath`), runs these passes
+and verifies them; a runtime release by reference is published only that way.
+For a tools re-cut, whose only own file is its tgz, staging also prints the
+passes as a manual fallback:
 
 ```bash
 B=qed64-r2:qed64-artifacts/lean4-wasm64/<base>/
 R2=qed64-r2:qed64-artifacts/lean4-wasm64/<base>-r<N>/
-# <id>.r2-objects.txt / <id>.r2-manifests.txt (written by staging): files[] outside tools/, by content type
+# <id>.r2-objects.txt / <id>.r2-manifests.txt (written by staging a tools re-cut): files[] outside tools/, by content type
 rclone copy $B $R2 --files-from-raw <id>.r2-objects.txt --immutable --s3-no-check-bucket --checksum --transfers 8
 rclone copy $B $R2 --files-from-raw <id>.r2-manifests.txt --immutable --s3-no-check-bucket --checksum
 rclone copy <release dir> $R2 --immutable --s3-no-check-bucket --checksum --filter '+ /tools/**' --filter '- *' \
@@ -160,10 +165,13 @@ rclone copy <release dir> $R2 --immutable --s3-no-check-bucket --checksum --filt
   --header-upload "Content-Type: application/json"
 ```
 
-Never copy the base's `release.json`, `SHA256SUMS` or `tools/`: under
-`--immutable`, a copied base `release.json` would block the re-cut's own, and a
-base tgz would be an object the re-cut's record does not list. `publish` checks
-the copy against the staged clones (MD5), not only against the base's prefix.
+Never copy the base's `release.json`, `SHA256SUMS` or a file of the kind the
+release owns (`tools/`; for a runtime release by reference also `runtime/` and
+`profiles/lean-lib.*`): under `--immutable`, a copied base `release.json` would
+block the release's own, and a base tgz, chunk or `lean-lib` part would be an
+object its record does not list (the base's `runtime/runtime-manifest.json`
+would even block its own). `publish` checks the copy against the staged clones
+(MD5), not only against the base's prefix.
 
 A site whose Worker serves one R2 prefix today needs a per-route prefix to
 serve `/runtime/*` and `/profiles/*` from `lean4-wasm64/<id>/` while its

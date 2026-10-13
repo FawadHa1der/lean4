@@ -1,8 +1,9 @@
-// publish-release.mjs end to end, offline, on a re-cut by reference: FAKE git, gh and rclone
+// publish-release.mjs end to end, offline, on a release by reference: FAKE git, gh and rclone
 // (fixtures/publish-sandbox/, first on PATH) and a fetch shim stand in for the repository, GitHub,
 // R2 and the network. A small synthetic first cut is "published" in the fakes' state (its GitHub
-// release, its R2 prefix, its tag) and its -r3 by reference is staged, with a real tools tgz packed
-// from this package. The script runs from a copy of wasm64-build (publish-release.mjs + js/) in a
+// release, its R2 prefix, its tag), and its -r3 by reference (a tools re-cut) and a runtime release
+// by reference of it (another kernel commit's runtime and lean-lib) are staged, each with a real
+// tools tgz packed from this package. The script runs from a copy of wasm64-build (publish-release.mjs + js/) in a
 // temp dir, so nothing it does reaches this repository; the fakes refuse any other repository,
 // remote or URL, and the fake git refuses every write. What it pins (decision 8, AMENDMENTS A1-A3,
 // A10):
@@ -17,6 +18,9 @@
 //     them against the staged dir (a copy that wrote other bytes is caught), and fetches with
 //     the staged reader
 //   - --r2-source local never reads the base's prefix, and checks against the staged dir
+//   - a runtime release by reference uploads its own files (runtime, lean-lib, tools) and copies
+//     the rest server-side, and its fetch check takes its runtime from its own release and the
+//     lists from the base's
 import { describe, test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
@@ -25,8 +29,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { canonicalRelease, checkRecutBase, checkReleaseRecord, isRecutOwnPath, serializeRelease, sha256sums } from "../release-record.mjs";
+import { buildIdFromSha256 } from "../artifact-id.mjs";
+import { byReferenceKind, canonicalRelease, checkRecutBase, checkReleaseRecord, isOwnPath, isRecutOwnPath, serializeRelease, sha256sums } from "../release-record.mjs";
 import { contentTypeOf, r2Lists, splitFiles } from "../../publish-release.mjs";
+import { recutConfig } from "../../stage-by-reference.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const FIX = path.join(here, "fixtures", "publish-sandbox");
@@ -38,13 +44,17 @@ const sha1 = (s) => createHash("sha1").update(s).digest("hex");
 const sha256 = (b) => createHash("sha256").update(b).digest("hex");
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // the sandbox's history (fake git): root, the kernel commit, the base's record commit, the -r3's
-// tools commit, then (once recorded) the -r3's record commit
-const C = { root: sha1("root"), kernel: sha1("kernel"), base: sha1("release base"), tools: sha1("tools of -r3"), recut: sha1("release -r3") };
-const TAGOBJ = { base: sha1("tag object base"), recut: sha1("tag object -r3") };
+// tools commit, then (once recorded) the -r3's record commit. A runtime release by reference's
+// history: root, the kernel commit, the base's record commit, its own kernel commit (a descendant),
+// its tools commit and its record commit.
+const C = { root: sha1("root"), kernel: sha1("kernel"), base: sha1("release base"), tools: sha1("tools of -r3"), recut: sha1("release -r3"),
+  kernel2: sha1("kernel 0040"), rtTools: sha1("tools of 0040"), rt: sha1("release 0040") };
+const TAGOBJ = { base: sha1("tag object base"), recut: sha1("tag object -r3"), rt: sha1("tag object 0040") };
 const K7 = C.kernel.slice(0, 7);
 const BASE_ID = `lean-v4.34.0-${K7}`, ID = `${BASE_ID}-r3`;
 const VERSION = `4.34.0-${K7}-r3`, TGZ = `tools/lean4-wasm64-${VERSION}.tgz`;
 const BASE_PREFIX = `${R2}/${BASE_ID}/`, DEST = `${R2}/${ID}/`;
+const RT_ID = `lean-v4.34.0-${C.kernel2.slice(0, 7)}`, RT_VERSION = `4.34.0-${C.kernel2.slice(0, 7)}`, RT_TGZ = `tools/lean4-wasm64-${RT_VERSION}.tgz`;
 
 const TOP = fs.mkdtempSync(path.join(os.tmpdir(), "l4w-publish-sandbox-"));
 after(() => fs.rmSync(TOP, { recursive: true, force: true }));
@@ -86,6 +96,13 @@ function packTools(js, version, out, { verifyStub = null } = {}) {
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 
+/** A lean-lib pack of `lib` into <rel>/profiles, the build's own: its gitRevision and release name `kernel` and its lean.wasm. */
+function packLeanLib(js, lib, rel, kernel, wasmSha) {
+  node(path.join(js, "pack.mjs"), ["--lib", lib, "--id", "lean-lib", "--out", path.join(rel, "profiles"), "--lean-version", "4.34.0", "--mount", "/lib/lean",
+    "--revision", kernel.slice(0, 12), "--release", `lean-lib-4.34.0-${buildIdFromSha256(wasmSha)}`, "--roots", "Init", "--url-prefix", "/profiles/", "--no-imports"]);
+  for (const f of fs.readdirSync(path.join(rel, "profiles"))) if (f.endsWith(".pack")) fs.rmSync(path.join(rel, "profiles", f));
+}
+
 /** The first cut, staged by this package's own tools (chunk → pack → release), as the sandbox repo publishes it. */
 function stageBase(js, rel) {
   const work = fs.mkdtempSync(path.join(TOP, "base-"));
@@ -103,7 +120,8 @@ function stageBase(js, rel) {
   fs.writeFileSync(path.join(lib, "Init", "Prelude.olean"), Buffer.alloc(1200, 5));
   node(path.join(js, "pack.mjs"), ["--lib", lib, "--id", "lean-core", "--out", path.join(rel, "profiles"), "--lean-version", "4.34.0",
     "--revision", C.kernel, "--roots", "Init", "--url-prefix", "/profiles/", "--no-imports"]);
-  for (const f of fs.readdirSync(path.join(rel, "profiles"))) if (f.endsWith(".pack")) fs.rmSync(path.join(rel, "profiles", f));
+  const wasmSha = readJson(path.join(rel, "runtime", "runtime-manifest.json")).files["lean.wasm"].sha256;
+  packLeanLib(js, lib, rel, C.kernel, wasmSha);
   fs.mkdirSync(path.join(rel, "native64"));
   fs.writeFileSync(path.join(rel, "native64", "native64.tar.gz"), Buffer.from(Array.from({ length: 6000 }, (_, i) => (i * 13) % 253)));
   fs.mkdirSync(path.join(rel, "lists"));
@@ -115,7 +133,7 @@ function stageBase(js, rel) {
   writeJson(path.join(work, "config.json"), {
     upstreamTag: "v4.34.0", kernelCommit: C.kernel, kernelPatch: "0035b", kernelRepo: `https://github.com/${SLUG}`, kernelBranch: LINE,
     gate: { commit: C.kernel, wasmSha256: manifest.files["lean.wasm"].sha256, checks: 33 },
-    packs: [{ id: "lean-core", compiler: "8d91aadcda8a0b231e47c42d4ff4b9b8360563aa" }],
+    packs: [{ id: "lean-core", compiler: "8d91aadcda8a0b231e47c42d4ff4b9b8360563aa" }, { id: "lean-lib", compiler: C.kernel }],
     native64: { commit: "857544b439aa51633344d638dacc03d304b9ea96", os: "linux", arch: "aarch64", tar: "native64/native64.tar.gz" },
     docker: { tag: "qed64-toolchain:emsdk-6.0.5", recipeCommit: "974ee228b0" },
     mathlib: { commit: "5ed2965256430c3649e86755f9576b54eca72435", tag: "v4.34.0" },
@@ -150,8 +168,60 @@ function stageRecut(w, { pkgVersion = VERSION, verifyStub = null } = {}) {
   return { record, text };
 }
 
-/** The fake git's repository and origin: the base recorded, tagged and pushed; with `tagged`, the -r3 too. */
-function writeGit(w, { tagged }) {
+/** The runtime release by reference, as stage-release.sh --base --runtime writes it: the base's files outside what it owns, its own runtime, lean-lib and tgz. */
+function stageRuntime(w) {
+  const base = readJson(path.join(w.stage, BASE_ID, "release.json"));
+  const rel = path.join(w.stage, RT_ID);
+  fs.rmSync(rel, { recursive: true, force: true });
+  for (const f of base.files.filter((x) => !isRecutOwnPath(x.path))) {
+    fs.mkdirSync(path.dirname(path.join(rel, f.path)), { recursive: true });
+    fs.copyFileSync(path.join(w.stage, BASE_ID, f.path), path.join(rel, f.path));
+  }
+  const work = fs.mkdtempSync(path.join(TOP, "rt-"));
+  const bin = path.join(work, "bin"), lib = path.join(work, "lib");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, "lean.js"), Buffer.alloc(1700, 4));
+  fs.writeFileSync(path.join(bin, "lean.wasm"), Buffer.from(Array.from({ length: 4300 }, (_, i) => (i * 11 + 5) % 249)));
+  const wasmSha = sha256(fs.readFileSync(path.join(bin, "lean.wasm")));
+  fs.rmSync(path.join(rel, "runtime"), { recursive: true });
+  node(path.join(w.js, "chunk-runtime.mjs"), ["--bin", bin, "--out", path.join(rel, "runtime"), "--lean-version", "4.34.0",
+    "--revision", `qed64-wasm64@${C.kernel2.slice(0, 10)} (upstream v4.34.0)`, "--part-bytes", "1024"]);
+  fs.mkdirSync(path.join(rel, "runtime", "bin"));
+  fs.writeFileSync(path.join(rel, "runtime", "bin", "leanmake"), "#!/bin/sh\n# 0040\n");
+  fs.mkdirSync(path.join(lib, "Init"), { recursive: true });
+  fs.writeFileSync(path.join(lib, "Init.olean"), Buffer.alloc(320, 6));
+  fs.writeFileSync(path.join(lib, "Init", "Prelude.olean"), Buffer.alloc(1100, 7));
+  for (const f of fs.readdirSync(path.join(rel, "profiles"))) if (f.startsWith("lean-lib.")) fs.rmSync(path.join(rel, "profiles", f));
+  packLeanLib(w.js, lib, rel, C.kernel2, wasmSha);
+  packTools(w.js, RT_VERSION, path.join(rel, RT_TGZ));
+  writeJson(path.join(work, "config.json"), recutConfig(base, { id: RT_ID, runtime: { kernelCommit: C.kernel2, kernelPatch: "0040", wasmSha256: wasmSha },
+    checks: "4", version: RT_VERSION, tgz: path.posix.basename(RT_TGZ), commit: C.rtTools, notes: ["the sandbox's runtime release by reference"] }));
+  node(path.join(w.js, "release.mjs"), ["--release", rel, "--config", path.join(work, "config.json"), "--base", path.join(w.stage, BASE_ID)]);
+  fs.rmSync(work, { recursive: true, force: true });
+}
+
+/** The fake git's repository and origin: the base recorded, tagged and pushed; with `tagged`, the -r3 too; with `runtime`, the runtime release by reference's history instead. */
+function writeGit(w, { tagged, runtime = false }) {
+  if (runtime) {
+    const baseText = fs.readFileSync(path.join(w.stage, BASE_ID, "release.json"), "utf8");
+    const rtText = fs.readFileSync(path.join(w.stage, RT_ID, "release.json"), "utf8");
+    const tags = { [`refs/tags/${BASE_ID}`]: TAGOBJ.base, [`refs/tags/${RT_ID}`]: TAGOBJ.rt };
+    writeJson(path.join(w.state, "git.json"), {
+      head: `refs/heads/${LINE}`,
+      commits: [
+        { sha: C.root, subject: "root", adds: { README: "sandbox\n" } },
+        { sha: C.kernel, subject: "the kernel commit", adds: { "kernel.txt": "kernel\n" } },
+        { sha: C.base, subject: `release ${BASE_ID}`, adds: { [`wasm64-build/releases/${BASE_ID}.json`]: baseText } },
+        { sha: C.kernel2, subject: "the 0040 kernel commit", adds: { "kernel.txt": "kernel 0040\n" } },
+        { sha: C.rtTools, subject: "the tools of 0040", adds: { "tools.txt": "0040\n" } },
+        { sha: C.rt, subject: `release ${RT_ID}`, adds: { [`wasm64-build/releases/${RT_ID}.json`]: rtText } },
+      ],
+      refs: { [`refs/heads/${LINE}`]: C.rt, [`refs/remotes/origin/${LINE}`]: C.rt, ...tags },
+      origin: { [`refs/heads/${LINE}`]: C.rt, ...tags },
+      tags: { [TAGOBJ.base]: C.base, [TAGOBJ.rt]: C.rt },
+    });
+    return;
+  }
   const baseText = fs.readFileSync(path.join(w.stage, BASE_ID, "release.json"), "utf8");
   const recutText = fs.readFileSync(path.join(w.stage, ID, "release.json"), "utf8");
   const tip = tagged ? C.recut : C.tools;
@@ -213,15 +283,16 @@ before(() => {
   for (const d of [g.stage, g.state, g.tmp]) fs.mkdirSync(d, { recursive: true });
   stageBase(g.js, path.join(g.stage, BASE_ID));
   stageRecut(g);
+  stageRuntime(g);
   publishBase(g);
 });
 
 let worlds = 0;
-/** A fresh copy of the golden world; `tagged`: the -r3 already recorded, tagged and pushed (GitHub has its tag). */
-function world({ tagged = false } = {}) {
+/** A fresh copy of the golden world; `tagged`: the -r3 already recorded, tagged and pushed (GitHub has its tag); `runtime`: the runtime release by reference instead. */
+function world({ tagged = false, runtime = false } = {}) {
   const w = paths(path.join(TOP, `w${++worlds}`));
   fs.cpSync(GOLDEN, w.root, { recursive: true });
-  writeGit(w, { tagged });
+  writeGit(w, { tagged, runtime });
   for (const f of ["calls.log", "events.log"]) fs.writeFileSync(path.join(w.state, f), "");
   return w;
 }
@@ -229,10 +300,10 @@ const env = (w, extra = {}) => ({
   PATH: [BIN, NODE_BIN, "/usr/bin", "/bin"].join(path.delimiter), HOME: w.tmp, TMPDIR: w.tmp, LANG: "C",
   FAKE_STATE: w.state, FAKE_REPO: w.repo, NODE_OPTIONS: `--import=${pathToFileURL(path.join(FIX, "fetch-shim.mjs")).href}`, ...extra,
 });
-/** Run the world's publish-release.mjs on the -r3 (a hang fails at the timeout, not at CI's). */
-function publish(w, args, extra = {}) {
+/** Run the world's publish-release.mjs on the -r3, or on `id` (a hang fails at the timeout, not at CI's). */
+function publish(w, args, extra = {}, id = ID) {
   return new Promise((resolve, reject) => {
-    const p = spawn(process.execPath, [path.join(w.repo, "wasm64-build", "publish-release.mjs"), ID, "--release-dir", w.rel, "--r2", R2, ...args],
+    const p = spawn(process.execPath, [path.join(w.repo, "wasm64-build", "publish-release.mjs"), id, "--release-dir", path.join(w.stage, id), "--r2", R2, ...args],
       { env: env(w, extra), stdio: ["ignore", "pipe", "pipe"] });
     let out = "", err = "";
     p.stdout.on("data", (d) => (out += d)); p.stderr.on("data", (d) => (err += d));
@@ -358,7 +429,7 @@ describe("publish-release.mjs on a re-cut by reference, against fake git, gh and
     at.adds[`wasm64-build/releases/${BASE_ID}.json`] = serializeRelease(canonicalRelease({ ...fields, notes: [...fields.notes, "another note"] }));
     writeJson(path.join(w.state, "git.json"), g);
     const r = await publish(w, ["--only", "record,push", "--yes"]);
-    assertStoppedInPreflight(r, "another base record", new RegExp(`${esc(ID)} is not a re-cut by reference of wasm64-build/releases/${esc(BASE_ID)}\\.json at tag ${esc(BASE_ID)}:\\n  the base's release\\.json digest is sha256:`));
+    assertStoppedInPreflight(r, "another base record", new RegExp(`${esc(ID)} is not a release by reference of wasm64-build/releases/${esc(BASE_ID)}\\.json at tag ${esc(BASE_ID)}:\\n  the base's release\\.json digest is sha256:`));
     assertNoWrite(w, "another base record");
   });
 
@@ -409,7 +480,7 @@ describe("publish-release.mjs on a re-cut by reference, against fake git, gh and
     assert.ok(copies.at(-1).includes("+ /release.json"), "release.json last");
     // the lists passes 1-2 copy by: the shared objects, then the shared manifests (read from the dry run's, which are kept)
     const { shared } = splitFiles(readJson(path.join(w.rel, "release.json")));
-    const { objects, manifests } = r2Lists(shared);
+    const { objects, manifests } = r2Lists(readJson(path.join(w.rel, "release.json")));
     assert.deepEqual(planned.slice(0, 2).map((l) => fs.readFileSync(/ --files-from-raw (\S+)/.exec(l)[1], "utf8")), [objects, manifests].map((l) => l.map((p) => `${p}\n`).join("")));
     // GitHub: only the 3 own files on the -r3's release, then published
     const uploads = calls(w).filter((c) => c.tool === "gh" && c.argv[0] === "release" && c.argv[1] === "upload");
@@ -436,7 +507,7 @@ describe("publish-release.mjs on a re-cut by reference, against fake git, gh and
     const verification = rclone.slice(rclone.findLastIndex((a) => a[0] === "copy") + 1);
     assert.deepEqual(verification.map((a) => [a[0], a.at(a[0] === "check" ? 2 : -1)]), [["lsjson", DEST], ["hashsum", DEST], ["check", DEST]]);
     // the fetch check: the staged reader (unpacked in preflight), its runtime through the base's release, its tools from its own
-    assert.match(real.out, /FETCH VERIFIED \(runtime,tools\)/);
+    assert.match(real.out, /FETCH VERIFIED \(runtime,lists,tools\)/);
     const fetched = events(w).filter((e) => e.startsWith("FETCH ")).map((e) => e.slice(6));
     assert.deepEqual(fetched.filter((f) => f.startsWith(`${ID}/`)).sort(), [`${ID}/${path.posix.basename(TGZ)}`, `${ID}/release.json`].sort());
     assert.ok(fetched.includes(`${BASE_ID}/release.json`) && fetched.some((f) => /^lean-[^/]+\/lean\.wasm\./.test(f) && f.startsWith(`${BASE_ID}/`)), fetched.join("\n"));
@@ -467,5 +538,54 @@ describe("publish-release.mjs on a re-cut by reference, against fake git, gh and
     assert.match(r.out, new RegExp(`the \\d+ shared files on ${esc(BASE_PREFIX)} are the staged bytes`), "the base's prefix is fine");
     assert.ok(events(w).includes(`R2 COPY bucket/lean4-wasm64/${ID}/native64/native64.tar.gz (application/octet-stream)`), "it was copied");
     assert.match(r.err, new RegExp(`STOPPED — the shared files on ${esc(DEST)} are not the staged bytes \\(rclone check, exit 1\\):\\n  native64/native64\\.tar\\.gz: differs from the staged file`));
+  });
+
+  test("a recorded runtime release by reference: the real publish uploads its own files, copies the shared ones server-side, puts its own by list, and fetches", async () => {
+    const w = world({ runtime: true });
+    const rel = path.join(w.stage, RT_ID);
+    const record = readJson(path.join(rel, "release.json"));
+    const base = readJson(path.join(w.stage, BASE_ID, "release.json"));
+    assert.equal(byReferenceKind(record), "runtime");
+    assert.deepEqual(checkReleaseRecord(record), []);
+    assert.deepEqual(checkRecutBase(record, base), []);
+    const { own, shared } = splitFiles(record);
+    assert.ok(own.some((p) => p.startsWith("runtime/chunks/")) && own.includes("profiles/lean-lib.manifest.json") && own.includes(RT_TGZ));
+    const r = await publish(w, ["--yes"], {}, RT_ID);
+    assert.equal(r.status, 0, r.all);
+    assert.match(r.out, new RegExp(`\\nPUBLISHED ${esc(RT_ID)} \\(sha256:`));
+    assert.match(r.out, new RegExp(`by reference of ${esc(BASE_ID)} .*: ${own.length} own, ${shared.length} shared`));
+    // GitHub: exactly its own files, release.json and SHA256SUMS
+    const uploaded = calls(w).filter((c) => c.tool === "gh" && c.argv[0] === "release" && c.argv[1] === "upload").flatMap((c) => c.argv.slice(5));
+    assert.deepEqual(uploaded.map((f) => path.relative(rel, f).split(path.sep).join("/")).sort(), [...own].sort());
+    const created = readJson(path.join(w.state, "gh.json")).releases.find((x) => x.tag_name === RT_ID);
+    assert.equal(created.draft, false);
+    assert.match(created.body, new RegExp(`Release by reference of ${esc(BASE_ID)} \\(sha256:[0-9a-f]{64}\\): this release's assets are its own files \\(runtime/, profiles/lean-lib\\.\\* and tools/: ${own.length - 2} files\\)`));
+    // R2: the shared files server-side from the base's prefix, then its own objects and manifests by list, SHA256SUMS, release.json last
+    const dest = `${R2}/${RT_ID}/`;
+    const copies = calls(w).filter((c) => c.tool === "rclone" && c.argv[0] === "copy").map((c) => c.argv);
+    assert.deepEqual(copies.map((a) => a[1]), [BASE_PREFIX, BASE_PREFIX, rel, rel, rel, rel]);
+    assert.ok(copies.every((a) => a[2] === dest && a.includes("--immutable")));
+    assert.ok(copies.at(-1).includes("+ /release.json"), "release.json last");
+    // passes 1-4 are list-driven (the run's temp lists, removed after it): the own ones with their content type
+    assert.ok(copies.slice(0, 4).every((a) => a.includes("--files-from-raw")));
+    assert.deepEqual(copies.slice(2, 4).map((a) => a[a.indexOf("--header-upload") + 1]), ["Content-Type: application/octet-stream", "Content-Type: application/json"]);
+    assert.ok(r2Lists(record).ownManifests.length === 3);
+    assert.deepEqual(tree(path.join(w.state, "r2", "bucket", "lean4-wasm64", RT_ID)), tree(rel));
+    const puts = events(w).filter((e) => e.startsWith(`R2 PUT bucket/lean4-wasm64/${RT_ID}/`)).map((e) => e.split(" ")[2].split(`${RT_ID}/`)[1]);
+    assert.deepEqual(puts.slice(-2), ["SHA256SUMS", "release.json"]);
+    assert.deepEqual(puts.slice(0, -2).sort(), own.filter((p) => p !== "release.json" && p !== "SHA256SUMS").sort());
+    for (const e of events(w).filter((x) => x.startsWith(`R2 PUT bucket/lean4-wasm64/${RT_ID}/`))) {
+      const p = e.split(" ")[2].split(`${RT_ID}/`)[1];
+      assert.ok(e.endsWith(`(${contentTypeOf(p)})`), e);
+    }
+    assert.equal(events(w).filter((e) => e.startsWith(`R2 COPY bucket/lean4-wasm64/${RT_ID}/`)).length, shared.length);
+    // the fetch check: its runtime and tools from its own release, the lists from the base's
+    assert.match(r.out, /FETCH VERIFIED \(runtime,lists,tools\)/);
+    const fetched = events(w).filter((e) => e.startsWith("FETCH ")).map((e) => e.slice(6));
+    const mine = fetched.filter((f) => f.startsWith(`${RT_ID}/`)).map((f) => f.slice(RT_ID.length + 1));
+    assert.ok(mine.includes("release.json") && mine.includes(path.posix.basename(RT_TGZ)) && mine.includes("runtime-manifest.json") && mine.some((f) => f.startsWith("lean.wasm.")), mine.join(", "));
+    assert.ok(fetched.includes(`${BASE_ID}/release.json`) && fetched.includes(`${BASE_ID}/essential-modules.txt`), fetched.join("\n"));
+    assert.ok(!fetched.some((f) => f.startsWith(`${BASE_ID}/lean.`)), "no runtime chunk from the base");
+    assert.deepEqual(calls(w).filter((c) => c.tool === "git" && isWrite(c)), [], "recorded and pushed already");
   });
 });

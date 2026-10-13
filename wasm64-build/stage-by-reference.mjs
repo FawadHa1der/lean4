@@ -1,14 +1,15 @@
 #!/usr/bin/env node
-// stage-by-reference.mjs <step> <args…> — the node steps of `stage-release.sh --base`, a re-cut by
-// reference (js/formats/release.md, "Re-cut by reference"). The script runs each step as its own
-// process, in this order, and dies with its own message after a refusal (exit 1, the reason on
-// stderr). It runs from the working tree beside the script, as publish-release.mjs does: it is not
-// in the tools tarball. Unit-tested: js/test/stage-by-reference.test.mjs.
+// stage-by-reference.mjs <step> <args…> — the node steps of `stage-release.sh --base`, a release by
+// reference (js/formats/release.md, "Release by reference") of either kind: a tools re-cut
+// (--recut <n>) or a runtime release by reference (--runtime <build dir>). The script runs each step
+// as its own process, in this order, and dies with its own message after a refusal (exit 1, the
+// reason on stderr). It runs from the working tree beside the script, as publish-release.mjs does:
+// it is not in the tools tarball. Unit-tested: js/test/stage-by-reference.test.mjs.
 //
 //   base   <base release.json> <tag>
 //          the base must be a first cut of <tag> (checkReleaseRecord, no base of its own, the
 //          lean4-wasm64 package, a lean-lib pack); prints "<id> <digest> <kernel commit>
-//          <gate.wasmSha256> <lean-lib rawSha256>"
+//          <gate.wasmSha256> <lean-lib rawSha256> <docker.recipeCommit, or ->"
 //   mirror <base release.json> <mirror dir> <out> <id>
 //          before any write: the mirror is not, does not contain and does not lie inside <out>/<id>,
 //          <out>/<id>.gate or <out>/<id>.tools (judged by each directory's identity, not its
@@ -16,31 +17,34 @@
 //   clone  <base release.json> <mirror dir> <release dir>
 //          clones those files into <release dir>, each sha256-checked against the base's record;
 //          a failure removes <release dir>
-//   config <base release.json> <config out> <id> <recut> <checks> <version> <tgz> <commit> [<note>…]
-//          writes the release config from the base's record alone (release.mjs --base re-derives
-//          the rest from the clones)
+//   config <base release.json> <config out> <id> <own> <checks> <version> <tgz> <commit> [<note>…]
+//          writes the release config from the base's record and <own>: a re-cut number (a tools
+//          re-cut) or <kernel commit>:<patch>:<lean.wasm sha256> (a runtime release by reference,
+//          whose build's GATE-PASSED binds the two); release.mjs --base re-derives the rest from
+//          the staged dir
 //   final  <base release.json> <release dir> <sidecar prefix>
 //          release.json names the base and keeps its equality rules, and SHA256SUMS differs from the
-//          base's at exactly release.json and the two tarballs; then writes the shared paths for the
-//          R2 copy to <sidecar prefix>.r2-objects.txt / .r2-manifests.txt
+//          base's at release.json and at the files the release owns only; then, for a tools re-cut
+//          (its printed manual fallback), writes the shared paths for the R2 copy to
+//          <sidecar prefix>.r2-objects.txt / .r2-manifests.txt
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { RELEASE_ID, checkRecutBase, checkReleaseRecord, isRecutOwnPath, sha256sums } from "./js/release-record.mjs";
+import { RELEASE_ID, byReferenceKind, checkRecutBase, checkReleaseRecord, isOwnPath, isRecutOwnPath, ownLabel, sha256sums } from "./js/release-record.mjs";
 import { sha256File } from "./js/artifact-id.mjs";
 
 const readRecord = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 
 // ---------- base ----------
 
-/** Why `b` cannot be the base of a re-cut by reference of `tag` (empty: it can). */
+/** Why `b` cannot be the base of a release by reference of `tag` (empty: it can). */
 export function baseProblems(b, tag) {
   const p = checkReleaseRecord(b);
   const m = RELEASE_ID.exec(b?.id ?? "");
-  if (!m || m[1] !== tag || m[3]) p.push(`it is ${b?.id}, not a first cut of ${tag} (lean-${tag}-<kernel7>): a re-cut by reference names its first cut`);
-  if (b?.base !== undefined) p.push(`it is itself a re-cut by reference (of ${b.base?.id})`);
-  if (b?.tools?.package !== "lean4-wasm64") p.push(`its tools are ${JSON.stringify(b?.tools?.package)}, not lean4-wasm64: a re-cut ships the base's package`);
+  if (!m || m[1] !== tag || m[3]) p.push(`it is ${b?.id}, not a first cut of ${tag} (lean-${tag}-<kernel7>): a release by reference names a first cut`);
+  if (b?.base !== undefined) p.push(`it names a base of its own (${b.base?.id}): a base names no base of its own`);
+  if (b?.tools?.package !== "lean4-wasm64") p.push(`its tools are ${JSON.stringify(b?.tools?.package)}, not lean4-wasm64: a release by reference ships the base's package`);
   if (!(b?.packs ?? []).find((k) => k?.id === "lean-lib")) p.push("it has no lean-lib pack: the new tools are gated on the base's runtime and its lean-lib");
   return p;
 }
@@ -51,7 +55,7 @@ export function baseFields(file, tag) {
   const p = baseProblems(b, tag);
   if (p.length) throw new Error(`${file}: ${p.join("; ")}`);
   const leanLib = b.packs.find((k) => k?.id === "lean-lib");
-  return [b.id, b.digest, b.kernel.commit, b.gate.wasmSha256, leanLib.rawSha256].join(" ");
+  return [b.id, b.digest, b.kernel.commit, b.gate.wasmSha256, leanLib.rawSha256, b.docker?.recipeCommit ?? "-"].join(" ");
 }
 
 // ---------- mirror ----------
@@ -145,28 +149,46 @@ export async function cloneShared(file, mirror, rel) {
 // ---------- config ----------
 
 /**
- * The release config of a re-cut by reference, from its base's record `b` alone: every field but the
- * re-cut's own (id, recut, base, gate.checks, tools, notes) as the base recorded it. `recut` and
+ * The release config of a release by reference, from its base's record `b` and what it owns:
+ * every field but its own as the base recorded it. A tools re-cut (`recut`): its own are id, recut,
+ * base, gate.checks, tools and notes. A runtime release by reference (`runtime` = {kernelCommit,
+ * kernelPatch, wasmSha256}, its build's): also the kernel commit and patch, the gate (bound to them)
+ * and the lean-lib entry (its own build's: release.mjs reads the rest from its manifest), and no
+ * recut; the base's notes then follow a separator that says which of them hold for it. `recut` and
  * `checks` are the script's text (a count that is not digits is null).
  */
-export function recutConfig(b, { id, recut, checks, version, tgz, commit, notes = [] }) {
+export function recutConfig(b, { id, recut, runtime = null, checks, version, tgz, commit, notes = [] }) {
+  const count = /^\d+$/.test(checks) ? Number(checks) : null;
+  const kernelCommit = runtime ? runtime.kernelCommit : b.kernel.commit;
+  // what release.mjs cannot derive from the cloned manifests, as the base recorded it (a pack's note included)
+  const entry = (p) => ({ id: p.id, compiler: p.lean.compiler, ...(p.mathlib ? { mathlib: p.mathlib } : {}), ...(p.note ? { note: p.note } : {}) });
+  const sep = `Notes of ${b.id} (the base, ${b.digest}) follow verbatim: what they say of its packs, native64 and lists holds for this release, `
+    + "whose files those are; what they say of its runtime and lean-lib is that release's.";
   return {
-    id, upstreamTag: b.lean.upstreamTag, kernelCommit: b.kernel.commit, kernelPatch: b.kernel.patch,
-    kernelRepo: b.kernel.repo, kernelBranch: b.kernel.branch, recut: Number(recut), base: { id: b.id, digest: b.digest },
+    id, upstreamTag: b.lean.upstreamTag, kernelCommit, kernelPatch: runtime ? runtime.kernelPatch : b.kernel.patch,
+    kernelRepo: b.kernel.repo, kernelBranch: b.kernel.branch, ...(runtime ? {} : { recut: Number(recut) }), base: { id: b.id, digest: b.digest },
     leanVersion: b.lean.version,
-    gate: { commit: b.gate.commit, wasmSha256: b.gate.wasmSha256, checks: /^\d+$/.test(checks) ? Number(checks) : null },
-    // what release.mjs cannot derive from the cloned manifests, as the base recorded it (a pack's note included)
-    packs: b.packs.map((p) => ({ id: p.id, compiler: p.lean.compiler, ...(p.mathlib ? { mathlib: p.mathlib } : {}), ...(p.note ? { note: p.note } : {}) })),
+    gate: runtime ? { commit: kernelCommit, wasmSha256: runtime.wasmSha256, checks: count } : { commit: b.gate.commit, wasmSha256: b.gate.wasmSha256, checks: count },
+    packs: b.packs.map((p) => (runtime && p.id === "lean-lib" ? { id: "lean-lib", compiler: kernelCommit } : entry(p))),
     native64: b.native64, docker: b.docker, mathlib: b.mathlib, modules: b.modules, hosting: b.hosting,
     tools: { package: "lean4-wasm64", version, tgz: `tools/${tgz}`, commit },
-    // the re-cut's own notes first, then the base's verbatim (formats/release.md)
-    notes: [...notes, ...b.notes],
+    // its own notes first, then the base's verbatim (formats/release.md)
+    notes: runtime ? [...notes, sep, ...b.notes] : [...notes, ...b.notes],
   };
 }
 
-/** Step `config`: writes recutConfig(<base record>) to `config`. */
-export function writeRecutConfig(file, config, id, recut, checks, version, tgz, commit, notes = []) {
-  fs.writeFileSync(config, JSON.stringify(recutConfig(readRecord(file), { id, recut, checks, version, tgz, commit, notes }), null, 2) + "\n");
+const RUNTIME_OWN = /^([0-9a-f]{40}):(\d{4}[a-z]?):([0-9a-f]{64})$/;
+
+/** Step `config`: writes recutConfig(<base record>) to `config`; `own` is a re-cut number or <kernel commit>:<patch>:<lean.wasm sha256>. */
+export function writeRecutConfig(file, config, id, own, checks, version, tgz, commit, notes = []) {
+  let kind;
+  if (/^\d+$/.test(own)) kind = { recut: own };
+  else {
+    const m = RUNTIME_OWN.exec(own);
+    if (!m) throw new Error(`<own> ${JSON.stringify(own)} is neither a re-cut number nor <kernel commit>:<patch>:<lean.wasm sha256>`);
+    kind = { runtime: { kernelCommit: m[1], kernelPatch: m[2], wasmSha256: m[3] } };
+  }
+  fs.writeFileSync(config, JSON.stringify(recutConfig(readRecord(file), { id, ...kind, checks, version, tgz, commit, notes }), null, 2) + "\n");
 }
 
 // ---------- final ----------
@@ -178,9 +200,12 @@ const parseSums = (text) => new Map(text.split("\n").filter(Boolean).map((l) => 
 }));
 
 /**
- * Step `final`, after release.mjs and verify: only tools/ differs from the base (RELEASE.md), then the
- * shared paths by the content type R2 serves them with, written to `<sidecar>.r2-objects.txt` and
- * `<sidecar>.r2-manifests.txt` (nothing is written on a refusal).
+ * Step `final`, after release.mjs and verify: the record names this base and keeps the equality
+ * rules, and its SHA256SUMS differs from the base's at release.json and at files it owns only
+ * (RELEASE.md; a path only the base lists is judged by the same rule). Then, for a tools re-cut
+ * only, the shared paths by the content type R2 serves them with, written to
+ * `<sidecar>.r2-objects.txt` and `<sidecar>.r2-manifests.txt` (its printed manual fallback reads
+ * them; `publish` derives its own lists from the record). Nothing is written on a refusal.
  */
 export async function finalCheck(file, rel, sidecar) {
   const { contentTypeOf } = await import("./publish-release.mjs");
@@ -191,21 +216,25 @@ export async function finalCheck(file, rel, sidecar) {
   // whatever release.mjs and verify did: the record names this base, and the equality rules hold
   if (r.base?.id !== b.id || r.base?.digest !== b.digest) p.push(`release.json names base ${JSON.stringify(r.base)}, not ${b.id} (${b.digest})`);
   p.push(...checkRecutBase(r, b));
-  // SHA256SUMS against the base's own, computed from its record: only release.json and the two tarballs may differ
+  // SHA256SUMS against the base's own, computed from its record: only release.json and its own files may differ
   const theirs = parseSums(sha256sums([...b.files, { path: "release.json", sha256: createHash("sha256").update(baseText).digest("hex") }]));
   const ours = parseSums(fs.readFileSync(path.join(rel, "SHA256SUMS"), "utf8"));
   const differ = [...new Set([...theirs.keys(), ...ours.keys()])].filter((q) => theirs.get(q) !== ours.get(q)).sort();
-  const allowed = [...new Set(["release.json", b.tools.tgz, r.tools?.tgz])].sort();
-  if (differ.join("\n") !== allowed.join("\n")) p.push(`SHA256SUMS differs from ${b.id}'s at ${differ.join(", ") || "nothing"}: it must differ at exactly ${allowed.join(", ")}`);
+  const bad = differ.filter((q) => q !== "release.json" && !isOwnPath(r, q));
+  if (!differ.includes("release.json")) p.push(`SHA256SUMS names ${b.id}'s release.json: a release by reference has its own`);
+  if (bad.length) p.push(`SHA256SUMS differs from ${b.id}'s at ${bad.join(", ")}: a release by reference differs from its base only at release.json and the files it owns (${ownLabel(r)})`);
   if (p.length) throw new Error(p.join("; "));
   // the shared paths by the content type R2 serves them with (publish-release.mjs, HOSTING.md): the
   // server-side copy from the base's prefix keeps each object's own
-  const shared = r.files.map((f) => f.path).filter((q) => !isRecutOwnPath(q));
+  const shared = r.files.map((f) => f.path).filter((q) => !isOwnPath(r, q));
   const objects = shared.filter((q) => contentTypeOf(q) === "application/octet-stream");
   const manifests = shared.filter((q) => contentTypeOf(q) === "application/json");
-  fs.writeFileSync(`${sidecar}.r2-objects.txt`, objects.map((q) => `${q}\n`).join(""));
-  fs.writeFileSync(`${sidecar}.r2-manifests.txt`, manifests.map((q) => `${q}\n`).join(""));
-  return `only tools/ differs from ${b.id}: SHA256SUMS differs at ${differ.join(", ")}; ${r.files.length} files, ${r.files.length - shared.length} own, ${shared.length} shared (${objects.length} objects, ${manifests.length} manifests)`;
+  if (byReferenceKind(r) === "tools") {
+    fs.writeFileSync(`${sidecar}.r2-objects.txt`, objects.map((q) => `${q}\n`).join(""));
+    fs.writeFileSync(`${sidecar}.r2-manifests.txt`, manifests.map((q) => `${q}\n`).join(""));
+  }
+  return `only release.json and its own files (${ownLabel(r)}) differ from ${b.id}: SHA256SUMS differs at ${differ.length} paths; `
+    + `${r.files.length} files, ${r.files.length - shared.length} own, ${shared.length} shared (${objects.length} objects, ${manifests.length} manifests)`;
 }
 
 // ---------- the script's entry ----------
@@ -214,7 +243,7 @@ const STEPS = {
   base: { args: 2, run: ([file, tag]) => baseFields(file, tag) },
   mirror: { args: 4, run: ([file, mirror, out, id]) => checkMirror(file, mirror, out, id) },
   clone: { args: 3, run: ([file, mirror, rel]) => cloneShared(file, mirror, rel) },
-  config: { args: 8, more: true, run: ([file, config, id, recut, checks, version, tgz, commit, ...notes]) => writeRecutConfig(file, config, id, recut, checks, version, tgz, commit, notes) },
+  config: { args: 8, more: true, run: ([file, config, id, own, checks, version, tgz, commit, ...notes]) => writeRecutConfig(file, config, id, own, checks, version, tgz, commit, notes) },
   final: { args: 3, run: ([file, rel, sidecar]) => finalCheck(file, rel, sidecar) },
 };
 

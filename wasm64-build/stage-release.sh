@@ -7,8 +7,7 @@
 #   wasm64-build/stage-release.sh <tag> [options]
 #
 #   --runtime <dir>         build dir of the runtime to release (default: the tag's
-#                           build dir). A kernel-only fix releases its own build
-#                           with the import's packs, native64 and lists.
+#                           build dir). With --base: a runtime release by reference.
 #   --packs-from <dir>      copy the packs whose manifests <dir> holds (with exactly
 #                           the parts they name; repeatable, searched in order;
 #                           clones where the filesystem can) instead of packing
@@ -20,12 +19,23 @@
 #                           --match-runtime, else "qed64-wasm64@<commit10> (upstream <tag>)")
 #   --note <text>           a release note (repeatable)
 #   --recut <n>             a tools-only re-cut of the same runtime: id suffix -r<n> (n ≥ 2)
-#   --base <dir>            a re-cut by reference (needs --recut, and at least one --note): a mirror of
-#                           the base release (served layout, e.g. `lean4-wasm64 fetch --only all` of
-#                           it, or its own staged dir) whose release.json is the record the base's tag
-#                           holds. No build dir, GATE-PASSED or Docker: every file outside tools/ is
-#                           cloned from the mirror and sha256-checked against that record, and the new
-#                           tools are gated on the base's runtime + lean-lib taken from those clones.
+#   --base <dir>            a release by reference (js/formats/release.md, "Release by reference";
+#                           needs at least one --note): a mirror of its base, a first cut of <tag>
+#                           (served layout, e.g. `lean4-wasm64 fetch --only all` of it, or its own
+#                           staged dir) whose release.json is the record the base's tag holds. No
+#                           import build dir and no Docker: every file of the base outside tools/ is
+#                           cloned from the mirror and sha256-checked against that record. Then
+#                             --recut <n>             a tools re-cut <base>-r<n>: the new tools are
+#                                                     gated on the base's runtime + lean-lib taken
+#                                                     from those clones
+#                             --runtime <build dir>   a runtime release by reference lean-<tag>-<kernel7>
+#                                                     of that build (its GATE-PASSED; the same Docker
+#                                                     recipe, an unchanged olean format, a kernel that
+#                                                     descends from the base's): its runtime/ and
+#                                                     lean-lib are rebuilt over the clones
+#   --stdlib-drift <note>   with --base --runtime: stdlib Lean sources (src/Init, src/Std, src/Lean)
+#                           changed since the base's kernel, and <note> says why that is harmless
+#                           (recorded in notes); refused when nothing changed
 #   --out <dir>             parent of the release dir (default ../wasm64-lean-kernel-release)
 #
 # The release dir is <out>/<id>; beside it sit <id>.config.json (the release
@@ -35,19 +45,20 @@
 # are rebuilt; the native64 tarball and packs packed by an earlier run are kept
 # only if their recorded fingerprints of the inputs still match.
 #
-# A re-cut by reference (--base; its node steps: stage-by-reference.mjs) runs, in
-# order: the clones (each sha256-checked), tools, the gate on the clones,
-# release.json (release.mjs --base), verify-release --deep --base, and last the
-# check that its SHA256SUMS differs from the base's at exactly release.json and
-# the two tarballs, which then writes <id>.r2-objects.txt / <id>.r2-manifests.txt
-# (its shared paths, for the R2 copy). A failure or an interrupt from
-# release.json on removes release.json and SHA256SUMS (as one during the gate's
-# fetch removes the base's record it reads there). Beside the release dir it
-# leaves <id>.config.json, <id>.verify.json, <id>.gate/ (the artifact its gate
-# ran on, kept for a re-run while <id>.gate.stamp holds), <id>.tools/ (its tools
-# tarball, extracted), <id>.gate.log and the R2 lists; no <id>.pack-set.json
-# (a by-value staging's sidecars of the same id are removed). Re-running
-# re-clones the files and repacks the tools.
+# A release by reference (--base; its node steps: stage-by-reference.mjs) runs, in
+# order: the clones (each sha256-checked), then a tools re-cut: tools, the gate on the
+# clones; a runtime release by reference: runtime/ and the lean-lib pack from the build
+# dir (its gate is the build dir's), then tools. Then release.json (release.mjs --base),
+# verify-release --deep --base, and last the check that its SHA256SUMS differs from the
+# base's at release.json and its own files only; for a tools re-cut that check then writes
+# <id>.r2-objects.txt / <id>.r2-manifests.txt (its shared paths, for the printed R2 copy). A
+# failure or an interrupt from release.json on removes release.json and SHA256SUMS (as one
+# during the gate's fetch removes the base's record it reads there). Beside the release dir
+# it leaves <id>.config.json, <id>.verify.json, <id>.tools/ (its tools tarball, extracted);
+# a tools re-cut also <id>.gate/ (the artifact its gate ran on, kept for a re-run while
+# <id>.gate.stamp holds), <id>.gate.log and the R2 lists; a runtime release by reference
+# <id>.pack-set.json (where its lean-lib came from). A by-value staging's sidecars of the
+# same id are removed. Re-running re-clones the files and repacks the tools.
 #
 # A release is immutable once its tag exists; until then a re-run replaces it.
 set -euo pipefail
@@ -77,12 +88,12 @@ unguard_rel() { trap - EXIT INT TERM HUP; }
 TAG="${1:-}"; [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$REPO/wasm64-build/stage-release.sh"; exit 2; }
 shift
 K="$(abs "${QED64_BUILD_DIR:-$REPO/../wasm64-lean-kernel-build-$TAG}")"
-R="$K"; OUT="$REPO/../wasm64-lean-kernel-release"; REVISION=""; RECUT=""; MATCH_RUNTIME=""; BASE_REC_DIR=""
+R="$K"; R_GIVEN=""; OUT="$REPO/../wasm64-lean-kernel-release"; REVISION=""; RECUT=""; MATCH_RUNTIME=""; BASE_REC_DIR=""; STDLIB_DRIFT=""
 PACKS_FROM=(); NOTES=(); BY_VALUE=()
 while [ $# -gt 0 ]; do
   [ $# -ge 2 ] || die "$1 needs a value" 2
   case "$1" in
-    --runtime) R="$(abs "$2")"; BY_VALUE+=("$1") ;;
+    --runtime) R="$(abs "$2")"; R_GIVEN=yes ;;
     --packs-from) d="$(abs "$2")"; [ -d "$d" ] || die "--packs-from $2: not a directory" 2; PACKS_FROM+=("$(cd "$d" && pwd)"); BY_VALUE+=("$1") ;;
     --match-runtime) f="$(abs "$2")"; [ -f "$f" ] || die "--match-runtime $2: not a file" 2; MATCH_RUNTIME="$(cd "$(dirname "$f")" && pwd)/$(basename "$f")"; BY_VALUE+=("$1") ;;
     --revision) REVISION="$2"; BY_VALUE+=("$1") ;;
@@ -90,75 +101,185 @@ while [ $# -gt 0 ]; do
     --recut) [[ "$2" =~ ^([2-9]|[1-9][0-9]+)$ ]] || die "--recut must be an integer ≥ 2 (the first cut has no suffix)" 2; RECUT="$2" ;;
     --base) [ -n "$2" ] || die "--base needs the base release's mirror dir" 2
       d="$(abs "$2")"; [ -f "$d/release.json" ] || die "--base $2: no release.json there" 2; BASE_REC_DIR="$(cd "$d" && pwd -P)" ;;
+    --stdlib-drift) [ -n "$2" ] || die "--stdlib-drift needs a note" 2; STDLIB_DRIFT="$2" ;;
     --out) OUT="$(abs "$2")" ;;
     *) die "unknown option $1" 2 ;;
   esac
   shift 2
 done
 
-# ---------- a re-cut by reference (--base; js/formats/release.md, "Re-cut by reference") ----------
-# Its record differs from its base's only in id, base, gate.checks, tools, notes and its tools/
-# file. Every other file is cloned from a mirror of the base (its first cut, pinned by the base's
-# own tag) and checked against the base's record; the new tools are packed and gated, as the
-# tarball ships them, on the base's runtime and lean-lib taken from those clones. No build dir,
-# GATE-PASSED or Docker, and nothing from the network.
-stage_by_reference() {
-  V="${TAG#v}"
-  BASE_REC_FILE="$BASE_REC_DIR/release.json"
-  SBR="$REPO/wasm64-build/stage-by-reference.mjs"   # the node steps (unit-tested: js/test/stage-by-reference.test.mjs)
-  # ---------- the base: a first cut of $TAG, the record its tag holds ----------
-  BASE_REC_FIELDS="$(node "$SBR" base "$BASE_REC_FILE" "$TAG")" || die "the base at $BASE_REC_DIR cannot be re-cut by reference (reason above)"
-  read -r BASE_REC_ID BASE_REC_DIGEST C WASM_SHA BASE_REC_LIB <<<"$BASE_REC_FIELDS"
+V="${TAG#v}"
+hex40() { [[ "$(tr -d ' \n\r' < "$1" 2>/dev/null)" =~ ^[0-9a-f]{40}$ ]]; }
+
+# ---------- shared steps (the release by value and both kinds by reference) ----------
+
+# the line, as for any release: kernel commit $1 is in this repository, on $LINE and in HEAD, and its
+# upstream tag is $TAG; sets ON_ORIGIN
+on_line() {
+  git cat-file -e "$1^{commit}" 2>/dev/null || die "kernel commit $1 is not in this repository"
+  git merge-base --is-ancestor "$1" "$LINE" || die "kernel commit $1 is not on $LINE"
+  git merge-base --is-ancestor "$1" HEAD || die "HEAD does not contain kernel commit $1 (stage from $LINE or a descendant)"
+  ON_ORIGIN=yes; git merge-base --is-ancestor "$1" "origin/$LINE" 2>/dev/null || ON_ORIGIN=no
+  # the upstream release a kernel commit carries is the NEWEST stable tag it contains
+  NEWEST="$(git tag --merged "$1" 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)"
+  [ "$NEWEST" = "$TAG" ] || die "kernel commit ${1:0:10} carries upstream ${NEWEST:-no stable tag}, not $TAG"
+}
+
+# what is being released: the runtime build dir $R's BUILT-COMMIT (C), its lean.wasm (WASM, WASM_SHA)
+# bound to it by a passing GATE-PASSED (exit 31 otherwise), and the gate's count (CHECKS)
+runtime_identity() {
+  hex40 "$R/BUILT-COMMIT" || die "$R/BUILT-COMMIT missing or not 40 hex"
+  C="$(tr -d ' \n\r' < "$R/BUILT-COMMIT")"
+  WASM="$R/build/stage1/bin/lean.wasm"; [ -s "$WASM" ] || die "$WASM missing"
+  WASM_SHA="$(shasum -a 256 "$WASM" | cut -c1-64)"
+  [ -f "$R/GATE-PASSED" ] && [ "$(sed -n 1p "$R/GATE-PASSED")" = "$C" ] && [ "$(sed -n 2p "$R/GATE-PASSED")" = "$WASM_SHA" ] \
+    || die "$R has no passing gate for commit ${C:0:10} and this lean.wasm (GATE-PASSED; import-release.sh gate / gate-dir)" 31
+  CHECKS="$(grep -c '^ ok ' "$R/gate.log" 2>/dev/null || true)"; [[ "$CHECKS" =~ ^[0-9]+$ ]] || CHECKS=""
+}
+
+# patch id (formats/README.md rule 4) of kernel commit $1, printed: the last PATCHES.md heading —
+# read at HEAD, since an entry is often written after its code — whose named commit is $1 or an
+# ancestor of $1
+patch_id_of() {
+  node --input-type=module - "$JS/artifact-id.mjs" "$1" <<'JS'
+import fs from "node:fs"; import { execFileSync, spawnSync } from "node:child_process";
+const [lib, C] = process.argv.slice(2);
+const { patchIdOf } = await import(lib);
+const { patchHeadings } = await import(lib);
+const md = execFileSync("git", ["show", "HEAD:wasm64-build/PATCHES.md"], { encoding: "utf8" });
+// every heading must name a commit of this line, once, in order — a typo, an amended or
+// rebased hash, a feature-branch original or a copy-paste would silently record a wrong id
+const isAnc = (a, b) => spawnSync("git", ["merge-base", "--is-ancestor", a, b]).status === 0;
+const hs = patchHeadings(md);
+const bad = [];
+// a heading meant as a patch entry but not spelled "## NNNN[a-z] …" would be skipped, and so would
+// an entry written before it names its commit ("## Unreleased: NNNN — …"): a build of its code
+// would silently stage as the patch before it
+for (const line of md.split("\n")) {
+  if (/^#{1,6}\s*\d{3,}/.test(line) && !/^## \d{4}[a-z]?\b/.test(line)) bad.push(`malformed patch heading "${line.slice(0, 40)}"`);
+  if (/^#{1,6}\s*Unreleased\b/i.test(line)) bad.push(`unplaced patch entry "${line.slice(0, 40)}" (name its commit: "## NNNN — … (<commit>)")`);
+}
+hs.forEach((h, i) => {
+  if (!h.commit) return; // patchIdOf refuses those
+  if (spawnSync("git", ["cat-file", "-e", `${h.commit}^{commit}`]).status !== 0) bad.push(`${h.id} names unknown commit ${h.commit}`);
+  else if (!isAnc(h.commit, "HEAD")) bad.push(`${h.id} names ${h.commit}, which is not on this line`);
+  else if (hs.slice(0, i).some((g) => g.commit === h.commit)) bad.push(`${h.id} repeats ${h.commit}`);
+  else if (i > 0 && hs[i - 1].commit && !isAnc(hs[i - 1].commit, h.commit)) bad.push(`${h.id} (${h.commit}) does not descend from ${hs[i - 1].id} (${hs[i - 1].commit})`);
+});
+if (bad.length) throw new Error(`PATCHES.md: ${bad.join("; ")}`);
+console.log(patchIdOf(md, (c) => spawnSync("git", ["merge-base", "--is-ancestor", c, C]).status === 0));
+JS
+}
+
+# the runtime of build dir $1 into release dir $2 (sourceRevision $3): runtime/ chunked anew, then
+# the build's other bin/ files under runtime/bin
+stage_runtime() {
+  rm -rf "$2/runtime"
+  node "$JS/chunk-runtime.mjs" --bin "$1/build/stage1/bin" --out "$2/runtime" --lean-version "$V" --revision "$3" | tail -2
+  mkdir -p "$2/runtime/bin"
+  # lean.js.symbols (0039's --emit-symbol-map, the crash-triage map) stays in the build tree
+  for f in "$1/build/stage1/bin/"*; do
+    case "$(basename "$f")" in lean.js|lean.wasm|package.json|lean.js.symbols) ;; *) cp -p "$f" "$2/runtime/bin/" ;; esac
+  done
+}
+
+# ---------- a release by reference (--base; js/formats/release.md, "Release by reference") ----------
+# Its record names a base (a first cut of $TAG, pinned by the base's own tag) and differs from the
+# base's only where its kind says. Every file of the base outside tools/ is cloned from a mirror of
+# the base and checked against the base's record; what the release owns is then made anew over the
+# clones. No import build dir, no Docker, and nothing from the network.
+BASE_REC_FILE="$BASE_REC_DIR/release.json"
+SBR="$REPO/wasm64-build/stage-by-reference.mjs"   # the node steps (unit-tested: js/test/stage-by-reference.test.mjs)
+
+# the base: a first cut of $TAG, the record its tag holds, and HEAD descends from that tag
+pin_base() {
+  BASE_REC_FIELDS="$(node "$SBR" base "$BASE_REC_FILE" "$TAG")" || die "the base at $BASE_REC_DIR cannot be the base of a release by reference (reason above)"
+  read -r BASE_REC_ID BASE_REC_DIGEST BASE_K BASE_WASM BASE_REC_LIB BASE_RECIPE <<<"$BASE_REC_FIELDS"
   git rev-parse -q --verify "refs/tags/$BASE_REC_ID" >/dev/null \
     || die "tag $BASE_REC_ID is not in this repository (the base is pinned by its own tag): git fetch --no-tags origin refs/tags/$BASE_REC_ID:refs/tags/$BASE_REC_ID"
   git show "refs/tags/$BASE_REC_ID:wasm64-build/releases/$BASE_REC_ID.json" 2>/dev/null | cmp -s - "$BASE_REC_FILE" \
     || die "$BASE_REC_FILE is not the record tag $BASE_REC_ID holds (wasm64-build/releases/$BASE_REC_ID.json): the mirror must be that release"
   git merge-base --is-ancestor "refs/tags/$BASE_REC_ID^{commit}" HEAD \
-    || die "HEAD does not descend from $BASE_REC_ID's record commit: cut the re-cut on $LINE or on a branch off its base (publish refuses it otherwise)"
+    || die "HEAD does not descend from $BASE_REC_ID's record commit: cut the release on $LINE or on a branch off its base (publish refuses it otherwise)"
+}
 
-  # ---------- the line, as for any release: the kernel commit, its upstream tag, the id, the tools ----------
-  git cat-file -e "$C^{commit}" 2>/dev/null || die "kernel commit $C is not in this repository"
-  git merge-base --is-ancestor "$C" "$LINE" || die "kernel commit $C is not on $LINE"
-  git merge-base --is-ancestor "$C" HEAD || die "HEAD does not contain kernel commit $C (stage from $LINE or a descendant)"
-  ON_ORIGIN=yes; git merge-base --is-ancestor "$C" "origin/$LINE" 2>/dev/null || ON_ORIGIN=no
-  NEWEST="$(git tag --merged "$C" 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)"
-  [ "$NEWEST" = "$TAG" ] || die "kernel commit ${C:0:10} carries upstream ${NEWEST:-no stable tag}, not $TAG"
-  K7="${C:0:7}"; ID="$BASE_REC_ID-r$RECUT"
-  ! git rev-parse -q --verify "refs/tags/$ID" >/dev/null || die "tag $ID exists: that release is cut and immutable (re-cut with another --recut <n>)"
+# the id is free, the tools come from a clean HEAD, and their version is $1
+check_release_id() {
+  ! git rev-parse -q --verify "refs/tags/$ID" >/dev/null || die "tag $ID exists: that release is cut and immutable"
   [ -z "$(git status --porcelain -- wasm64-build/js wasm64-build/PATCHES.md)" ] || die "wasm64-build/js or PATCHES.md has uncommitted changes: the tools tarball comes from HEAD — commit them first"
   TOOLS_COMMIT="$(git rev-parse HEAD)"
   PKG_VERSION="$(node -p 'require(process.argv[1]).version' "$JS/package.json")"
-  [ "$PKG_VERSION" = "$V-$K7-r$RECUT" ] || die "wasm64-build/js/package.json version is $PKG_VERSION, the re-cut needs $V-$K7-r$RECUT (bump and commit it first)"
+  [ "$PKG_VERSION" = "$1" ] || die "wasm64-build/js/package.json version is $PKG_VERSION, the release needs $1 (bump and commit it first)"
   command -v npm >/dev/null || die "npm is not on PATH (the tools tarball is npm pack's)"
+}
 
-  # ---------- the mirror: every file of the base outside tools/, and nothing staging replaces ----------
+# the mirror (every file of the base outside tools/, and nothing staging replaces), then the release
+# dir: every one of those files, a clone of the mirror's, hashed against the base's record
+clone_base() {
   # (the dirs staging replaces are compared by identity, not spelling: on a case-insensitive APFS
   # another case of --out names the mirror too)
   node "$SBR" mirror "$BASE_REC_FILE" "$BASE_REC_DIR" "$OUT" "$ID" || die "cannot stage from the mirror $BASE_REC_DIR (reason above)"
-  say "re-cut by reference $ID of $BASE_REC_ID (${BASE_REC_DIGEST:0:23}…): kernel ${C:0:10}, tools $PKG_VERSION at ${TOOLS_COMMIT:0:10}, mirror $BASE_REC_DIR"
   mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"; REL="$OUT/$ID"   # only now: every refusal comes first
   # what an earlier staging of this id left that no longer holds: a by-value one's pack provenance,
-  # an earlier run's R2 lists (written again once this run's release is checked)
+  # an earlier run's R2 lists (a tools re-cut writes them again once this run's release is checked)
   rm -f "$OUT/$ID.pack-set.json" "$OUT/$ID.packed.json" "$OUT/$ID.copied.json" "$OUT/$ID.fingerprints.json" "$OUT/$ID.native64.stamp" \
     "$OUT/$ID.r2-objects.txt" "$OUT/$ID.r2-manifests.txt"
-
-  # ---------- every file outside tools/: a clone of the mirror's, hashed against the base's record ----------
   say "== clones"
   rm -rf "$REL"
   # (clones where the filesystem can, never hard links; only the record's paths; each sha256-checked)
   node "$SBR" clone "$BASE_REC_FILE" "$BASE_REC_DIR" "$REL" || die "cloning from $BASE_REC_DIR failed (reason above); $REL removed"
+}
 
-  # ---------- tools (always from the committed tree at HEAD) ----------
+# tools (always from the committed tree at HEAD), and the tarball extracted beside the release dir:
+# its own tools ($P) verify the release
+pack_tools() {
   say "== tools"
   rm -rf "$REL/tools"; mkdir -p "$REL/tools"
   TGZ="lean4-wasm64-$PKG_VERSION.tgz"
   (cd "$JS" && npm pack --silent --pack-destination "$REL/tools" >/dev/null)
   [ -s "$REL/tools/$TGZ" ] || die "npm pack did not produce tools/$TGZ"
+  T="$OUT/$ID.tools"; rm -rf "$T"; mkdir -p "$T"
+  tar -xzf "$REL/tools/$TGZ" -C "$T" || die "cannot extract tools/$TGZ into $T"; P="$T/package"
+}
+
+# release.json: every field but the release's own ($1: a re-cut number, or <C>:<patch>:<wasm sha256>)
+# from the base's record, then verify, then the check that only release.json and its own files differ
+write_and_verify() {
+  say "== release.json"
+  CONFIG="$OUT/$ID.config.json"
+  node "$SBR" config "$BASE_REC_FILE" "$CONFIG" "$ID" "$1" "$CHECKS" "$PKG_VERSION" "$TGZ" "$TOOLS_COMMIT" ${NOTES[@]+"${NOTES[@]}"} \
+    || die "cannot write $CONFIG from $BASE_REC_FILE (reason above)"
+  # from here until only its own files are shown to differ, any exit removes release.json and SHA256SUMS
+  guard_rel
+  node "$JS/release.mjs" --release "$REL" --config "$CONFIG" --base "$BASE_REC_FILE" || die "release.mjs refused (above): no release.json written"
+  if ! node "$P/verify-release.mjs" --release "$REL" --deep --base "$BASE_REC_FILE" --json "$OUT/$ID.verify.json" > "$OUT/$ID.verify.log"; then
+    grep -E "^FAIL" "$OUT/$ID.verify.log" | head -20 >&2 || true
+    rm -f "$REL/release.json" "$REL/SHA256SUMS"
+    die "verify-release failed ($OUT/$ID.verify.log); release.json removed — fix and re-run"
+  fi
+  tail -1 "$OUT/$ID.verify.log"
+  # only release.json and its own files differ from the base (RELEASE.md); a tools re-cut's R2 lists
+  node "$SBR" final "$BASE_REC_FILE" "$REL" "$OUT/$ID" \
+    || { rm -f "$REL/release.json" "$REL/SHA256SUMS"; die "$REL is not a release by reference of $BASE_REC_ID (reason above); release.json removed"; }
+  unguard_rel
+  DIGEST="$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).digest' "$REL/release.json")"
+}
+
+# A tools re-cut by reference: its record differs from its base's only in id, base, gate.checks,
+# tools, notes and its tools/ file; the new tools are packed and gated, as the tarball ships them,
+# on the base's runtime and lean-lib taken from the clones. No build dir and no GATE-PASSED.
+stage_tools_by_reference() {
+  pin_base
+  C="$BASE_K"; WASM_SHA="$BASE_WASM"
+  on_line "$C"
+  K7="${C:0:7}"; ID="$BASE_REC_ID-r$RECUT"
+  check_release_id "$V-$K7-r$RECUT"
+  say "re-cut by reference $ID of $BASE_REC_ID (${BASE_REC_DIGEST:0:23}…): kernel ${C:0:10}, tools $PKG_VERSION at ${TOOLS_COMMIT:0:10}, mirror $BASE_REC_DIR"
+  clone_base
+  pack_tools
 
   # ---------- the gate: the tarball's own tools, on the base's runtime and lean-lib from the clones ----------
   say "== gate"
-  T="$OUT/$ID.tools"; rm -rf "$T"; mkdir -p "$T"
-  tar -xzf "$REL/tools/$TGZ" -C "$T" || die "cannot extract tools/$TGZ into $T"; P="$T/package"
   GD="$OUT/$ID.gate"
   # what the gate's artifact is made of (the base's bytes) and by (the tools that fetch and unpack it)
   GSTAMP="$BASE_REC_DIGEST lean-lib:$BASE_REC_LIB tools:$(shasum -a 256 "$REL/tools/$TGZ" | cut -c1-64)"
@@ -194,26 +315,7 @@ stage_by_reference() {
   CHECKS="$(grep -c '^ ok ' "$OUT/$ID.gate.log" || true)"
   say "GATE PASSED ($CHECKS checks): the tools of $TGZ on $BASE_REC_ID's runtime and lean-lib"
 
-  # ---------- release.json: every field but the re-cut's own from the base's record ----------
-  say "== release.json"
-  CONFIG="$OUT/$ID.config.json"
-  node "$SBR" config "$BASE_REC_FILE" "$CONFIG" "$ID" "$RECUT" "$CHECKS" "$PKG_VERSION" "$TGZ" "$TOOLS_COMMIT" ${NOTES[@]+"${NOTES[@]}"} \
-    || die "cannot write $CONFIG from $BASE_REC_FILE (reason above)"
-  # from here until only tools/ is shown to differ, any exit removes release.json and SHA256SUMS
-  guard_rel
-  node "$JS/release.mjs" --release "$REL" --config "$CONFIG" --base "$BASE_REC_FILE" || die "release.mjs refused (above): no release.json written"
-  if ! node "$P/verify-release.mjs" --release "$REL" --deep --base "$BASE_REC_FILE" --json "$OUT/$ID.verify.json" > "$OUT/$ID.verify.log"; then
-    grep -E "^FAIL" "$OUT/$ID.verify.log" | head -20 >&2 || true
-    rm -f "$REL/release.json" "$REL/SHA256SUMS"
-    die "verify-release failed ($OUT/$ID.verify.log); release.json removed — fix and re-run"
-  fi
-  tail -1 "$OUT/$ID.verify.log"
-
-  # ---------- only tools/ differs from the base (RELEASE.md), then the shared paths for R2 ----------
-  node "$SBR" final "$BASE_REC_FILE" "$REL" "$OUT/$ID" \
-    || { rm -f "$REL/release.json" "$REL/SHA256SUMS"; die "$REL is not a re-cut by reference of $BASE_REC_ID (reason above); release.json removed"; }
-  unguard_rel
-  DIGEST="$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).digest' "$REL/release.json")"
+  write_and_verify "$RECUT"
   R2="qed64-r2:qed64-artifacts/lean4-wasm64"
   # the paths of the printed commands, shell-quoted: each line runs as printed
   QREPO="$(shq "$REPO")"; QREL="$(shq "$REL")"; QSIDE="$(shq "$OUT/$ID")"
@@ -246,12 +348,79 @@ The manual fallback (none of publish's checks: no resume, no check of the base's
 EOF
 }
 
-if [ -n "$BASE_REC_DIR" ]; then
-  [ -n "$RECUT" ] || die "--base needs --recut <n>: a re-cut by reference is a tools-only re-cut of its base" 2
-  [ ${#BY_VALUE[@]} -eq 0 ] || die "--base excludes ${BY_VALUE[0]}: a re-cut by reference takes every file and field but tools/ from its base" 2
-  [ ${#NOTES[@]} -gt 0 ] || die "--base needs at least one --note: what the re-cut's tools change (the base's notes follow)" 2
+# A runtime release by reference lean-<tag>-<kernel7>: its own runtime (the build dir --runtime names,
+# gated there: GATE-PASSED), its own lean-lib (that build's lib/lean) and tools; every other file —
+# the import-built packs, native64, the lists — is its base's. The guards refuse the known ways in
+# which the shared packs would stop pairing with this runtime; they prove nothing more (RELEASE.md).
+stage_runtime_by_reference() {
+  pin_base
+  [ -d "$R" ] || die "runtime build dir $R missing"
+  R="$(cd "$R" && pwd)"
+  runtime_identity
+  # ---------- the guards: this runtime may share the base's packs, native64 and lists ----------
+  [ "${C:0:7}" != "${BASE_K:0:7}" ] \
+    || die "$R is a build of the base's kernel ${BASE_K:0:10}: a tools-only re-cut keeps the runtime (--recut <n> without --runtime)"
+  git merge-base --is-ancestor "$BASE_K" "$C" 2>/dev/null \
+    || die "kernel commit ${C:0:10} does not descend from the base's kernel ${BASE_K:0:10}: a runtime release by reference is a later build of the base's line"
+  [ "$BASE_RECIPE" != - ] && [ "$(git log -1 --format=%H "$C" -- docker-wasm64)" = "$BASE_RECIPE" ] \
+    || die "docker-wasm64 at ${C:0:10} is not the base's recipe (${BASE_RECIPE:0:10}): the base's docker record would not describe this runtime's toolchain — a full import (RELEASE-PIPELINE.md)"
+  OLEAN_FORMAT=(src/include/lean/lean.h src/runtime/object.h src/runtime/compact.h src/runtime/compact.cpp src/library/module.cpp)
+  git diff --quiet "$BASE_K" "$C" -- "${OLEAN_FORMAT[@]}" \
+    || die "the olean format's C++ (${OLEAN_FORMAT[*]}) changed since the base's kernel ${BASE_K:0:10}: this runtime could misread the shared packs (their githash check is compiled off) — a full import (RELEASE-PIPELINE.md)"
+  DRIFT="$(git diff --name-only "$BASE_K" "$C" -- src/Init src/Init.lean src/Std src/Std.lean src/Lean src/Lean.lean)" \
+    || die "git diff $BASE_K $C failed (above)"
+  if [ -n "$DRIFT" ] && [ -z "$STDLIB_DRIFT" ]; then
+    die "stdlib Lean sources changed since the base's kernel ${BASE_K:0:10} ($(printf '%s\n' "$DRIFT" | wc -l | tr -d ' ') files, e.g. $(printf '%s\n' "$DRIFT" | head -3 | paste -sd ' ' -)): the shared packs' oleans of those modules would lag this runtime's library further than the base's notes record. If that is harmless (the runtime runs its own compiled code for them), say why: --stdlib-drift <note>, which is recorded in notes"
+  elif [ -n "$DRIFT" ]; then
+    NOTES+=("$STDLIB_DRIFT")
+  elif [ -n "$STDLIB_DRIFT" ]; then
+    die "no stdlib Lean source changed since the base's kernel ${BASE_K:0:10}: drop --stdlib-drift" 2
+  fi
+  on_line "$C"
+  PATCH="$(patch_id_of "$C")" || die "the patch id of $C cannot be placed from PATCHES.md at HEAD (reason above)"
+  K7="${C:0:7}"; ID="lean-$TAG-$K7"
+  check_release_id "$V-$K7"
+  say "runtime release by reference $ID of $BASE_REC_ID (${BASE_REC_DIGEST:0:23}…): kernel ${C:0:10} (patch $PATCH), runtime $R (gate ${CHECKS:-?} checks), tools $PKG_VERSION at ${TOOLS_COMMIT:0:10}, mirror $BASE_REC_DIR"
+  clone_base
+  # ---------- its own files, over the clones ----------
+  say "== runtime"
+  stage_runtime "$R" "$REL" "qed64-wasm64@${C:0:10} (upstream $TAG)"
+  say "== lean-lib"
+  # pack-set removes the cloned lean-lib manifest and parts first; lean-lib is the build's own
+  # lib/lean (compiler wasm, no module list, closed over nothing): nothing outside $R is read
+  node "$JS/pack-set.mjs" --build-dir "$R" --runtime-dir "$R" --out "$REL/profiles" --lean-version "$V" --only lean-lib --record "$OUT/$ID.pack-set.json" \
+    || die "packing lean-lib from $R failed (above)"
+  pack_tools
+  say "gate: $R/GATE-PASSED (${C:0:10}, lean.wasm ${WASM_SHA:0:16}…), ${CHECKS:-?} checks — the build dir's gate, as for a release by value"
+
+  write_and_verify "$C:$PATCH:$WASM_SHA"
+  QREPO="$(shq "$REPO")"; QREL="$(shq "$REL")"
+
+  cat <<EOF
+
+Staged and verified: $REL   (digest $DIGEST)
+A runtime release by reference of $BASE_REC_ID ($BASE_REC_DIGEST): its own files are runtime/, the lean-lib pack
+(profiles/lean-lib.*), tools/$TGZ, release.json and SHA256SUMS; every other file release.json lists is $BASE_REC_ID's
+(a GitHub asset of that release).
+$( [ "$ON_ORIGIN" = no ] && echo "NOTE: $C is not on origin/$LINE yet — push the line before publishing." )
+Next (RELEASE.md): the owner publishes — record + tag, push, GitHub (the own files; the base's release holds the rest),
+R2 (the shared files copied server-side from the base's prefix, then the own files), each verified, resumable:
+  $QREPO/wasm64-build/import-release.sh publish $ID --release-dir $QREL --dry-run     # then without --dry-run
+EOF
+}
+
+if [ -z "$BASE_REC_DIR" ]; then
+  [ -z "$STDLIB_DRIFT" ] || die "--stdlib-drift goes with --runtime <build dir> --base <mirror> (a runtime release by reference)" 2
+else
+  [ -z "$RECUT" ] || [ -z "$R_GIVEN" ] \
+    || die "--base with --runtime is a runtime release by reference, the first cut of its kernel commit: drop --recut (a tools-only re-cut keeps the base's runtime: --recut without --runtime)" 2
+  [ -n "$RECUT" ] || [ -n "$R_GIVEN" ] || die "--base needs --recut <n> (a tools-only re-cut) or --runtime <build dir> (a runtime release by reference)" 2
+  [ ${#BY_VALUE[@]} -eq 0 ] || die "--base excludes ${BY_VALUE[0]}: a release by reference takes every file and field it does not own from its base" 2
+  [ -z "$STDLIB_DRIFT" ] || [ -z "$RECUT" ] || die "--stdlib-drift goes with --runtime <build dir> --base <mirror> (a runtime release by reference)" 2
+  [ ${#NOTES[@]} -gt 0 ] || die "--base needs at least one --note: what this release changes (the base's notes follow)" 2
   for n in "${NOTES[@]}"; do [ -n "$n" ] || die "--note needs a text" 2; done
-  stage_by_reference   # QED64_BUILD_DIR, the build dirs and Docker are not read
+  # QED64_BUILD_DIR, the import build dir and Docker are not read
+  if [ -n "$RECUT" ]; then stage_tools_by_reference; else stage_runtime_by_reference; fi
   exit 0
 fi
 
@@ -259,55 +428,11 @@ fi
 K="$(cd "$K" && pwd)"; R="$(cd "$R" && pwd)"
 # a tools-only re-cut must reproduce the base release's runtime manifest byte for byte
 [ -z "$RECUT" ] || [ -n "$MATCH_RUNTIME" ] || die "--recut needs --match-runtime <the base release's runtime/runtime-manifest.json>: a re-cut keeps the runtime" 2
-V="${TAG#v}"
-hex40() { [[ "$(tr -d ' \n\r' < "$1" 2>/dev/null)" =~ ^[0-9a-f]{40}$ ]]; }
 
 # ---------- what is being released ----------
-hex40 "$R/BUILT-COMMIT" || die "$R/BUILT-COMMIT missing or not 40 hex"
-C="$(tr -d ' \n\r' < "$R/BUILT-COMMIT")"
-WASM="$R/build/stage1/bin/lean.wasm"; [ -s "$WASM" ] || die "$WASM missing"
-WASM_SHA="$(shasum -a 256 "$WASM" | cut -c1-64)"
-[ -f "$R/GATE-PASSED" ] && [ "$(sed -n 1p "$R/GATE-PASSED")" = "$C" ] && [ "$(sed -n 2p "$R/GATE-PASSED")" = "$WASM_SHA" ] \
-  || die "$R has no passing gate for commit ${C:0:10} and this lean.wasm (GATE-PASSED; import-release.sh gate / gate-dir)" 31
-CHECKS="$(grep -c '^ ok ' "$R/gate.log" 2>/dev/null || true)"; [[ "$CHECKS" =~ ^[0-9]+$ ]] || CHECKS=""
-git cat-file -e "$C^{commit}" 2>/dev/null || die "kernel commit $C is not in this repository"
-git merge-base --is-ancestor "$C" "$LINE" || die "kernel commit $C is not on $LINE"
-git merge-base --is-ancestor "$C" HEAD || die "HEAD does not contain kernel commit $C (stage from $LINE or a descendant)"
-ON_ORIGIN=yes; git merge-base --is-ancestor "$C" "origin/$LINE" 2>/dev/null || ON_ORIGIN=no
-# the upstream release a kernel commit carries is the NEWEST stable tag it contains
-NEWEST="$(git tag --merged "$C" 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)"
-[ "$NEWEST" = "$TAG" ] || die "kernel commit ${C:0:10} carries upstream ${NEWEST:-no stable tag}, not $TAG"
-# patch id (formats/README.md rule 4): the last PATCHES.md heading — read at HEAD, since an
-# entry is often written after its code — whose named commit is C or an ancestor of C
-PATCH="$(node --input-type=module - "$JS/artifact-id.mjs" "$C" <<'JS'
-import fs from "node:fs"; import { execFileSync, spawnSync } from "node:child_process";
-const [lib, C] = process.argv.slice(2);
-const { patchIdOf } = await import(lib);
-const { patchHeadings } = await import(lib);
-const md = execFileSync("git", ["show", "HEAD:wasm64-build/PATCHES.md"], { encoding: "utf8" });
-// every heading must name a commit of this line, once, in order — a typo, an amended or
-// rebased hash, a feature-branch original or a copy-paste would silently record a wrong id
-const isAnc = (a, b) => spawnSync("git", ["merge-base", "--is-ancestor", a, b]).status === 0;
-const hs = patchHeadings(md);
-const bad = [];
-// a heading meant as a patch entry but not spelled "## NNNN[a-z] …" would be skipped, and so would
-// an entry written before it names its commit ("## Unreleased: NNNN — …"): a build of its code
-// would silently stage as the patch before it
-for (const line of md.split("\n")) {
-  if (/^#{1,6}\s*\d{3,}/.test(line) && !/^## \d{4}[a-z]?\b/.test(line)) bad.push(`malformed patch heading "${line.slice(0, 40)}"`);
-  if (/^#{1,6}\s*Unreleased\b/i.test(line)) bad.push(`unplaced patch entry "${line.slice(0, 40)}" (name its commit: "## NNNN — … (<commit>)")`);
-}
-hs.forEach((h, i) => {
-  if (!h.commit) return; // patchIdOf refuses those
-  if (spawnSync("git", ["cat-file", "-e", `${h.commit}^{commit}`]).status !== 0) bad.push(`${h.id} names unknown commit ${h.commit}`);
-  else if (!isAnc(h.commit, "HEAD")) bad.push(`${h.id} names ${h.commit}, which is not on this line`);
-  else if (hs.slice(0, i).some((g) => g.commit === h.commit)) bad.push(`${h.id} repeats ${h.commit}`);
-  else if (i > 0 && hs[i - 1].commit && !isAnc(hs[i - 1].commit, h.commit)) bad.push(`${h.id} (${h.commit}) does not descend from ${hs[i - 1].id} (${hs[i - 1].commit})`);
-});
-if (bad.length) throw new Error(`PATCHES.md: ${bad.join("; ")}`);
-console.log(patchIdOf(md, (c) => spawnSync("git", ["merge-base", "--is-ancestor", c, C]).status === 0));
-JS
-)" || die "the patch id of $C cannot be placed from PATCHES.md at HEAD (reason above)"
+runtime_identity
+on_line "$C"
+PATCH="$(patch_id_of "$C")" || die "the patch id of $C cannot be placed from PATCHES.md at HEAD (reason above)"
 K7="${C:0:7}"; ID="lean-$TAG-$K7${RECUT:+-r$RECUT}"
 ! git rev-parse -q --verify "refs/tags/$ID" >/dev/null || die "tag $ID exists: that release is cut and immutable (re-cut with --recut <n>)"
 for f in native/NATIVE-COMMIT mathlib/MATHLIB-COMMIT; do hex40 "$K/$f" || die "$K/$f missing or not 40 hex"; done
@@ -332,18 +457,12 @@ say "== runtime"
 REV="$REVISION"
 [ -n "$REV" ] || [ -z "$MATCH_RUNTIME" ] || REV="$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).sourceRevision' "$MATCH_RUNTIME")"
 [ -n "$REV" ] || REV="qed64-wasm64@${C:0:10} (upstream $TAG)"
-rm -rf "$REL/runtime"
-node "$JS/chunk-runtime.mjs" --bin "$R/build/stage1/bin" --out "$REL/runtime" --lean-version "$V" --revision "$REV" | tail -2
+stage_runtime "$R" "$REL" "$REV"
 if [ -n "$MATCH_RUNTIME" ]; then
   cmp -s "$REL/runtime/runtime-manifest.json" "$MATCH_RUNTIME" \
     || die "the staged runtime manifest differs from $MATCH_RUNTIME (sourceRevision, chunking or the binary): the per-build manifest name would get a second content"
   say "runtime manifest byte-identical to $MATCH_RUNTIME"
 fi
-mkdir -p "$REL/runtime/bin"
-# lean.js.symbols (0039's --emit-symbol-map, the crash-triage map) stays in the build tree
-for f in "$R/build/stage1/bin/"*; do
-  case "$(basename "$f")" in lean.js|lean.wasm|package.json|lean.js.symbols) ;; *) cp -p "$f" "$REL/runtime/bin/" ;; esac
-done
 
 # ---------- packs ----------
 say "== packs"

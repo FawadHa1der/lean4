@@ -1,6 +1,6 @@
 // The decisions of wasm64-build/publish-release.mjs (the owner's publish step): which release a
-// tag maps to, how assets are reconciled with the staged files, how R2 is judged, and how a re-cut
-// by reference is split from its base. Pure functions (and main's usage errors, which stop before
+// tag maps to, how assets are reconciled with the staged files, how R2 is judged, and how a release
+// by reference (a tools re-cut, a runtime release) is split from its base. Pure functions (and main's usage errors, which stop before
 // any command): no gh, git, rclone or network here. The steps themselves — preflight's checks
 // before any write, the dry run, the real publish — run end to end against fakes in
 // publish-sandbox.test.mjs.
@@ -15,6 +15,7 @@ import {
   splitFiles, r2Lists, r2Passes, checkBaseAssets, checkR2Copy, fetchPlan, main,
 } from "../../publish-release.mjs";
 import { canonicalRelease, checkRecutBase, checkReleaseRecord, isRecutOwnPath, serializeRelease } from "../release-record.mjs";
+import { runtimeRecutOf } from "./runtime-recut-fixture.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const BASE = JSON.parse(fs.readFileSync(path.join(here, "..", "..", "releases", "lean-v4.34.0-e1a79c1.json"), "utf8"));
@@ -30,6 +31,9 @@ const RECUT = (() => {
     tools: { ...BASE.tools, version, tgz, commit: "b".repeat(40) }, notes: ["the re-cut's own note", ...BASE.notes], files });
 })();
 const SHARED = RECUT.files.filter((f) => !isRecutOwnPath(f.path));
+/** A runtime release by reference of e1a79c1 (lean-v4.34.0-64d6ebb): its own runtime/, lean-lib and tools. */
+const RUNTIME = runtimeRecutOf(BASE);
+const RT_OWN = (p) => p.startsWith("runtime/") || p.startsWith("profiles/lean-lib.") || p.startsWith("tools/");
 
 test("repoSlug takes a github.com repository URL", () => {
   assert.equal(repoSlug("https://github.com/FawadHa1der/lean4"), "FawadHa1der/lean4");
@@ -148,12 +152,14 @@ test("releaseBody: the pin line, then the record's notes", () => {
   assert.equal(releaseBody({ id: "i", digest: "d" }), "Toolchain release i. Pin: --id i --digest d. Contents and digests: release.json\n");
 });
 
-// ---------- a re-cut by reference (js/formats/release.md, "Re-cut by reference") ----------
+// ---------- a release by reference (js/formats/release.md, "Release by reference") ----------
 
-test("the fixture: a -r3 of e1a79c1 by reference passes both record checks", () => {
+test("the fixtures: a -r3 of e1a79c1 by reference and the runtime release by reference 64d6ebb pass both record checks", () => {
   assert.deepEqual(checkReleaseRecord(RECUT), []);
   assert.deepEqual(checkRecutBase(RECUT, BASE), []);
   assert.equal(SHARED.length, 138);
+  assert.deepEqual(checkReleaseRecord(RUNTIME), []);
+  assert.deepEqual(checkRecutBase(RUNTIME, BASE), []);
 });
 
 test("splitFiles: a full record owns every file; a re-cut by reference owns tools/ alone (+ release.json, SHA256SUMS)", () => {
@@ -168,15 +174,36 @@ test("splitFiles: a full record owns every file; a re-cut by reference owns tool
   assert.deepEqual(splitFiles({ id: "i" }), { own: ["release.json", "SHA256SUMS"], shared: [] });
 });
 
-test("r2Lists: the shared paths split by content type (8 manifests, 130 objects for e1a79c1); tools/ never listed", () => {
-  const { objects, manifests } = r2Lists([...splitFiles(RECUT).shared, "tools/x.tgz"]);
-  assert.equal(objects.length, 130);
-  assert.equal(manifests.length, 8);
-  assert.ok(objects.every((p) => contentTypeOf(p) === "application/octet-stream"));
-  assert.ok(manifests.every((p) => contentTypeOf(p) === "application/json"));
-  assert.ok(manifests.includes("runtime/runtime-manifest.json") && manifests.includes("lists/essential-selection.json"));
-  assert.ok(objects.includes("native64/native64.tar.gz"));
-  assert.ok(![...objects, ...manifests].some((p) => p.startsWith("tools/")));
+test("splitFiles: a runtime release by reference owns runtime/, profiles/lean-lib.* and tools/ (+ release.json, SHA256SUMS)", () => {
+  const r = splitFiles(RUNTIME);
+  const paths = RUNTIME.files.map((f) => f.path);
+  assert.deepEqual(r.own, ["release.json", "SHA256SUMS", ...paths.filter(RT_OWN)]);
+  assert.deepEqual(r.shared, paths.filter((p) => !RT_OWN(p)));
+  assert.equal(r.own.length, 2 + 48);
+  assert.equal(r.shared.length, 89);
+  assert.ok(r.shared.includes("profiles/lean-core.manifest.json") && !r.shared.some((p) => p.startsWith("profiles/lean-lib.")));
+});
+
+test("r2Lists: the shared paths split by content type, and the own ones (but release.json and SHA256SUMS) — a tools re-cut and a runtime release by reference", () => {
+  const t = r2Lists(RECUT);
+  assert.equal(t.objects.length, 130);
+  assert.equal(t.manifests.length, 8);
+  assert.deepEqual(t.ownObjects, ["tools/lean4-wasm64-4.34.0-e1a79c1-r3.tgz"]);
+  assert.deepEqual(t.ownManifests, []);
+  assert.ok(t.objects.every((p) => contentTypeOf(p) === "application/octet-stream"));
+  assert.ok(t.manifests.every((p) => contentTypeOf(p) === "application/json"));
+  assert.ok(t.manifests.includes("runtime/runtime-manifest.json") && t.manifests.includes("lists/essential-selection.json"));
+  assert.ok(t.objects.includes("native64/native64.tar.gz"));
+  assert.ok(![...t.objects, ...t.manifests].some((p) => p.startsWith("tools/")));
+  const r = r2Lists(RUNTIME);
+  assert.equal(r.objects.length, 84);
+  assert.equal(r.manifests.length, 5);
+  assert.deepEqual(r.ownManifests, ["profiles/lean-lib.manifest.json", "runtime/runtime-manifest.json", `runtime/runtime-manifest.${RUNTIME.runtime.buildId}.json`]);
+  assert.equal(r.ownObjects.length, 48 - 3);
+  assert.ok(r.ownObjects.includes("runtime/bin/leanmake") && r.ownObjects.includes(RUNTIME.tools.tgz));
+  assert.ok(![...r.objects, ...r.manifests].some(RT_OWN), "nothing it owns is copied from the base");
+  assert.ok(![...r.ownObjects, ...r.ownManifests].some((p) => p === "release.json" || p === "SHA256SUMS"));
+  assert.deepEqual([...r.objects, ...r.manifests, ...r.ownObjects, ...r.ownManifests].sort(), RUNTIME.files.map((f) => f.path).sort());
 });
 
 // the three passes of a release dir, exactly as HOSTING.md prints them
@@ -195,8 +222,8 @@ test("r2Passes: a full record, or --r2-source local, gives today's three passes"
     THREE("/s/rel", "r:b/p/id-r3/"));
 });
 
-test("r2Passes: a re-cut by reference copies the shared files server-side, then its own files, release.json last", () => {
-  const p = r2Passes({ rel: "/s/rel", dest: "r:b/p/id-r3/", basePrefix: "r:b/p/id/", objectsList: "/t/shared.objects", manifestsList: "/t/shared.manifests" });
+test("r2Passes: a tools re-cut by reference copies the shared files server-side, then its own files, release.json last", () => {
+  const p = r2Passes({ rel: "/s/rel", dest: "r:b/p/id-r3/", basePrefix: "r:b/p/id/", objectsList: "/t/shared.objects", manifestsList: "/t/shared.manifests", ownObjectsList: "/t/own.objects" });
   assert.equal(p.length, 5);
   for (const a of p) {
     assert.equal(a[0], "copy");
@@ -208,12 +235,23 @@ test("r2Passes: a re-cut by reference copies the shared files server-side, then 
   assert.deepEqual(p[0], ["copy", "r:b/p/id/", "r:b/p/id-r3/", ...COMMON, "--files-from-raw", "/t/shared.objects", "--transfers", "8"]);
   assert.deepEqual(p[1], ["copy", "r:b/p/id/", "r:b/p/id-r3/", ...COMMON, "--files-from-raw", "/t/shared.manifests"]);
   for (const a of p.slice(0, 2)) assert.ok(!a.includes("-M") && !a.includes("--metadata") && !a.includes("--header-upload") && !a.includes("--filter"));
-  // 3-5: from the staged dir: tools/, SHA256SUMS, then release.json alone
-  assert.deepEqual(p.slice(2).map((a) => [a[1], a.slice(a.indexOf("--filter")).join(" ")]), [
-    ["/s/rel", "--filter + /tools/** --filter - * --header-upload Content-Type: application/octet-stream"],
+  // 3: its own objects from the staged dir, by list; 4-5: SHA256SUMS, then release.json alone
+  assert.deepEqual(p[2], ["copy", "/s/rel", "r:b/p/id-r3/", ...COMMON, "--files-from-raw", "/t/own.objects", "--header-upload", "Content-Type: application/octet-stream", "--transfers", "4", "--s3-chunk-size", "64M"]);
+  assert.deepEqual(p.slice(3).map((a) => [a[1], a.slice(a.indexOf("--filter")).join(" ")]), [
     ["/s/rel", "--filter + /SHA256SUMS --filter - * --header-upload Content-Type: application/json"],
     ["/s/rel", "--filter + /release.json --filter - * --header-upload Content-Type: application/json"],
   ]);
+});
+
+test("r2Passes: a runtime release by reference: shared objects and manifests server-side, its own objects, then its own manifests, SHA256SUMS, release.json last", () => {
+  const p = r2Passes({ rel: "/s/rel", dest: "r:b/p/rt/", basePrefix: "r:b/p/id/", objectsList: "/t/shared.objects", manifestsList: "/t/shared.manifests",
+    ownObjectsList: "/t/own.objects", ownManifestsList: "/t/own.manifests" });
+  assert.equal(p.length, 6);
+  assert.deepEqual(p.map((a) => a[1]), ["r:b/p/id/", "r:b/p/id/", "/s/rel", "/s/rel", "/s/rel", "/s/rel"]);
+  assert.deepEqual(p.map((a) => a[a.indexOf("--files-from-raw") + 1] ?? null).slice(0, 4), ["/t/shared.objects", "/t/shared.manifests", "/t/own.objects", "/t/own.manifests"]);
+  assert.deepEqual(p.slice(2, 4).map((a) => a[a.indexOf("--header-upload") + 1]), ["Content-Type: application/octet-stream", "Content-Type: application/json"]);
+  assert.ok(p[4].includes("+ /SHA256SUMS") && p[5].includes("+ /release.json"), "release.json last");
+  for (const a of p) assert.ok(a.includes("--immutable") && a[2] === "r:b/p/rt/");
 });
 
 const sha = (t) => createHash("sha256").update(t).digest("hex");
@@ -315,23 +353,26 @@ test("checkR2Copy: \"N hashes could not be checked\" is no pass — the objects 
   assert.deepEqual(partial.unhashed, shared.slice(0, 1));
 });
 
-test("releaseBody: a re-cut by reference says where its other files are, between the pin and the notes", () => {
+test("releaseBody: a release by reference says where its other files are, between the pin and the notes", () => {
   const body = releaseBody(RECUT);
   const [pin, ref, notes, ...rest] = body.split("\n\n");
   assert.match(pin, /^Toolchain release lean-v4\.34\.0-e1a79c1-r3\. Pin: --id lean-v4\.34\.0-e1a79c1-r3 --digest sha256:[0-9a-f]{64}\./);
-  assert.equal(ref, `Re-cut by reference of ${BASE.id} (${BASE.digest}): this release's assets are tools/lean4-wasm64-4.34.0-e1a79c1-r3.tgz, `
+  assert.equal(ref, `Release by reference of ${BASE.id} (${BASE.digest}): this release's assets are its own files (tools/: 1 file), `
     + `release.json and SHA256SUMS; every other file release.json lists is an asset of ${BASE.id} (lean4-wasm64 fetch takes them from there).`);
   assert.equal(notes, `${RECUT.notes.map((n) => `- ${n}`).join("\n")}\n`);
   assert.deepEqual(rest, []);
-  assert.doesNotMatch(releaseBody(BASE), /Re-cut by reference/);
+  assert.equal(releaseBody(RUNTIME).split("\n\n")[1], `Release by reference of ${BASE.id} (${BASE.digest}): this release's assets are its own files `
+    + `(runtime/, profiles/lean-lib.* and tools/: 48 files), release.json and SHA256SUMS; every other file release.json lists is an asset of ${BASE.id} `
+    + "(lean4-wasm64 fetch takes them from there).");
+  assert.doesNotMatch(releaseBody(BASE), /by reference/);
 });
 
-test("fetchPlan: auto / full / runtime / none, on a full record and on a re-cut by reference", () => {
+test("fetchPlan: auto / full / runtime / none, on a full record and on both kinds by reference", () => {
   const cases = [
-    ["auto", BASE, { only: null, deep: true }], ["auto", RECUT, { only: "runtime,tools", deep: false }],
-    ["full", BASE, { only: null, deep: true }], ["full", RECUT, { only: null, deep: true }],
-    ["runtime", BASE, { only: "runtime", deep: false }], ["runtime", RECUT, { only: "runtime,tools", deep: false }],
-    ["none", BASE, null], ["none", RECUT, null],
+    ["auto", BASE, { only: null, deep: true }], ["auto", RECUT, { only: "runtime,lists,tools", deep: false }], ["auto", RUNTIME, { only: "runtime,lists,tools", deep: false }],
+    ["full", BASE, { only: null, deep: true }], ["full", RECUT, { only: null, deep: true }], ["full", RUNTIME, { only: null, deep: true }],
+    ["runtime", BASE, { only: "runtime", deep: false }], ["runtime", RECUT, { only: "runtime,lists,tools", deep: false }], ["runtime", RUNTIME, { only: "runtime,lists,tools", deep: false }],
+    ["none", BASE, null], ["none", RECUT, null], ["none", RUNTIME, null],
   ];
   for (const [mode, record, want] of cases) assert.deepEqual(fetchPlan(record, mode), want, `${mode} on ${record.id}`);
   assert.throws(() => fetchPlan(BASE, "some"), /auto \| full \| runtime \| none/);

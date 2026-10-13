@@ -10,9 +10,11 @@
 #   wasm64-build/import-release.sh gate-dir <build dir>
 #                                                    # the same gate on any build dir (a kernel-only fix)
 #   wasm64-build/import-release.sh accept  <tag>     # fast-forward qed64-wasm64 to import/<tag> (LOCAL only)
-#   wasm64-build/import-release.sh release <tag> [--recut <n> --base <base mirror> --note …] [stage-release.sh options]
+#   wasm64-build/import-release.sh release <tag> [--base <base mirror> (--recut <n> | --runtime <build dir>) --note …]
+#                                                    [stage-release.sh options]
 #                                                    # stage + verify the lean4-wasm64 release (RELEASE.md);
-#                                                    # --base: a tools-only re-cut by reference of its first cut
+#                                                    # --base: a release by reference of a first cut — a tools
+#                                                    # re-cut (--recut) or a new runtime (--runtime)
 #   wasm64-build/import-release.sh publish <id> [publish-release.mjs options]
 #                                                    # the owner's step: record + tag, push, GitHub release,
 #                                                    # R2, each verified; resumable (--dry-run to preview)

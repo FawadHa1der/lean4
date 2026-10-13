@@ -37,17 +37,19 @@ release file plus `SHA256SUMS`, a release dir `verify` accepts),
 `runtime-chunks`, a pack id, `packs`, `native64`, `lists`, `tools`, and
 `runtime` — the artifact layout `<out>/bin`, never part of `all`. `--from`
 takes a GitHub release download URL (flat), an R2/site URL or a directory in
-the served layout. A re-cut by reference (`release.json` `base`) fetched from
-its GitHub release takes every file outside `tools/` from its base's release,
-the sibling `…/download/<base id>/`, after checking the base's record against
-its own; `--base-from <url|dir>` names another place, such as a local mirror of
-the base. Its R2 copy and any mirror are complete. Tools without `base` support
-(up to 4.34.0-e1a79c1-r2) refuse such a record.
+the served layout. A release by reference (`release.json` `base`) fetched from
+its GitHub release takes every file it does not own (a tools re-cut owns
+`tools/`; a runtime release by reference also `runtime/` and its `lean-lib`)
+from its base's release, the sibling `…/download/<base id>/`, after checking
+the base's record against its own; `--base-from <url|dir>` names another
+place, such as a local mirror of the base. Its R2 copy and any mirror are
+complete. Tools without `base` support (up to 4.34.0-e1a79c1-r2) refuse such a
+record, and the 4.34.0-e1a79c1-r3 tools refuse a runtime release by reference.
 
 `verify --release <dir> [--deep]` checks a release directory end to end:
 `release.json` and `SHA256SUMS`, every file, the runtime manifest and the
 build-id rule, the gate's binary, every pack (streamed inflate to the raw
-digest; `--deep` also every artifact). `--base <dir|release.json>` also compares a re-cut by
+digest; `--deep` also every artifact). `--base <dir|release.json>` also compares a release by
 reference with its base.
 
 ## Commands

@@ -1,15 +1,15 @@
-// A re-cut by reference, the record layer (release-record.mjs; formats/release.md, "Re-cut by
+// A tools re-cut by reference, the record layer (release-record.mjs; formats/release.md, "Release by
 // reference"): the structure rules checkReleaseRecord adds for `base`, and checkRecutBase, the
 // comparison with the base's record. Pure: the committed records under ../../releases are the
-// fixtures, and a -r3 is synthesized from e1a79c1.
+// fixtures, and a -r3 is synthesized from e1a79c1. The runtime kind: runtime-recut.test.mjs.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  RECUT_OWN_DIRS, RECUT_SAME_GATE_KEYS, RECUT_SAME_KEYS, RELEASE_DIGEST, RELEASE_KEY_ORDER, canonicalRelease, checkRecutBase,
-  checkReleaseRecord, firstCutOf, isRecutOwnPath,
+  RECUT_OWN_DIRS, RECUT_SAME_GATE_KEYS, RECUT_SAME_KEYS, RELEASE_DIGEST, RELEASE_KEY_ORDER, byReferenceKind, canonicalRelease,
+  checkRecutBase, checkReleaseRecord, firstCutOf, isOwnPath, isRecutOwnPath, ownLabel,
 } from "../release-record.mjs";
 import * as olderReader from "./fixtures/release-record-r2/release-record.mjs";
 
@@ -57,6 +57,25 @@ test("firstCutOf / isRecutOwnPath / RELEASE_DIGEST", () => {
   assert.ok(!RELEASE_DIGEST.test(BASE.digest.toUpperCase().replace("SHA256", "sha256")));
 });
 
+test("byReferenceKind / isOwnPath / ownLabel: the kind comes from id and base.id alone", () => {
+  const r3 = recutOf(BASE);
+  const runtime = { id: "lean-v4.34.0-64d6ebb", base: { id: BASE.id, digest: BASE.digest } };
+  assert.equal(byReferenceKind(BASE), null);
+  assert.equal(byReferenceKind(r3), "tools");
+  assert.equal(byReferenceKind(runtime), "runtime");
+  // any base other than the id's first cut is the runtime kind (the structure rules then judge it)
+  assert.equal(byReferenceKind({ ...r3, base: { ...r3.base, id: "lean-v4.34.0-41ec565" } }), "runtime");
+  assert.equal(byReferenceKind({ id: BASE.id, base: null }), "runtime");
+  for (const p of ["runtime/x", "profiles/lean-lib.manifest.json", "profiles/lean-lib.pack.gzip.a.part-000", "tools/t.tgz"]) assert.equal(isOwnPath(runtime, p), true, p);
+  for (const p of ["profiles/lean-core.manifest.json", "profiles/lean-libx.manifest.json", "lists/x", "native64/x", "runtimex/y", undefined, 7]) assert.equal(isOwnPath(runtime, p), false, String(p));
+  for (const p of ["tools/x.tgz", "toolsx/y", "runtime/x", "profiles/lean-lib.manifest.json", "tools", undefined, 7]) assert.equal(isOwnPath(r3, p), isRecutOwnPath(p), String(p));
+  for (const p of ["runtime/x", "lists/x", "anything", ""]) assert.equal(isOwnPath(BASE, p), true, p);
+  assert.equal(isOwnPath(BASE, undefined), false);
+  assert.equal(ownLabel(BASE), "every file");
+  assert.equal(ownLabel(r3), "tools/");
+  assert.equal(ownLabel(runtime), "runtime/, profiles/lean-lib.* and tools/");
+});
+
 test("a -r3 synthesized from e1a79c1 passes both checks: 139 files, one of its own", () => {
   const r = recutOf(BASE);
   assert.deepEqual(checkReleaseRecord(r), []);
@@ -71,15 +90,16 @@ test("structure (S1-S5): each malformed base is refused by name, with no other r
     ["base null", (r) => ({ ...r, base: null }), /base is not an object/],
     ["base an array", (r) => ({ ...r, base: [] }), /base is not an object/],
     ["an extra key", (r) => ({ ...r, base: { ...r.base, url: "x" } }), /base: unknown keys url/],
-    ["base on a first cut", (r) => ({ ...r, id: BASE.id, tools: BASE.tools, files: BASE.files }), /only a re-cut .* names a base/],
-    ["base.id of another kernel", (r) => ({ ...r, base: { ...r.base, id: "lean-v4.34.0-41ec565" } }), /is not lean-v4.34.0-e1a79c1: a re-cut by reference names its first cut/],
-    ["base.id naming an -r2", (r) => ({ ...r, base: { ...r.base, id: "lean-v4.34.0-e1a79c1-r2" } }), /names its first cut/],
+    ["base on a first cut", (r) => ({ ...r, id: BASE.id, tools: BASE.tools, files: BASE.files }), /is .* itself/],
+    ["base.id of another kernel", (r) => ({ ...r, base: { ...r.base, id: "lean-v4.34.0-41ec565" } }), /is not lean-v4\.34\.0-e1a79c1: an -rN release by reference is a tools re-cut of its first cut/],
+    ["base.id naming an -r2", (r) => ({ ...r, base: { ...r.base, id: "lean-v4.34.0-e1a79c1-r2" } }), /of its first cut/],
+    ["base.id naming an -r2 (S2)", (r) => ({ ...r, base: { ...r.base, id: "lean-v4.34.0-e1a79c1-r2" } }), /is not a first cut of v4\.34\.0 \(lean-v4\.34\.0-<kernel7>\): a release by reference names a first cut of its tag/],
     ["an upper-case digest", (r) => ({ ...r, base: { ...r.base, digest: r.base.digest.replace(/[a-f]/g, (c) => c.toUpperCase()) } }), /base.digest is not sha256/],
     ["a short digest", (r) => ({ ...r, base: { ...r.base, digest: "sha256:abc" } }), /base.digest is not sha256/],
     ["no tools", (r) => { const { tools: _t, ...x } = r; return { ...x, files: r.files.filter((f) => !isRecutOwnPath(f.path)) }; }, /tools missing/],
     ["a second tools/ file", (r) => ({ ...r, files: [...r.files, { path: "tools/extra.tgz", bytes: 1, sha256: "c".repeat(64) }].sort((a, b) => (a.path < b.path ? -1 : 1)) }), /exactly one file under tools\/, tools.tgz — got/],
     ["tools.tgz not named for the version", (r) => ({ ...r, tools: { ...r.tools, tgz: "tools/other.tgz" }, files: r.files.map((f) => (isRecutOwnPath(f.path) ? { ...f, path: "tools/other.tgz" } : f)) }), /is not tools\/<package>-<version>.tgz/],
-    ["a version without -rN", (r) => { const tgz = "tools/lean4-wasm64-4.34.0-e1a79c1.tgz"; return { ...r, tools: { ...r.tools, version: "4.34.0-e1a79c1", tgz }, files: r.files.map((f) => (isRecutOwnPath(f.path) ? { ...f, path: tgz } : f)) }; }, /does not end in -r3/],
+    ["a version without -rN", (r) => { const tgz = "tools/lean4-wasm64-4.34.0-e1a79c1.tgz"; return { ...r, tools: { ...r.tools, version: "4.34.0-e1a79c1", tgz }, files: r.files.map((f) => (isRecutOwnPath(f.path) ? { ...f, path: tgz } : f)) }; }, /is not 4\.34\.0-e1a79c1-r3: <lean\.version>-<kernel7>\[-rN\], as the id/],
   ];
   for (const [label, edit, re] of cases) {
     const r = recutOf(BASE, { edit });
@@ -96,7 +116,7 @@ test("checkRecutBase: one refusal per family; gate.checks, notes and tools may d
   const { digest: _d, ...r2rest } = r2;
   const r2ref = canonicalRelease({ ...r2rest, base: { id: BASE.id, digest: BASE.digest } });
   assert.deepEqual(checkReleaseRecord(r2ref), []);
-  assert.deepEqual(checkRecutBase(r2ref, BASE), ["packs differs from the base's (a re-cut by reference changes tools/ only)"]);
+  assert.deepEqual(checkRecutBase(r2ref, BASE), ["packs differs from the base's"]);
   refused(recutOf(BASE, { edit: (r) => ({ ...r, runtime: { ...r.runtime, target: "other" } }) }), BASE, /^runtime differs/, "runtime");
   refused(recutOf(BASE, { edit: (r) => ({ ...r, hosting: Object.fromEntries(Object.entries(r.hosting).reverse()) }) }), BASE, /^hosting differs/, "hosting key order");
   refused(recutOf(BASE, { edit: (r) => ({ ...r, notes: r.notes }) }), { ...BASE, gate: { ...BASE.gate, commit: "f".repeat(40) } }, /the base's release.json/, "a base re-edited without re-signing");
@@ -121,13 +141,13 @@ test("checkRecutBase: one refusal per family; gate.checks, notes and tools may d
 });
 
 test("checkRecutBase: each shared field of formats/release.md, changed alone and re-signed, is refused by exactly its own name", () => {
-  // equality rule 2 as the spec states it: the test walks this list, not RECUT_SAME_KEYS, so a
-  // field dropped from the code (or the spec) fails here
+  // equality rule E2 for a tools re-cut, as the spec states it: the test walks this list, not
+  // RECUT_SAME_KEYS, so a field dropped from the code (or the spec) fails here
   const SHARED = ["schema", "lean", "kernel", "runtime", "packs", "native64", "docker", "mathlib", "modules", "hosting"];
   const SHARED_GATE = ["passed", "commit", "wasmSha256"];
   const spec = fs.readFileSync(path.join(here, "..", "formats", "release.md"), "utf8");
-  const rule2 = /\n2\. These fields equal the base's([\s\S]*?)\n3\. /.exec(spec)?.[1] ?? "";
-  assert.deepEqual([...rule2.matchAll(/`([a-z][A-Za-z0-9.]*)`/g)].map((m) => m[1]), [...SHARED, ...SHARED_GATE.map((k) => `gate.${k}`)], "formats/release.md, equality rule 2");
+  const e2 = /\n *- a tools re-cut: (.*)\n/.exec(spec)?.[1] ?? "";
+  assert.deepEqual([...e2.matchAll(/`([a-z][A-Za-z0-9.]*)`/g)].map((m) => m[1]), [...SHARED, ...SHARED_GATE.map((k) => `gate.${k}`)], "formats/release.md, equality rule E2 (a tools re-cut)");
   assert.deepEqual([...RECUT_SAME_KEYS], SHARED);
   assert.deepEqual([...RECUT_SAME_GATE_KEYS], SHARED_GATE);
   const edits = {
@@ -145,7 +165,7 @@ test("checkRecutBase: each shared field of formats/release.md, changed alone and
   assert.deepEqual(Object.keys(edits), SHARED);
   for (const k of SHARED) {
     assert.notEqual(JSON.stringify(edits[k](BASE[k])), JSON.stringify(BASE[k]), `${k}: the edit changes it`);
-    const why = [`${k} differs from the base's (a re-cut by reference changes tools/ only)`];
+    const why = [`${k} differs from the base's`];
     assert.deepEqual(checkRecutBase(recutOf(BASE, { edit: (r) => ({ ...r, [k]: edits[k](r[k]) }) }), BASE), why, `${k} changed`);
     assert.deepEqual(checkRecutBase(recutOf(BASE, { edit: (r) => { const { [k]: _gone, ...rest } = r; return rest; } }), BASE), why, `${k} dropped`);
   }
@@ -170,7 +190,7 @@ test("checkRecutBase: the pin first; an unpinned base is refused on it alone, it
   assert.deepEqual(checkRecutBase(r, r), [
     `the base's release.json is "${r.id}", the record names ${BASE.id}`,
     `the base's release.json digest is ${r.digest}, the record pins ${BASE.digest}`,
-    `the base ${r.id} is itself a re-cut by reference (of ${BASE.id}): a base is a first cut`,
+    `the base ${r.id} names a base of its own (${BASE.id}): a base names no base of its own`,
   ]);
   // a pinned base still gets the full structural check (a re-signed record breaking the gate binding)
   const g = resign({ ...structuredClone(BASE), gate: { ...BASE.gate, commit: "f".repeat(40) } });

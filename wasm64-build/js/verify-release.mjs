@@ -6,10 +6,11 @@
 //
 //   release.json  checkReleaseRecord: schema, canonical keys, self-digest, the id rule, the gate
 //                 binding, safe paths, every named path one of files[]
-//   base          a re-cut by reference (release.json `base`), with --base: checkRecutBase against
+//   base          a release by reference (release.json `base`), with --base: checkRecutBase against
 //                 the base's release.json (itself checked, pinned by base.{id,digest}, every shared
-//                 field and every file outside tools/ the base's); without --base one info line says
-//                 it was not compared. The dir itself is checked in full either way (it is complete).
+//                 field and every file the release does not own the base's); without --base one info
+//                 line says it was not compared. The dir itself is checked in full either way (it is
+//                 complete).
 //   SHA256SUMS    every file present with that digest; every file listed; same set as release.json files[]
 //   runtime       runtime/v1 structure + the build-id rule, every chunk, both whole-file digests,
 //                 the build id RECOMPUTED from lean.wasm's bytes, the per-build manifest copy,
@@ -31,7 +32,7 @@ import {
   RELEASE_SCHEMA, ARTIFACT_MANIFEST_FORMAT, checkRuntimeManifest, buildIdFromSha256,
   isSha256Hex, sha256File,
 } from "./artifact-id.mjs";
-import { CHUNK_URL, PART_URL, checkRecutBase, checkReleaseRecord, serializeRelease, servedPath, sha256sums } from "./release-record.mjs";
+import { CHUNK_URL, PART_URL, checkRecutBase, checkReleaseRecord, ownLabel, serializeRelease, servedPath, sha256sums } from "./release-record.mjs";
 
 applyCliContract({
   tool: "verify-release",
@@ -49,7 +50,7 @@ applyCliContract({
     "  --deep            also verify every per-artifact digest inside each pack (streams the raw packs)",
     "  --skip-packs      runtime and records only (fast)",
     "  --json <out>      also write the check results as JSON",
-    "  --base <path>     a re-cut by reference: its base's release dir or release.json (compares the re-cut with it)",
+    "  --base <path>     a release by reference: its base's release dir or release.json (compares the release with it)",
     "  -h, --help        print this help and exit 0",
     "",
     "exit codes: 0 verified, 1 a check failed, 2 usage",
@@ -76,7 +77,7 @@ const sha256 = (b) => createHash("sha256").update(b).digest("hex");
 const recordPath = path.join(dir, "release.json");
 if (!fs.existsSync(recordPath)) { console.error(`verify-release: ${recordPath} not found`); process.exit(1); }
 const record = readJson(recordPath);
-// --json: the base a re-cut by reference names, and whether this run compared the re-cut with it (--base)
+// --json: the base a release by reference names, and whether this run compared the release with it (--base)
 const baseJson = (compared) => (record.base === undefined ? null : { id: record.base?.id, digest: record.base?.digest, compared });
 check(record.schema === RELEASE_SCHEMA, `release.json schema ${record.schema}`);
 check(fs.readFileSync(recordPath, "utf8") === serializeRelease(record), "release.json is in canonical form (JSON.stringify(record, null, 2) + newline)");
@@ -89,10 +90,10 @@ if (recordProblems.length) {
   process.exit(1);
 }
 
-// ---------- a re-cut by reference: its base (formats/release.md, "Re-cut by reference") ----------
-if (arg("base") && !record.base) check(false, `--base was given, but ${record.id} is not a re-cut by reference (release.json names no base)`);
+// ---------- a release by reference: its base (formats/release.md, "Release by reference") ----------
+if (arg("base") && !record.base) check(false, `--base was given, but ${record.id} is not a release by reference (release.json names no base)`);
 if (record.base) {
-  const recut = `re-cut of ${record.base.id} (${record.base.digest.slice(0, 23)}…)`;
+  const label = `release by reference of ${record.base.id} (${record.base.digest.slice(0, 23)}…)`;
   if (arg("base")) {
     const bp = path.resolve(arg("base"));
     const bfile = fs.existsSync(bp) && fs.statSync(bp).isDirectory() ? path.join(bp, "release.json") : bp;
@@ -101,8 +102,8 @@ if (record.base) {
     try { baseRecord = readJson(bfile); } catch (e) { problems = [`cannot read the base's release.json ${bfile}: ${e.message}`]; }
     // a base it read but could not check is not an unreadable file: say which it was
     if (!problems) try { problems = checkRecutBase(record, baseRecord); } catch (e) { problems = [`the base's release.json ${bfile} could not be checked: ${e.message}`]; }
-    check(problems.length === 0, `${recut}: the base's record is the pinned one, and every file outside tools/ and every shared field is the base's${problems.length ? ` — ${problems.join("; ")}` : ""}`);
-  } else console.log(`info  ${recut}: not compared with its base (--base <its release dir or release.json> compares)`);
+    check(problems.length === 0, `${label}: the base's record is the pinned one, and every file outside ${ownLabel(record)} and every shared field is the base's${problems.length ? ` — ${problems.join("; ")}` : ""}`);
+  } else console.log(`info  ${label}: not compared with its base (--base <its release dir or release.json> compares)`);
 }
 
 // ---------- SHA256SUMS ↔ files[] ↔ disk ----------

@@ -1,4 +1,4 @@
-// A re-cut by reference, the reader side (formats/release.md, "Re-cut by reference"): fetch from
+// A tools re-cut by reference, the reader side (formats/release.md, "Release by reference"): fetch from
 // a thin flat -r3 (tools/, release.json, SHA256SUMS) whose every other file is its first cut's,
 // found as the sibling <…>/<base id>/ or at --base-from; a complete served -r3 read alone; the
 // refusals that write nothing; verify --base. End to end and offline: a small synthetic first cut
@@ -157,18 +157,18 @@ test("a thin flat -r3 beside its flat first cut: fetch takes every other file fr
   const out = path.join(s.root, "got");
   let r = run("fetch-release.mjs", ["--from", fr, "--out", out, "--only", "all", "--id", rec.id, "--digest", rec.digest]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, new RegExp(`flat layout from ${esc(fr)}; re-cut of ${esc(BASE_ID)} \\(sha256:[0-9a-f]{16}…\\), base checked, files outside tools/ from ${esc(fb)}`));
+  assert.match(r.stdout, new RegExp(`flat layout from ${esc(fr)}; release by reference of ${esc(BASE_ID)} \\(sha256:[0-9a-f]{16}…\\), base checked, files outside tools/ from ${esc(fb)}`));
   for (const f of rec.files) assert.ok(fs.existsSync(path.join(out, f.path)), f.path);
   assert.equal(fs.existsSync(path.join(out, s.record.tools.tgz)), false, "the base's own tgz is no file of the re-cut");
   assert.equal(fs.readFileSync(path.join(out, "SHA256SUMS"), "utf8"), sums(rec));
   r = run("verify-release.mjs", ["--release", out, "--deep"]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, new RegExp(`^info {2}re-cut of ${esc(BASE_ID)} \\(sha256:[0-9a-f]{16}…\\): not compared with its base \\(--base`, "m"));
+  assert.match(r.stdout, new RegExp(`^info {2}release by reference of ${esc(BASE_ID)} \\(sha256:[0-9a-f]{16}…\\): not compared with its base \\(--base`, "m"));
   assert.match(r.stdout, new RegExp(`RELEASE VERIFIED ${esc(RECUT_ID)}`));
   for (const base of [fb, path.join(s.rel, "release.json")]) { // a release dir, or its release.json
     r = run("verify-release.mjs", ["--release", out, "--base", base]);
     assert.equal(r.status, 0, r.stdout + r.stderr);
-    assert.match(r.stdout, new RegExp(`^ ok {3}re-cut of ${esc(BASE_ID)} .*: the base's record is the pinned one, and every file outside tools/ and every shared field is the base's$`, "m"));
+    assert.match(r.stdout, new RegExp(`^ ok {3}release by reference of ${esc(BASE_ID)} .*: the base's record is the pinned one, and every file outside tools/ and every shared field is the base's$`, "m"));
     assert.doesNotMatch(r.stdout, /^info /m);
   }
   // the artifact layout, rebuilt from the base's chunks
@@ -231,7 +231,7 @@ test("fetch refuses, writing nothing: a base that is not the pinned one, a recor
   refused(["--from", fr, "--base-from", ""], 2, /--base-from was given without a value: refusing to guess the base/, "empty");
   refused(["--from", fr, "--base-from="], 2, /refusing to guess the base/, "empty-eq");
   // 6. --base-from for a record without a base is a refusal, not a silent no-op
-  refused(["--from", s.rel, "--base-from", s.rel], 1, /--base-from was given, but lean-v4\.34\.0-a8817d0 is not a re-cut by reference/, "no-base");
+  refused(["--from", s.rel, "--base-from", s.rel], 1, /--base-from was given, but lean-v4\.34\.0-a8817d0 is not a release by reference/, "no-base");
   r = run("fetch-release.mjs", ["--from", fr, "--out", path.join(s.root, "out-unknown"), "--only", "nope"]);
   assert.equal(r.status, 2); assert.equal(fs.existsSync(path.join(s.root, "out-unknown")), false, "an unknown group is refused before the base is read");
 });
@@ -252,7 +252,7 @@ test("a base record that breaks the check's assumptions is a named refusal, neve
   const mirror = writeServed(path.join(s.root, "mirror", rec.id), s, rec);
   r = run("verify-release.mjs", ["--release", mirror, "--base", fb]);
   assert.equal(r.status, 1, r.stdout + r.stderr);
-  assert.match(r.stdout, /^FAIL {2}re-cut of lean-v4\.34\.0-a8817d0 .* — the base's release\.json: files\[\]: undefined is not a safe release path$/m);
+  assert.match(r.stdout, /^FAIL {2}release by reference of lean-v4\.34\.0-a8817d0 .* — the base's release\.json: files\[\]: undefined is not a safe release path$/m);
   assert.doesNotMatch(r.stdout, /cannot read/);
   // 2. the pinned id and digest over a record nested too deep for JSON.stringify(…, null, 2):
   //    it parses, and then the check itself throws (a RangeError) — refused by name all the same
@@ -271,7 +271,7 @@ test("a base record that breaks the check's assumptions is a named refusal, neve
   assert.equal(fs.existsSync(out), false, "nothing written");
   r = run("verify-release.mjs", ["--release", writeServed(path.join(s.root, "mirror-deep", plain.id), s, plain), "--base", fb]);
   assert.equal(r.status, 1, r.stdout + r.stderr);
-  assert.match(r.stdout, /^FAIL {2}re-cut of .* — the base's release\.json .*release\.json could not be checked: Maximum call stack size exceeded$/m);
+  assert.match(r.stdout, /^FAIL {2}release by reference of .* — the base's release\.json .*release\.json could not be checked: Maximum call stack size exceeded$/m);
   assert.doesNotMatch(r.stdout, /cannot read/);
 });
 
@@ -295,7 +295,7 @@ test("fetch's refusals after its first read end by exitCode, never process.exit(
   const elsewhere = writeThin(path.join(s.root, "loud-elsewhere", "thin"), rec);
   const orphan = writeThin(path.join(s.root, "loud-orphan", rec.id), rec);
   const cases = [
-    ["--base-from on a record without a base", ["--from", s.rel, "--base-from", fb], 1, /is not a re-cut by reference/],
+    ["--base-from on a record without a base", ["--from", s.rel, "--base-from", fb], 1, /is not a release by reference/],
     ["no sibling to be found", ["--from", elsewhere], 1, /its sibling cannot be found/],
     ["an unreadable base", ["--from", orphan], 1, /cannot read the base's release\.json/],
     ["a base it refuses", ["--from", drift], 1, /refused against its base/],
@@ -360,7 +360,7 @@ test("a flat fetch of tools/ alone needs no base; anything else does", () => {
   const out = path.join(s.root, "got");
   let r = run("fetch-release.mjs", ["--from", fr, "--out", out, "--only", "tools", "--id", rec.id, "--digest", rec.digest]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /re-cut of lean-v4\.34\.0-a8817d0 \(sha256:[0-9a-f]{16}…\), only tools\/ selected: base not compared \(--base-from compares\)/);
+  assert.match(r.stdout, /release by reference of lean-v4\.34\.0-a8817d0 \(sha256:[0-9a-f]{16}…\), only tools\/ selected: base not compared \(--base-from compares\)/);
   assert.equal(fs.readFileSync(path.join(out, RECUT_TGZ), "utf8"), RECUT_TGZ_BYTES);
   assert.deepEqual(fs.readdirSync(out).sort(), ["release.json", "tools"]);
   r = run("fetch-release.mjs", ["--from", fr, "--out", path.join(s.root, "x"), "--only", "tools,lists"]);
@@ -382,7 +382,7 @@ test("a complete served -r3 mirror is read alone; --base-from compares it with t
   const a = path.join(s.root, "a");
   r = run("fetch-release.mjs", ["--from", dir, "--out", a, "--id", rec.id, "--digest", rec.digest]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /served layout from .*; re-cut of lean-v4\.34\.0-a8817d0 \(sha256:[0-9a-f]{16}…\), served, complete under its own id: base not compared \(--base-from compares\)/);
+  assert.match(r.stdout, /served layout from .*; release by reference of lean-v4\.34\.0-a8817d0 \(sha256:[0-9a-f]{16}…\), served, complete under its own id: base not compared \(--base-from compares\)/);
   assert.equal(run("verify-release.mjs", ["--release", a, "--deep", "--base", s.rel]).status, 0);
   r = run("fetch-release.mjs", ["--from", dir, "--out", path.join(s.root, "b"), "--only", "lists", "--base-from", s.rel]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
@@ -461,7 +461,7 @@ test("over HTTP: --base-from a served URL (an R2-style prefix) is read by path, 
       runAsync("fetch-release.mjs", ["--from", forcedFrom, "--layout", "served", "--out", forced, "--only", "lists"]),
     ]);
     assert.equal(r.status, 0, r.stdout + r.stderr);
-    assert.match(r.stdout, new RegExp(`flat layout from ${esc(from)}; re-cut of ${esc(BASE_ID)} \\(sha256:[0-9a-f]{16}…\\), base checked, files outside tools/ from ${esc(baseFrom)}$`, "m"));
+    assert.match(r.stdout, new RegExp(`flat layout from ${esc(from)}; release by reference of ${esc(BASE_ID)} \\(sha256:[0-9a-f]{16}…\\), base checked, files outside tools/ from ${esc(baseFrom)}$`, "m"));
     const tgzName = path.basename(RECUT_TGZ);
     assert.deepEqual(seen.filter((q) => q.startsWith("/o/")).sort(), [`/o/r/releases/download/${rec.id}/${tgzName}`, `/o/r/releases/download/${rec.id}/release.json`], "from --from: the record and the tgz only; the sibling never");
     const fromSite = seen.filter((q) => q.startsWith("/site/")).map((q) => q.slice(`/site/lean4-wasm64/${BASE_ID}/`.length)).sort();
@@ -471,7 +471,7 @@ test("over HTTP: --base-from a served URL (an R2-style prefix) is read by path, 
     // --layout served: --from is taken as complete under the re-cut's own id, so no base is read,
     // and a thin GitHub release does not hold the served paths
     assert.equal(f.status, 1, f.stdout + f.stderr);
-    assert.match(f.stdout, new RegExp(`served layout from ${esc(forcedFrom)}; re-cut of ${esc(BASE_ID)} .*served, complete under its own id: base not compared`));
+    assert.match(f.stdout, new RegExp(`served layout from ${esc(forcedFrom)}; release by reference of ${esc(BASE_ID)} .*served, complete under its own id: base not compared`));
     assert.match(f.stderr, /fetch: FAILED — HTTP 404 for .*\/lists\/essential-modules\.txt/);
     const forcedSeen = seen.filter((q) => q.startsWith("/x/"));
     assert.ok(forcedSeen.includes(`/x/r/releases/download/${rec.id}/release.json`) && forcedSeen.includes(`/x/r/releases/download/${rec.id}/lists/essential-modules.txt`), forcedSeen.join(", "));
@@ -492,16 +492,16 @@ test("verify --base: usage, a record without a base, a wrong base; --json carrie
   }
   let r = run("verify-release.mjs", ["--release", s.rel, "--base", s.rel]);
   assert.equal(r.status, 1);
-  assert.match(r.stdout, /^FAIL {2}--base was given, but lean-v4\.34\.0-a8817d0 is not a re-cut by reference/m);
+  assert.match(r.stdout, /^FAIL {2}--base was given, but lean-v4\.34\.0-a8817d0 is not a release by reference/m);
   const other = path.join(s.root, "other.json");
   fs.writeFileSync(other, serializeRelease(resign(s.record, (x) => { x.notes = ["another cut"]; })));
   r = run("verify-release.mjs", ["--release", dir, "--base", other]);
   assert.equal(r.status, 1);
-  assert.match(r.stdout, /^FAIL {2}re-cut of lean-v4\.34\.0-a8817d0 .* — the base's release\.json digest is sha256:[0-9a-f]{64}, the record pins sha256:/m);
+  assert.match(r.stdout, /^FAIL {2}release by reference of lean-v4\.34\.0-a8817d0 .* — the base's release\.json digest is sha256:[0-9a-f]{64}, the record pins sha256:/m);
   r = run("verify-release.mjs", ["--release", dir, "--base", path.join(s.root, "nowhere")]);
-  assert.equal(r.status, 1); assert.match(r.stdout, /^FAIL {2}re-cut of .*cannot read the base's release\.json/m);
+  assert.equal(r.status, 1); assert.match(r.stdout, /^FAIL {2}release by reference of .*cannot read the base's release\.json/m);
   r = run("verify-release.mjs", ["--release", dir, "--base", dir]); // the re-cut is not its own base
-  assert.equal(r.status, 1); assert.match(r.stdout, /is itself a re-cut by reference/);
+  assert.equal(r.status, 1); assert.match(r.stdout, /names a base of its own/);
   let n = 0;
   const json = (args) => {
     const j = path.join(s.root, `verify-${n++}.json`);
@@ -556,11 +556,11 @@ test("help: fetch names --base-from and a fresh --out, verify names --base", () 
   let r = run("fetch-release.mjs", ["--help"]);
   assert.equal(r.status, 0);
   assert.match(r.stdout, /\[--base-from <url\|dir>\]/);
-  assert.match(r.stdout, /--base-from <src> {2}a re-cut by reference/);
+  assert.match(r.stdout, /--base-from <src> {2}a release by reference/);
   // the sibling default is for a flat --from that reads files from the base; nothing else reads a sibling
-  assert.match(r.stdout, /Flat --from:\s+every file outside tools\/ comes from there \(default: the sibling <…>\/<base id>\/ when\s+--from ends in the re-cut's id\)\. Served --from, or tools\/ only: compares with it \(no default\)/);
+  assert.match(r.stdout, /Flat --from:\s+every file it does not own \(outside tools\/; a runtime release by reference also owns\s+runtime\/ and lean-lib\) comes from there \(default: the sibling <…>\/<base id>\/ when --from\s+ends in its id\)\. Served --from, or only its own files: compares with it \(no default\)/);
   assert.match(r.stdout, /--out <dir> .*a fresh dir/);
   r = run("verify-release.mjs", ["--help"]);
   assert.equal(r.status, 0);
-  assert.match(r.stdout, /--base <path> {5}a re-cut by reference/);
+  assert.match(r.stdout, /--base <path> {5}a release by reference/);
 });

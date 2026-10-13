@@ -168,14 +168,24 @@ from a clean, committed tree — it then records `BUILT-COMMIT`; warm ccache; a
 change to `Environment.lean` re-elaborates the whole stdlib, ~1 h), gated
 (`import-release.sh gate-dir <K'>`, which writes `GATE-PASSED`; the gate also
 asks the environment for its own facts: `isModule`, default privacy, meta
-attributes), released (`import-release.sh release vX.Y.Z --runtime <K'>`: the
-runtime and its `lean-lib` from K', the browser packs, native64 and lists from
-the import — RELEASE.md), and handed to QED64 as a KERNEL-ONLY bump: `bump-chain.sh stage-artifact`
-with `QED64_ARTIFACT=<K'>/build/stage1` and the existing lib tree (no
-`import-packs.sh`: oleans and umbrella are reused), rebake, pyramid,
-promote (~500 MB upload: runtime chunks + two snapshots). lean4game
-re-pairs its game snapshots the same way. The packs' oleans of the changed
-modules lag the compiled code until the next full import.
+attributes), released by reference of the release whose packs it keeps
+(`import-release.sh release vX.Y.Z --runtime <K'> --base <mirror of that
+release> --note …`: its runtime and its `lean-lib` from K', the browser packs,
+native64 and lists the base's, by reference — RELEASE.md, "Cutting a release
+by reference"; the import build dir is not needed), and handed to QED64 as a
+KERNEL-ONLY bump: `adopt-release.sh` in its runtime-only mode (every served
+pack's raw digest is in the release's `packs`) with `--umbrella` (oleans and
+umbrella are reused), rebake, pyramid, promote (~500 MB upload: runtime chunks
++ two snapshots). lean4game re-pairs its game snapshots the same way.
+
+A stdlib Lean source changed since the base's kernel (`src/Init`, `src/Std`,
+`src/Lean`) makes the shared packs' oleans of those modules lag the compiled
+code until the next full import: staging refuses it unless `--stdlib-drift
+<why it is harmless>` says why (the runtime runs its own compiled code for
+them; the note is recorded). When the olean-format guard (`lean.h`,
+`object.h`, `compact.{h,cpp}`, `module.cpp`), the Docker recipe guard or the
+ancestry guard refuses, the fix needs a full import: the shared packs would no
+longer pair with the runtime.
 
 ## Ship gate (repository owner)
 

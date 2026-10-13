@@ -1,4 +1,4 @@
-// release.mjs --base: the writer side of a re-cut by reference (formats/release.md, "Re-cut by
+// release.mjs --base: the writer side of a tools re-cut by reference (formats/release.md, "Release by
 // reference"). A small first cut is staged and released once; each case clones its files outside
 // tools/ into a fresh <id>-r3 dir beside a new tgz, derives the config from the base's record as
 // by-reference staging does, and runs release.mjs as a separate process. Every refusal writes
@@ -133,7 +133,7 @@ test("a clean by-reference config over the cloned files: written, base right aft
   const s = recut();
   let r = release(s, "--base", B.rel);
   assert.equal(r.status, 0, r.stderr + r.stdout);
-  assert.match(r.stdout, new RegExp(`release ${RECUT_ID}: .*, a re-cut by reference of ${BASE_ID} →`));
+  assert.match(r.stdout, new RegExp(`release ${RECUT_ID}: .*, a release by reference of ${BASE_ID} →`));
   const text = fs.readFileSync(path.join(s.dir, "release.json"), "utf8");
   const rec = JSON.parse(text);
   assert.deepEqual(Object.keys(rec).slice(0, 4), ["schema", "id", "base", "lean"]);
@@ -169,14 +169,14 @@ test("--base is a usage flag: an empty value exits 2, before any read; --help na
   }
   const h = run("release.mjs", ["--help"]);
   assert.equal(h.status, 0);
-  assert.match(h.stdout, /--base <path> +a re-cut by reference \(config\.base\)/);
+  assert.match(h.stdout, /--base <path> +a release by reference \(config\.base\)/);
 });
 
 test("config.base and --base come together: either alone is refused, nothing written", () => {
   let s = recut();
   let r = release(s);
   assert.equal(r.status, 1, r.stdout);
-  assert.match(r.stderr, /config\.base names a base \(a re-cut by reference\): pass --base/);
+  assert.match(r.stderr, /config\.base names a base \(a release by reference\): pass --base/);
   assert.deepEqual(written(s.dir), []);
   s = recut((c) => { delete c.base; return c; });
   r = release(s, "--base", B.rel);
@@ -233,7 +233,7 @@ test("a re-derived record that is not the base's but for tools/ is refused (chec
     fs.writeFileSync(s.configPath, JSON.stringify(s.config));
     const r = release(s, "--base", B.rel);
     assert.equal(r.status, 1, `${label}: ${r.stdout}`);
-    assert.match(r.stderr, new RegExp(`REFUSED — not a re-cut by reference of ${BASE_ID}:`), label);
+    assert.match(r.stderr, new RegExp(`REFUSED — not a release by reference of ${BASE_ID}:`), label);
     assert.match(r.stderr, re, label);
     assert.deepEqual(written(s.dir), [], label);
   }
@@ -253,7 +253,7 @@ test("config.base on a first cut, or tools/ that break S5, fails the record's ow
   let s = recut((c) => { const { id: _i, recut: _r, ...rest } = c; return rest; });
   let r = release(s, "--base", B.rel);
   assert.equal(r.status, 1, r.stdout);
-  assert.match(r.stderr, /the record would break its own rules:[\s\S]*only a re-cut .* names a base/);
+  assert.match(r.stderr, /the record would break its own rules:[\s\S]*base\.id is lean-v4\.34\.0-a8817d0 itself: a runtime release by reference names a first cut of another kernel commit/);
   assert.deepEqual(written(s.dir), []);
   // the base's tools version again, under the -r3 name
   s = recut((c) => ({ ...c, tools: { ...c.tools, version: B.record.tools.version } }));
@@ -279,7 +279,7 @@ test("each refusal after hashing sets exitCode and returns, never process.exit()
     ["the record's own rules", (s) => { s.config.tools.version = B.record.tools.version; return ["--base", B.rel]; },
       /^release: REFUSED — the record would break its own rules:\n {2}[\s\S]*is not tools\/<package>-<version>\.tgz/],
     ["checkRecutBase", (s) => { fs.writeFileSync(path.join(s.dir, "lists", "essential-modules.txt"), "Init\nMathlib\n"); return ["--base", B.rel]; },
-      new RegExp(`^release: REFUSED — not a re-cut by reference of ${BASE_ID}:\\n {2}files\\[\\]: lists/essential-modules\\.txt is not the base's bytes`)],
+      new RegExp(`^release: REFUSED — not a release by reference of ${BASE_ID}:\\n {2}files\\[\\]: lists/essential-modules\\.txt is not the base's bytes`)],
   ];
   for (const [label, setup, re] of cases) {
     const s = recut();

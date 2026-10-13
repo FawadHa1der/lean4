@@ -14,10 +14,11 @@
 // pairing rule or an identity check fails: the release is the contract every
 // consumer pins, so a wrong record must not exist.
 //
-// A re-cut by reference (config.base, formats/release.md "Re-cut by reference")
+// A release by reference (config.base, formats/release.md "Release by reference")
 // also needs --base, the base release's dir or release.json: it must be the
 // record config.base pins (id and digest), and the record derived here must
-// equal it everywhere but tools/ (checkRecutBase), or nothing is written.
+// equal it everywhere but where the release owns (checkRecutBase), or nothing
+// is written.
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -44,7 +45,7 @@ applyCliContract({
     "flags:",
     "  --release <dir>    the staged release directory (served layout) [required]",
     "  --config <file>    release config JSON (formats/release.md) [required]",
-    "  --base <path>      a re-cut by reference (config.base): the base release's dir or release.json [required with config.base]",
+    "  --base <path>      a release by reference (config.base): the base release's dir or release.json [required with config.base]",
     "  -h, --help         print this help and exit 0",
     "",
     "exit codes: 0 written, 1 refused (reasons printed), 2 usage",
@@ -81,12 +82,12 @@ async function main() {
   if (!idMatch) refuse(`release id ${JSON.stringify(id)} is not lean-<tag>-<kernel7>[-rN]`);
   else if (idMatch[1] !== config.upstreamTag || idMatch[2] !== config.kernelCommit.slice(0, 7)) refuse(`release id ${id} does not name tag ${config.upstreamTag} and kernel ${config.kernelCommit?.slice(0, 7)}`);
 
-  // ---------- a re-cut by reference: the base (formats/release.md, "Re-cut by reference") ----------
+  // ---------- a release by reference: the base (formats/release.md, "Release by reference") ----------
   // `base` is written only from config.base, and only with --base: the base's own record, pinned
   // here by id and digest, and compared field by field and file by file once files[] is hashed
   let baseRecord;
-  if (config.base !== undefined && !arg("base")) refuse("config.base names a base (a re-cut by reference): pass --base <the base release's dir or release.json>");
-  else if (config.base === undefined && arg("base")) refuse("--base was given, but the config names no base: only config.base (with recut) makes a re-cut by reference");
+  if (config.base !== undefined && !arg("base")) refuse("config.base names a base (a release by reference): pass --base <the base release's dir or release.json>");
+  else if (config.base === undefined && arg("base")) refuse("--base was given, but the config names no base: only config.base makes a release by reference");
   else if (arg("base")) {
     const bp = path.resolve(arg("base"));
     const bfile = fs.existsSync(bp) && fs.statSync(bp).isDirectory() ? path.join(bp, "release.json") : bp;
@@ -257,14 +258,14 @@ async function main() {
   if (config.base !== undefined) {
     const baseProblems = checkRecutBase(record, baseRecord);
     if (baseProblems.length) {
-      console.error(`release: REFUSED — not a re-cut by reference of ${config.base?.id}:\n  ${baseProblems.join("\n  ")}`);
+      console.error(`release: REFUSED — not a release by reference of ${config.base?.id}:\n  ${baseProblems.join("\n  ")}`);
       return (process.exitCode = 1);
     }
   }
   fs.writeFileSync(path.join(dir, "release.json"), serializeRelease(record));
   const recordSha = await sha256File(path.join(dir, "release.json"));
   fs.writeFileSync(path.join(dir, "SHA256SUMS"), sha256sums([...files, { path: "release.json", sha256: recordSha }]));
-  const byReference = record.base ? `, a re-cut by reference of ${record.base.id}` : "";
+  const byReference = record.base ? `, a release by reference of ${record.base.id}` : "";
   console.log(`release ${id}: ${files.length} files, runtime ${runtime.buildId}, ${packs.length} packs${byReference} → ${path.join(dir, "release.json")} (${record.digest.slice(0, 23)}…)`);
 }
 await main();

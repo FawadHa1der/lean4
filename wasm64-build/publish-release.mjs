@@ -14,30 +14,33 @@
 //   3. github   needs the tag on GitHub. ONE release for the tag: a draft is created (or the
 //               existing one reused), every file uploaded by basename (skipping assets whose
 //               SHA-256 already matches), every asset verified against the staged bytes, and only
-//               then published (--verify-tag). A re-cut by reference uploads its own files only
-//               (tools/<tgz>, release.json, SHA256SUMS): the others are its base's assets
+//               then published (--verify-tag). A release by reference uploads its own files only
+//               (a tools re-cut: tools/<tgz>; a runtime release by reference: also runtime/ and the
+//               lean-lib pack; both: release.json, SHA256SUMS): the others are its base's assets
 //   4. r2       needs the tag on GitHub. The served layout under <r2>/<id>/: objects, then
 //               manifests + SHA256SUMS, then release.json last (js/formats/HOSTING.md), all with
 //               `copy --immutable` (an object that differs is a stop, never overwritten); then every
-//               name, size, content type and (unless --r2-quick) object SHA-256 is checked. A re-cut
+//               name, size, content type and (unless --r2-quick) object SHA-256 is checked. A release
 //               by reference gets a complete prefix too: its shared files are copied server-side
-//               from <r2>/<base id>/, then its own files go up, release.json last; it is checked by
-//               the listing, its own files' SHA-256 and an `rclone check` (MD5) of the shared files
-//               against the staged dir (--r2-full: every object's SHA-256, as for a full release)
+//               from <r2>/<base id>/, then its own files go up (objects, then manifests, by lists
+//               derived from the record), release.json last; it is checked by the listing, its own
+//               files' SHA-256 and an `rclone check` (MD5) of the shared files against the staged
+//               dir (--r2-full: every object's SHA-256, as for a full release)
 //   5. fetch    an anonymous `lean4-wasm64 fetch`, run with the staged tgz's own tools (the reader
 //               this release ships, as preflight unpacked and checked it), of the published GitHub
-//               release pinned by --id/--digest, then `verify --deep`; a re-cut by reference: its
-//               runtime (through its base's release) and its tools (--fetch-check to change it)
+//               release pinned by --id/--digest, then `verify --deep`; a release by reference: its
+//               runtime, the lists (always the base's: the hop to its base's release) and its tools
+//               (--fetch-check to change it)
 // Before any step, whatever --only is (--dry-run too), the staged dir is verified, and so is the
 // reader it ships: its tools tgz is unpacked, must be tools.package@tools.version, and its own
-// `verify` must pass the staged dir (with --base for a re-cut by reference).
+// `verify` must pass the staged dir (with --base for a release by reference).
 // Every step first reads the current state and does only what is missing, so a re-run after an
 // interruption (or after doing a step by hand) resumes. It never creates a second release for a
 // tag, never replaces or deletes an asset of a PUBLISHED release that has bytes (an interrupted,
 // byte-less upload is replaced on any release), never force-pushes (the push is --atomic), and
 // stops with the command to fix things where a state is not one it produced. A re-cut (-rN) may
 // be recorded on a branch cut from its base's record commit; then only its tag is pushed.
-// A re-cut by reference (release.json `base`, js/formats/release.md) is checked against its base
+// A release by reference (release.json `base`, js/formats/release.md) is checked against its base
 // before any step, whatever --only is: the base's record at its tag (canonical, checkRecutBase),
 // its published GitHub release holding every shared file (size and digest) and that record, and
 // (--r2-source base) its R2 prefix holding every shared object with the staged MD5 and that record.
@@ -47,13 +50,14 @@
 //   --r2 <remote:path>    the R2 prefix (default: $LEAN4_WASM64_R2 or qed64-r2:qed64-artifacts/lean4-wasm64)
 //   --only <steps>        a comma list of record,push,github,r2,fetch (default: all, in that order)
 //   --r2-quick            check R2 by listing only (names, sizes, content types), not by hashing (a
-//                         re-cut by reference: nor by the MD5 check of its shared objects)
+//                         release by reference: nor by the MD5 check of its shared objects)
 //   --r2-full             check R2 by every object's SHA-256 (a download; always so for a full release)
-//   --r2-source <s>       a re-cut by reference: base (default: copy the shared files server-side from
+//   --r2-source <s>       a release by reference: base (default: copy the shared files server-side from
 //                         the base's prefix) | local (upload them from the staged dir; the base's prefix
 //                         is not read)
-//   --fetch-check <m>     auto (default: full; runtime for a re-cut by reference) | full (every file,
-//                         ~3 GB, then verify --deep) | runtime (a re-cut by reference: runtime,tools) | none
+//   --fetch-check <m>     auto (default: full; runtime for a release by reference) | full (every file,
+//                         ~3 GB, then verify --deep) | runtime (a release by reference: runtime,lists,tools)
+//                         | none
 //   --yes                 do not ask before pushing and publishing
 //   --dry-run             read and check everything, print the commands it would run, change nothing
 //                         (the temp files those commands name are kept)
@@ -69,7 +73,7 @@ import readline from "node:readline";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { RELEASE_ID, checkRecutBase, checkReleaseRecord, isRecutOwnPath, releaseDigest, serializeRelease } from "./js/release-record.mjs";
+import { RELEASE_ID, checkRecutBase, checkReleaseRecord, isOwnPath, ownLabel, releaseDigest, serializeRelease } from "./js/release-record.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..");
@@ -181,48 +185,58 @@ export function checkR2Listing(local, listing) {
 }
 
 /**
- * The GitHub release body: the pin, then (a re-cut by reference) where its other files are, then
+ * The GitHub release body: the pin, then (a release by reference) where its other files are, then
  * the record's notes.
  */
 export function releaseBody(record) {
   const pin = `Toolchain release ${record.id}. Pin: --id ${record.id} --digest ${record.digest}. Contents and digests: release.json`;
-  const own = splitFiles(record).own.filter((p) => p !== "release.json" && p !== "SHA256SUMS");
-  const ref = record.base ? `Re-cut by reference of ${record.base.id} (${record.base.digest}): this release's assets are `
-    + `${own.join(", ")}, release.json and SHA256SUMS; every other file release.json lists is an asset of ${record.base.id} `
-    + "(lean4-wasm64 fetch takes them from there)." : "";
+  const n = splitFiles(record).own.filter((p) => p !== "release.json" && p !== "SHA256SUMS").length;
+  const ref = record.base ? `Release by reference of ${record.base.id} (${record.base.digest}): this release's assets are its own files `
+    + `(${ownLabel(record)}: ${n} file${n === 1 ? "" : "s"}), release.json and SHA256SUMS; every other file release.json lists is an asset of `
+    + `${record.base.id} (lean4-wasm64 fetch takes them from there).` : "";
   const notes = (record.notes ?? []).map((n) => `- ${n}`).join("\n");
   return `${[pin, ref, notes].filter(Boolean).join("\n\n")}\n`;
 }
 
-// ---------- a re-cut by reference (js/formats/release.md, "Re-cut by reference") ----------
+// ---------- a release by reference (js/formats/release.md, "Release by reference") ----------
 
 /**
  * The files this release's own GitHub release carries, and the ones it shares with its base — a
- * re-cut by reference (release.json `base`): every file outside tools/ is an asset of the base's
- * release. Release-relative paths. A full record owns every file. → {own: [paths], shared: [paths]}
+ * release by reference (release.json `base`): every file it does not own (isOwnPath: outside tools/
+ * for a tools re-cut; outside runtime/, profiles/lean-lib.* and tools/ for a runtime release by
+ * reference) is an asset of the base's release. Release-relative paths. A full record owns every
+ * file. → {own: [paths], shared: [paths]}
  */
 export function splitFiles(record) {
   const all = (record.files ?? []).map((f) => f.path);
-  const own = record.base ? all.filter(isRecutOwnPath) : all;
-  return { own: ["release.json", "SHA256SUMS", ...own], shared: record.base ? all.filter((p) => !isRecutOwnPath(p)) : [] };
+  const own = record.base ? all.filter((p) => isOwnPath(record, p)) : all;
+  return { own: ["release.json", "SHA256SUMS", ...own], shared: record.base ? all.filter((p) => !isOwnPath(record, p)) : [] };
 }
 
-/** The shared paths split by the content type HOSTING.md serves them with (a server-side copy keeps each object's). */
-export const r2Lists = (shared) => ({
-  objects: shared.filter((p) => !isRecutOwnPath(p) && contentTypeOf(p) === "application/octet-stream"),
-  manifests: shared.filter((p) => !isRecutOwnPath(p) && contentTypeOf(p) === "application/json"),
-});
+/**
+ * The R2 lists of a release by reference, each split by the content type HOSTING.md serves it with:
+ * its shared paths (`objects`, `manifests`: a server-side copy keeps each object's), and its own
+ * paths but release.json and SHA256SUMS (`ownObjects`, `ownManifests`: uploaded with that type).
+ */
+export function r2Lists(record) {
+  const { own, shared } = splitFiles(record);
+  const mine = own.filter((p) => p !== "release.json" && p !== "SHA256SUMS");
+  const of = (paths, type) => paths.filter((p) => contentTypeOf(p) === type);
+  return { objects: of(shared, "application/octet-stream"), manifests: of(shared, "application/json"),
+    ownObjects: of(mine, "application/octet-stream"), ownManifests: of(mine, "application/json") };
+}
 
 /**
  * The rclone argv of each R2 pass, in order (HOSTING.md); every pass is `copy --immutable`, so an
  * object that differs is a stop, never overwritten. A full record, or `source` "local": the three
- * passes of a release dir — objects, then manifests + SHA256SUMS, then release.json. A re-cut by
+ * passes of a release dir — objects, then manifests + SHA256SUMS, then release.json. A release by
  * reference (`basePrefix`): the shared objects (`objectsList`), then the shared manifests
  * (`manifestsList`), copied server-side from the base's prefix (one remote: CopyObject; without -M
- * or --header-upload each object keeps its Content-Type), then its own tools/, SHA256SUMS and
- * release.json, last. Never the base's release.json, SHA256SUMS or tools/.
+ * or --header-upload each object keeps its Content-Type), then its own objects (`ownObjectsList`)
+ * and its own manifests (`ownManifestsList`, when it has any) from the staged dir, then SHA256SUMS
+ * and release.json, last. Never the base's release.json or SHA256SUMS, nor a file it owns.
  */
-export function r2Passes({ rel, dest, basePrefix = null, objectsList, manifestsList, source = "base" }) {
+export function r2Passes({ rel, dest, basePrefix = null, objectsList, manifestsList, ownObjectsList, ownManifestsList = null, source = "base" }) {
   const common = ["--immutable", "--s3-no-check-bucket", "--checksum"];
   const only = (filter, type) => ["copy", rel, dest, ...common, "--filter", filter, "--filter", "- *", "--header-upload", `Content-Type: ${type}`];
   if (!basePrefix || source === "local") return [
@@ -235,15 +249,16 @@ export function r2Passes({ rel, dest, basePrefix = null, objectsList, manifestsL
   return [
     ["copy", basePrefix, dest, ...common, "--files-from-raw", objectsList, "--transfers", "8"],
     ["copy", basePrefix, dest, ...common, "--files-from-raw", manifestsList],
-    only("+ /tools/**", "application/octet-stream"),
+    ["copy", rel, dest, ...common, "--files-from-raw", ownObjectsList, "--header-upload", "Content-Type: application/octet-stream", "--transfers", "4", "--s3-chunk-size", "64M"],
+    ...(ownManifestsList ? [["copy", rel, dest, ...common, "--files-from-raw", ownManifestsList, "--header-upload", "Content-Type: application/json"]] : []),
     only("+ /SHA256SUMS", "application/json"),
     only("+ /release.json", "application/json"),
   ];
 }
 
 /**
- * The base's GitHub release must serve every file a re-cut by reference shares with it.
- * shared: [{path, bytes, sha256}] (the re-cut's files[] outside tools/); baseRelease: the base
+ * The base's GitHub release must serve every file a release by reference shares with it.
+ * shared: [{path, bytes, sha256}] (its files[] it does not own); baseRelease: the base
  * tag's one release (null: none); baseAssets: its [{id, name, size, state, digest}];
  * baseRecordText: the base's release.json as its tag holds it. Problems: no release, a draft, a
  * shared basename (or release.json) missing, not "uploaded", of another size or another digest.
@@ -305,15 +320,16 @@ export function checkR2Copy(combinedText, log, shared) {
 
 /**
  * What the fetch step runs: null (nothing) | {only: null (every file) | "<groups>", deep: verify
- * --deep after it}. auto: every file and verify --deep for a full release; runtime,tools for a re-cut
- * by reference (its runtime through the hop to its base's release, its own tgz from its own).
- * runtime: the runtime alone, plus tools for a re-cut by reference (its only own file).
+ * --deep after it}. auto: every file and verify --deep for a full release; runtime,lists,tools for a
+ * release by reference (its runtime: a tools re-cut's through the hop to its base's release, a
+ * runtime release's from its own; the lists, always the base's: the hop to it; its own tgz from its
+ * own). runtime: the runtime alone, plus lists and tools for a release by reference.
  */
 export function fetchPlan(record, mode) {
   if (mode === "none") return null;
   const byRef = !!record?.base;
   if (mode === "full" || (mode === "auto" && !byRef)) return { only: null, deep: true };
-  if (mode === "runtime" || mode === "auto") return { only: byRef ? "runtime,tools" : "runtime", deep: false };
+  if (mode === "runtime" || mode === "auto") return { only: byRef ? "runtime,lists,tools" : "runtime", deep: false };
   throw new Error(`fetch check ${JSON.stringify(mode)}: auto | full | runtime | none`);
 }
 
@@ -524,7 +540,7 @@ function requireTagged(o, ctx) {
   throw new Stop(`${problem.text}: run \`publish ${o.id} --only record,push\` first`);
 }
 
-// ---------- a re-cut by reference: its base (read-only; preflight, then re-checked in the steps) ----------
+// ---------- a release by reference: its base (read-only; preflight, then re-checked in the steps) ----------
 
 /**
  * The base's record as the base's tag holds it (the local tag, which must be origin's, else
@@ -536,7 +552,7 @@ function baseRecordAtTag(o, record) {
   const id = record.base.id;
   const recordPath = `wasm64-build/releases/${id}.json`;
   const local = localTagObj(id), remote = originTagObj(id);
-  if (!remote) throw new Stop(`origin has no tag ${id}: a re-cut by reference needs its base published first`);
+  if (!remote) throw new Stop(`origin has no tag ${id}: a release by reference needs its base published first`);
   if (local && local !== remote) throw new Stop(`the local tag ${id} (${local.slice(0, 10)}) is not origin's (${remote.slice(0, 10)})`);
   let rev = `refs/tags/${id}`;
   if (!local) { rev = originTagCommit(id); haveObject(rev, `refs/tags/${id}`); }
@@ -547,12 +563,12 @@ function baseRecordAtTag(o, record) {
   try { base = JSON.parse(text); } catch (e) { throw new Stop(`${where} is not JSON: ${e.message}`); }
   if (serializeRelease(base) !== text) throw new Stop(`${where} is not in canonical form (serializeRelease)`);
   const problems = checkRecutBase(record, base);
-  if (problems.length) throw new Stop(`${o.id} is not a re-cut by reference of ${where}:\n  ${problems.slice(0, 20).join("\n  ")}${problems.length > 20 ? `\n  … ${problems.length - 20} more` : ""}`);
+  if (problems.length) throw new Stop(`${o.id} is not a release by reference of ${where}:\n  ${problems.slice(0, 20).join("\n  ")}${problems.length > 20 ? `\n  … ${problems.length - 20} more` : ""}`);
   return { record: base, text, where };
 }
 
 /**
- * The base's GitHub release serves every file the re-cut shares with it, and the base's record
+ * The base's GitHub release serves every file the release shares with it, and the base's record
  * (checkBaseAssets). `hash`: an asset GitHub has no digest for is hashed from a download (--dry-run
  * reports it); otherwise (a re-check) only the problems count.
  */
@@ -637,7 +653,7 @@ function r2CheckShared(o, ctx, prefix, label) {
 /**
  * The reader this release ships: its staged tools tgz, unpacked into a temp dir (the fetch step runs
  * it), must be tools.package@tools.version, and its own `verify` must pass the staged dir (--base for
- * a re-cut by reference). Local and read-only, so preflight runs it — dry run included — before
+ * a release by reference). Local and read-only, so preflight runs it — dry run included — before
  * anything is pushed or published: a release whose own tools cannot read it is never made.
  * → {dir, cli} | null (release.json names no tools tgz)
  */
@@ -675,7 +691,7 @@ function preflight(o) {
   const slug = repoSlug(record.kernel?.repo);
   if (!slug) throw new Stop(`release.json kernel.repo ${record.kernel?.repo} is not a github.com repository`);
   const line = record.kernel.branch;
-  // a re-cut by reference: its base is read (gh, and rclone unless --r2-source local) whatever --only is
+  // a release by reference: its base is read (gh, and rclone unless --r2-source local) whatever --only is
   const byRef = record.base !== undefined;
   const needs = { gh: true, git: true, rclone: o.only.includes("r2") || (byRef && o.r2Source === "base") };
   for (const [tool, args] of [["gh", ["--version"]], ["git", ["--version"]], ["rclone", ["version"]]]) {
@@ -698,21 +714,23 @@ function preflight(o) {
   }
   const ctx = { rel, record, recordText, slug, line, recordPath: `wasm64-build/releases/${o.id}.json`, base: null, tools: null };
   if (byRef) {
-    // before anything reads base.id: the record's own structure (S1-S5: base.id is this id's first cut)
+    // before anything reads base.id: the record's own structure (S1-S6: base.id is a first cut of its tag)
     const problems = checkReleaseRecord(record);
     if (problems.length) throw new Stop(`${rel}/release.json is malformed:\n  ${problems.slice(0, 12).join("\n  ")}`);
     const at = baseRecordAtTag(o, record);
     const dir = tempDir();
     const { own, shared } = splitFiles(record);
-    const { objects, manifests } = r2Lists(shared);
+    const { objects, manifests, ownObjects, ownManifests } = r2Lists(record);
     const lists = { dir, own: writeList(path.join(dir, "own.txt"), own), shared: writeList(path.join(dir, "shared.txt"), shared),
-      objects: writeList(path.join(dir, "shared.objects"), objects), manifests: writeList(path.join(dir, "shared.manifests"), manifests) };
+      objects: writeList(path.join(dir, "shared.objects"), objects), manifests: writeList(path.join(dir, "shared.manifests"), manifests),
+      ownObjects: writeList(path.join(dir, "own.objects"), ownObjects),
+      ownManifests: ownManifests.length ? writeList(path.join(dir, "own.manifests"), ownManifests) : null };
     const file = path.join(dir, "base", "release.json"); // verify --base, here and in the fetch step
     fs.mkdirSync(path.dirname(file));
     fs.writeFileSync(file, at.text);
     ctx.base = {
       id: record.base.id, digest: record.base.digest, record: at.record, text: at.text, where: at.where, file,
-      prefix: `${o.r2}/${record.base.id}/`, own, shared, sharedFiles: record.files.filter((f) => !isRecutOwnPath(f.path)), lists,
+      prefix: `${o.r2}/${record.base.id}/`, own, shared, sharedFiles: record.files.filter((f) => !isOwnPath(record, f.path)), lists,
     };
   }
   // the staged bytes are what will be published: check them whole before anything else
@@ -855,7 +873,7 @@ async function stepPush(o, ctx) {
 async function stepGithub(o, ctx) {
   step(`github: release ${o.id} on ${ctx.slug}`);
   const tagged = requireTagged(o, ctx);
-  // a re-cut by reference: its base's release must still serve the shared files (re-checked), and
+  // a release by reference: its base's release must still serve the shared files (re-checked), and
   // only its own files go on its release
   if (ctx.base) checkBaseRelease(o, ctx, { hash: false });
   const own = ctx.base ? new Set(ctx.base.own) : null;
@@ -863,7 +881,7 @@ async function stepGithub(o, ctx) {
   if (own) {
     const missing = [...own].filter((p) => !files.some((f) => f.rel.split(path.sep).join("/") === p));
     if (missing.length) throw new Stop(`the staged release lacks its own files: ${missing.join(", ")}`);
-    say(`  a re-cut by reference: its ${files.length} own files go on its release; the other ${ctx.base.shared.length} are assets of ${ctx.base.id}`);
+    say(`  a release by reference: its ${files.length} own files (${ownLabel(ctx.record)}, release.json, SHA256SUMS) go on its release; the other ${ctx.base.shared.length} are assets of ${ctx.base.id}`);
   }
   const dup = files.map((f) => f.name).filter((n, i, all) => all.indexOf(n) !== i);
   if (dup.length) throw new Stop(`GitHub assets are flat: these basenames repeat: ${[...new Set(dup)].join(", ")}`);
@@ -885,7 +903,7 @@ async function stepGithub(o, ctx) {
   const assets = () => releaseAssets(ctx.slug, rel.id);
   let plan = planAssets(files, assets(), rel.draft, ctx.slug);
   if (plan.stop) {
-    throw new Stop(plan.stop + (ctx.base && rel.draft ? `\n  (a re-cut by reference's release carries its ${files.length} own files only: a draft filled by the by-value fallback is emptied first)` : ""));
+    throw new Stop(plan.stop + (ctx.base && rel.draft ? `\n  (a release by reference's release carries its ${files.length} own files only: a draft filled by the by-value fallback is emptied first)` : ""));
   }
   for (const r of plan.remove) {
     say(`  re-uploading ${r.name} (${r.why})`);
@@ -930,10 +948,10 @@ async function stepR2(o, ctx) {
   step(`r2: ${dest}`);
   const tagged = requireTagged(o, ctx);
   const { base } = ctx;
-  // a re-cut by reference copies its shared files from the base's prefix: re-checked here (dry run too)
+  // a release by reference copies its shared files from the base's prefix: re-checked here (dry run too)
   const fromBase = !!base && o.r2Source === "base";
   if (fromBase) checkBasePrefix(o, ctx);
-  const files = stagedFiles(ctx.rel); // complete for a re-cut by reference too: its prefix is
+  const files = stagedFiles(ctx.rel); // complete for a release by reference too: its prefix is
   const before = checkR2Listing(files, r2Listing(dest));
   const foreign = before.filter((p) => !p.startsWith("missing on R2:"));
   if (foreign.length) throw new Stop(`R2 holds objects that differ from the staged release (never overwritten):\n  ${foreign.slice(0, 20).join("\n  ")}`);
@@ -944,8 +962,8 @@ async function stepR2(o, ctx) {
     if (!tagged) { say("  (would copy them once the tag is on GitHub)"); return; }
     // objects, then manifests + SHA256SUMS, then release.json: a reader that finds release.json finds everything.
     // Every pass is `copy --immutable` (copyto would replace a different release.json); never sync.
-    const passes = r2Passes({ rel: ctx.rel, dest, basePrefix: fromBase ? base.prefix : null,
-      objectsList: base?.lists.objects, manifestsList: base?.lists.manifests, source: o.r2Source });
+    const passes = r2Passes({ rel: ctx.rel, dest, basePrefix: fromBase ? base.prefix : null, objectsList: base?.lists.objects,
+      manifestsList: base?.lists.manifests, ownObjectsList: base?.lists.ownObjects, ownManifestsList: base?.lists.ownManifests, source: o.r2Source });
     for (const args of passes) act(o, "rclone", args);
   }
   if (o.dryRun) {
@@ -966,8 +984,9 @@ async function stepR2(o, ctx) {
     say(`  verified: every R2 object has the staged SHA-256`);
     return;
   }
-  // a re-cut by reference: its own files by SHA-256 (a ~100 KB download), the shared ones by MD5
-  // against the staged dir (whose every file the preflight verify hashed against the record)
+  // a release by reference: its own files by SHA-256 (a download: ~100 KB for a tools re-cut, its
+  // runtime and lean-lib too for a runtime release, ~700 MB), the shared ones by MD5 against the
+  // staged dir (whose every file the preflight verify hashed against the record)
   const sums = r2Sha256(dest, base.lists.own);
   const bad = base.own.filter((p) => sums.get(p) !== sha256File(path.join(ctx.rel, ...p.split("/"))));
   if (bad.length) throw new Stop(`R2 bytes differ from the staged release: ${bad.join(", ")}`);
@@ -981,7 +1000,7 @@ async function stepFetch(o, ctx) {
   const from = `https://github.com/${ctx.slug}/releases/download/${o.id}/`;
   step(`fetch: a consumer's pinned fetch of ${from} (${plan.only ?? "every file"}${plan.deep ? ", then verify --deep" : ""})`);
   // the reader this release ships, unpacked from its staged tgz and checked in preflight — not this
-  // working tree's (a consumer installs that tgz first; for a re-cut by reference it is the reader
+  // working tree's (a consumer installs that tgz first; for a release by reference it is the reader
   // that knows `base`)
   const { tools } = ctx.record;
   const cli = ctx.tools?.cli ?? path.join(JS, "cli.mjs");

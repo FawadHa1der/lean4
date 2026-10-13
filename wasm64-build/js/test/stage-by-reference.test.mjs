@@ -1,9 +1,11 @@
-// stage-release.sh --base, a re-cut by reference (formats/release.md, "Re-cut by reference"). Its node
-// steps (wasm64-build/stage-by-reference.mjs) as unit tests on small synthetic mirrors and on the
-// committed e1a79c1 record; then the script itself, end to end, on a small synthetic first cut, from
-// a scratch copy of the repository whose paths hold spaces. Shims stand in for git (read-only
-// answers), npm (packs the copy's js/, with a stand-in gate.mjs: no wasm runtime here), gh and rclone
-// (they only record their argv). No network, and nothing outside the test's temp dirs is written.
+// stage-release.sh --base, a release by reference (formats/release.md, "Release by reference") of
+// either kind: a tools re-cut (--recut) and a runtime release by reference (--runtime). Its node steps
+// (wasm64-build/stage-by-reference.mjs) as unit tests on small synthetic mirrors and on the committed
+// e1a79c1 record; then the script itself, end to end, on a small synthetic first cut, from scratch
+// copies of the repository whose paths hold spaces. Shims stand in for git (read-only answers, with
+// knobs for the refusals), npm (packs the copy's js/, with a stand-in gate.mjs: no wasm runtime here),
+// gh and rclone (they only record their argv). No network, and nothing outside the test's temp dirs
+// is written.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
@@ -12,7 +14,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { canonicalRelease, checkRecutBase, checkReleaseRecord, isRecutOwnPath, serializeRelease, sha256sums } from "../release-record.mjs";
+import { canonicalRelease, checkRecutBase, checkReleaseRecord, isOwnPath, isRecutOwnPath, serializeRelease, sha256sums } from "../release-record.mjs";
+import { buildIdFromSha256 } from "../artifact-id.mjs";
+import { K0040, WASM0040, runtimeRecutOf } from "./runtime-recut-fixture.mjs";
+import { olean } from "./olean-fixture.mjs";
 import {
   baseFields, baseProblems, checkMirror, cloneShared, finalCheck, isWithin, mirrorMisses, mirrorOverlaps, physicalPath,
   recutConfig, writeRecutConfig,
@@ -71,8 +76,16 @@ const filesUnder = (d) => snapshot(d).filter((l) => !l.endsWith("/")).map((l) =>
 
 test("base: the committed e1a79c1 record is a base of v4.34.0; the step prints the fields the script reads", () => {
   assert.deepEqual(baseProblems(E1, "v4.34.0"), []);
-  assert.equal(baseFields(E1_FILE, "v4.34.0"),
-    [E1.id, E1.digest, E1.kernel.commit, E1.gate.wasmSha256, E1.packs.find((k) => k.id === "lean-lib").rawSha256].join(" "));
+  const fields = baseFields(E1_FILE, "v4.34.0");
+  assert.equal(fields, [E1.id, E1.digest, E1.kernel.commit, E1.gate.wasmSha256, E1.packs.find((k) => k.id === "lean-lib").rawSha256, E1.docker.recipeCommit].join(" "));
+  assert.equal(fields.split(" ").length, 6, "the script reads 6 fields");
+  // a base without a recipe commit prints "-" (the runtime kind then refuses it)
+  const root = mkdtemp("l4w-sbr-fields-");
+  const file = path.join(root, "release.json");
+  const { recipeCommit: _r, ...docker } = E1.docker;
+  const { digest: _d, ...rest } = E1;
+  fs.writeFileSync(file, JSON.stringify(canonicalRelease({ ...rest, docker })));
+  assert.equal(baseFields(file, "v4.34.0").split(" ").at(-1), "-");
 });
 
 test("base: refuses another tag, a re-cut, a base with a base, another package, no lean-lib — naming the file", () => {
@@ -80,8 +93,9 @@ test("base: refuses another tag, a re-cut, a base with a base, another package, 
   refused(E1, "v4.35.0", /^it is lean-v4\.34\.0-e1a79c1, not a first cut of v4\.35\.0 /);
   const r2 = JSON.parse(fs.readFileSync(path.join(build, "releases", "lean-v4.34.0-e1a79c1-r2.json"), "utf8"));
   refused(r2, "v4.34.0", /^it is lean-v4\.34\.0-e1a79c1-r2, not a first cut of v4\.34\.0/);
-  refused({ ...E1, base: { id: "lean-v4.34.0-0000000", digest: E1.digest } }, "v4.34.0", /^it is itself a re-cut by reference \(of lean-v4\.34\.0-0000000\)$/);
-  refused({ ...E1, tools: { ...E1.tools, package: "other" } }, "v4.34.0", /^its tools are "other", not lean4-wasm64/);
+  refused({ ...E1, base: { id: "lean-v4.34.0-0000000", digest: E1.digest } }, "v4.34.0", /^it names a base of its own \(lean-v4\.34\.0-0000000\): a base names no base of its own$/);
+  refused(E1, "v4.35.0", /: a release by reference names a first cut$/);
+  refused({ ...E1, tools: { ...E1.tools, package: "other" } }, "v4.34.0", /^its tools are "other", not lean4-wasm64: a release by reference ships the base's package$/);
   refused({ ...E1, packs: E1.packs.filter((k) => k.id !== "lean-lib") }, "v4.34.0", /^it has no lean-lib pack/);
   refused(null, "v4.34.0", /^it is undefined, not a first cut/);
   const root = mkdtemp("l4w-sbr-base-");
@@ -219,6 +233,42 @@ test("config: every field but the re-cut's own is e1a79c1's; the count, notes an
   assert.equal(fs.readFileSync(file, "utf8"), `${JSON.stringify(c, null, 2)}\n`);
 });
 
+test("config with a runtime: its kernel, gate and lean-lib entry, no recut, a separator before e1a79c1's notes; every other field e1a79c1's", () => {
+  const own = { id: "lean-v4.34.0-64d6ebb", checks: "56", version: "4.34.0-64d6ebb", tgz: "lean4-wasm64-4.34.0-64d6ebb.tgz", commit: "b".repeat(40), notes: ["one", "two"] };
+  const runtime = { kernelCommit: K0040, kernelPatch: "0040", wasmSha256: WASM0040 };
+  const c = recutConfig(E1, { ...own, runtime });
+  const plain = recutConfig(E1, { ...own, recut: "3" });
+  assert.equal("recut" in c, false);
+  const mine = ["kernelCommit", "kernelPatch", "recut", "gate", "packs", "notes"];
+  for (const k of Object.keys(plain).filter((x) => !mine.includes(x))) assert.deepEqual(c[k], plain[k], k);
+  assert.deepEqual(Object.keys(c), Object.keys(plain).filter((k) => k !== "recut"), "today's key order, without recut");
+  assert.deepEqual([c.kernelCommit, c.kernelPatch], [K0040, "0040"]);
+  assert.deepEqual(c.gate, { commit: K0040, wasmSha256: WASM0040, checks: 56 });
+  // the packs keep their order and notes; lean-lib is its own build's (release.mjs reads the rest from its manifest)
+  assert.deepEqual(c.packs, plain.packs.map((p) => (p.id === "lean-lib" ? { id: "lean-lib", compiler: K0040 } : p)));
+  assert.deepEqual(c.notes.slice(0, 2), ["one", "two"]);
+  assert.equal(c.notes[2], `Notes of ${E1.id} (the base, ${E1.digest}) follow verbatim: what they say of its packs, native64 and lists holds for this release, `
+    + "whose files those are; what they say of its runtime and lean-lib is that release's.");
+  assert.deepEqual(c.notes.slice(3), E1.notes);
+  // without a runtime: today's builder
+  assert.deepEqual(plain.notes, ["one", "two", ...E1.notes]);
+  assert.equal(plain.kernelCommit, E1.kernel.commit);
+  // the step: <own> is a re-cut number or <kernel commit>:<patch>:<lean.wasm sha256>, nothing else
+  const root = mkdtemp("l4w-sbr-config-rt-");
+  const file = path.join(root, "c.json");
+  writeRecutConfig(E1_FILE, file, own.id, `${K0040}:0040:${WASM0040}`, own.checks, own.version, own.tgz, own.commit, own.notes);
+  assert.equal(fs.readFileSync(file, "utf8"), `${JSON.stringify(c, null, 2)}\n`);
+  for (const bad of ["x", "3a", `${K0040}:40:${WASM0040}`, `${K0040.slice(1)}:0040:${WASM0040}`, `${K0040}:0040`, `${K0040}:0040:${WASM0040}:x`]) {
+    assert.throws(() => writeRecutConfig(E1_FILE, path.join(root, "bad.json"), own.id, bad, own.checks, own.version, own.tgz, own.commit),
+      /^Error: <own> ".*" is neither a re-cut number nor <kernel commit>:<patch>:<lean\.wasm sha256>$/, bad);
+  }
+  assert.equal(fs.existsSync(path.join(root, "bad.json")), false);
+  const r = spawnSync(process.execPath, [SBR, "config", E1_FILE, path.join(root, "bad.json"), own.id, "x", "4", own.version, own.tgz, own.commit], { encoding: "utf8", timeout: 60_000 });
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /^stage-by-reference config: <own> "x" is neither a re-cut number nor /);
+  assert.equal(fs.existsSync(path.join(root, "bad.json")), false);
+});
+
 // ---------- final ----------
 
 const R3 = `${E1.id}-r3`, R3_TGZ = "tools/lean4-wasm64-4.34.0-e1a79c1-r3.tgz";
@@ -230,15 +280,15 @@ const recutOfE1 = (over = {}) => {
   return canonicalRelease({ ...rest, id: R3, base: { id: E1.id, digest: E1.digest }, gate: { ...E1.gate, checks: 34 },
     tools: { ...E1.tools, version: "4.34.0-e1a79c1-r3", tgz: R3_TGZ, commit: "b".repeat(40) }, notes: ["own", ...E1.notes], files, ...over });
 };
-/** <root>/<R3>/ with release.json and SHA256SUMS (edited by `sums`); returns the dir and the sidecar prefix. */
+/** <root>/<id>/ with release.json and SHA256SUMS (edited by `sums`); returns the dir and the sidecar prefix. */
 function writeRecut(root, record, sums = (s) => s) {
-  const rel = path.join(root, R3);
+  const rel = path.join(root, record.id);
   fs.rmSync(rel, { recursive: true, force: true });
   fs.mkdirSync(rel, { recursive: true });
   const text = serializeRelease(record);
   fs.writeFileSync(path.join(rel, "release.json"), text);
   fs.writeFileSync(path.join(rel, "SHA256SUMS"), sums(sha256sums([...record.files, { path: "release.json", sha256: sha(text) }])));
-  const sidecar = path.join(root, R3);
+  const sidecar = path.join(root, record.id);
   for (const s of ["r2-objects.txt", "r2-manifests.txt"]) fs.rmSync(`${sidecar}.${s}`, { force: true });
   return { rel, sidecar };
 }
@@ -251,7 +301,7 @@ test("final: a -r3 of e1a79c1 differs at release.json and the two tarballs only;
   const root = mkdtemp("l4w-sbr-final-");
   const { rel, sidecar } = writeRecut(root, good);
   assert.equal(await finalCheck(E1_FILE, rel, sidecar),
-    `only tools/ differs from ${E1.id}: SHA256SUMS differs at release.json, ${R3_TGZ}, ${E1.tools.tgz}; 139 files, 1 own, 138 shared (130 objects, 8 manifests)`);
+    `only release.json and its own files (tools/) differ from ${E1.id}: SHA256SUMS differs at 3 paths; 139 files, 1 own, 138 shared (130 objects, 8 manifests)`);
   const read = (s) => fs.readFileSync(`${sidecar}.${s}`, "utf8");
   const shared = E1.files.map((f) => f.path).filter((p) => !isRecutOwnPath(p));
   assert.equal(read("r2-objects.txt"), shared.filter((p) => contentTypeOf(p) === "application/octet-stream").map((p) => `${p}\n`).join(""));
@@ -272,9 +322,9 @@ test("final: refuses a SHA256SUMS that differs elsewhere, a record of another ba
   const shared = "lists/extra-modules.txt";
   // a shared path's line with other bytes
   await refused(recutOfE1(), (s) => s.replace(new RegExp(`^[0-9a-f]{64}(  ${escapeRe(shared)})$`, "m"), `${"d".repeat(64)}$1`),
-    new RegExp(`SHA256SUMS differs from ${escapeRe(E1.id)}'s at lists/extra-modules\\.txt, release\\.json, .*: it must differ at exactly release\\.json, ${escapeRe(R3_TGZ)}, ${escapeRe(E1.tools.tgz)}$`));
+    new RegExp(`^Error: SHA256SUMS differs from ${escapeRe(E1.id)}'s at lists/extra-modules\\.txt: a release by reference differs from its base only at release\\.json and the files it owns \\(tools/\\)$`));
   // a shared path's line missing, or a line for a file the base does not have
-  await refused(recutOfE1(), (s) => s.split("\n").filter((l) => !l.endsWith(`  ${shared}`)).join("\n"), /SHA256SUMS differs from .* at lists\/extra-modules\.txt, /);
+  await refused(recutOfE1(), (s) => s.split("\n").filter((l) => !l.endsWith(`  ${shared}`)).join("\n"), /SHA256SUMS differs from .* at lists\/extra-modules\.txt: /);
   await refused(recutOfE1(), (s) => `${s}${"e".repeat(64)}  runtime/chunks/zz-extra\n`, /SHA256SUMS differs from .* at .*runtime\/chunks\/zz-extra/);
   await refused(recutOfE1(), (s) => `${s}not a line\n`, /^Error: SHA256SUMS line malformed: not a line$/);
   // another digest of the base, or no base at all
@@ -285,6 +335,23 @@ test("final: refuses a SHA256SUMS that differs elsewhere, a record of another ba
   // the staged -r2's drift: a pack note the base lacks
   await refused(recutOfE1({ packs: E1.packs.map((k) => (k.id === "lean-lib" ? { ...k, note: "transport copied from served bytes, not re-packed" } : k)) }), undefined,
     /packs differs from the base's/);
+});
+
+test("final, a runtime release by reference of e1a79c1: differs at release.json and its own files only, and writes no R2 list; a shared line that differs is refused", async () => {
+  const rt = runtimeRecutOf(E1);
+  const root = mkdtemp("l4w-sbr-final-rt-");
+  let { rel, sidecar } = writeRecut(root, rt);
+  const said = await finalCheck(E1_FILE, rel, sidecar);
+  assert.match(said, new RegExp(`^only release\\.json and its own files \\(runtime/, profiles/lean-lib\\.\\* and tools/\\) differ from ${escapeRe(E1.id)}: SHA256SUMS differs at \\d+ paths; 137 files, 48 own, 89 shared \\(84 objects, 5 manifests\\)$`));
+  assert.deepEqual(lists(sidecar), [], "publish derives a runtime release's lists from its record");
+  // the base's runtime chunks and lean-lib parts (listed only by the base) are judged as its own: no problem
+  ({ rel, sidecar } = writeRecut(root, rt, (s) => s.replace(/^[0-9a-f]{64}(  lists\/extra-modules\.txt)$/m, `${"d".repeat(64)}$1`)));
+  await assert.rejects(finalCheck(E1_FILE, rel, sidecar),
+    new RegExp(`^Error: SHA256SUMS differs from ${escapeRe(E1.id)}'s at lists/extra-modules\\.txt: a release by reference differs from its base only at release\\.json and the files it owns \\(runtime/, profiles/lean-lib\\.\\* and tools/\\)$`));
+  assert.deepEqual(lists(sidecar), []);
+  // a shared pack's manifest line: the same refusal
+  ({ rel, sidecar } = writeRecut(root, rt, (s) => s.replace(/^[0-9a-f]{64}(  profiles\/lean-core\.manifest\.json)$/m, `${"d".repeat(64)}$1`)));
+  await assert.rejects(finalCheck(E1_FILE, rel, sidecar), /at profiles\/lean-core\.manifest\.json: a release by reference differs/);
 });
 
 // ---------- the step runner the script calls ----------
@@ -309,6 +376,11 @@ test("the step runner: usage exits 2, a refusal 1 with its reason on stderr, a s
 
 const KERNEL = "abcdef1234567890abcdef1234567890abcdef12";
 const BASE_ID = "lean-v4.34.0-abcdef1", RECUT_ID = `${BASE_ID}-r3`, RECUT_TGZ = "lean4-wasm64-4.34.0-abcdef1-r3.tgz";
+// the runtime release by reference: a later kernel commit, its own build dir
+const RT_KERNEL = "1234567890abcdef1234567890abcdef12345678", RT_ID = "lean-v4.34.0-1234567", RT_VERSION = "4.34.0-1234567";
+const RT_TGZ = `lean4-wasm64-${RT_VERSION}.tgz`;
+/** The runtime build's lib/lean: the 8 roots of packs.json's lean-lib, each with real imports inside the tree. */
+const LEAN_LIB = { Init: ["Init.Prelude"], "Init.Prelude": [], Std: ["Init"], Lean: ["Std"], Lake: ["Lean"], LakeMain: ["Lake"], LeanChecker: ["Lean"], LeanIR: ["Lean"], Leanc: ["Lean"] };
 // the script runs with PATH=<shims>:/usr/bin:/bin
 const needs = ["bash", "tar", "shasum", "cmp", "sort", "awk"].filter((c) => spawnSync("/bin/sh", ["-c", `command -v ${c}`], { env: { PATH: "/usr/bin:/bin" } }).status !== 0);
 const E2E = process.platform === "win32" ? "POSIX shell only" : needs.length ? `${needs.join(", ")} not on PATH` : false;
@@ -320,19 +392,41 @@ const log = (x) => fs.appendFileSync(process.env.STAGE_TEST_LOG, JSON.stringify(
 `;
 const SHIMS = {
   // read-only answers for the base and the line: the tag holds the mirror's record, every ancestry holds,
-  // the tree is clean; the printed next steps' commands (git -C <repo> …) are recorded, never run
+  // the tree is clean, the recipe is the base's and no source changed; the printed next steps' commands
+  // (git -C <repo> …) are recorded, never run. Knobs, each off by default:
+  //   STAGE_TEST_NOT_ANCESTOR "<a> <b>[;…]"   merge-base --is-ancestor <a> <b> fails
+  //   STAGE_TEST_UNKNOWN_COMMIT <c>           cat-file -e <c>^{commit} fails
+  //   STAGE_TEST_TAGS                         the output of tag --merged (default: v4.33.0, v4.34.0, v4.34.0-rc1)
+  //   STAGE_TEST_PATCHES <file>               show HEAD:wasm64-build/PATCHES.md
+  //   STAGE_TEST_RECIPE                       log (the docker-wasm64 recipe; default: the base's docker.recipeCommit)
+  //   STAGE_TEST_STDLIB_DIFF, _FORMAT_DIFF     diff: the changed paths ("," between them) for a pathspec naming
+  //                                           src/Init (the stdlib) or not (the olean format); --quiet exits 1 when any
   git: `${SHIM_HEAD}let a = process.argv.slice(2), C = null;
 if (a[0] === "-C") { C = a[1]; a = a.slice(2); }
 log({ tool: "git", C, argv: a });
 const e = process.env, id = e.STAGE_TEST_BASE_ID, say = (s) => process.stdout.write(s);
 if (C !== null && ["add", "commit", "tag", "push"].includes(a[0])) process.exit(0);
+const notAncestor = (x, y) => (e.STAGE_TEST_NOT_ANCESTOR ?? "").split(";").filter(Boolean).some((p) => p === x + " " + y);
 switch (a[0]) {
   case "--version": say("git version 0 (stage test shim)\\n"); break;
   case "rev-parse": if (a[1] === "HEAD") say("c".repeat(40) + "\\n"); else if (a.includes("refs/tags/" + id)) say("1".repeat(40) + "\\n"); else process.exitCode = 1; break;
-  case "show": if (a[1] === "refs/tags/" + id + ":wasm64-build/releases/" + id + ".json") say(fs.readFileSync(e.STAGE_TEST_BASE_RECORD)); else process.exitCode = 128; break;
-  case "merge-base": case "cat-file": case "status": break;
-  case "tag": say("v4.33.0\\nv4.34.0\\nv4.34.0-rc1\\n"); break;
+  case "show":
+    if (a[1] === "refs/tags/" + id + ":wasm64-build/releases/" + id + ".json") say(fs.readFileSync(e.STAGE_TEST_BASE_RECORD));
+    else if (a[1] === "HEAD:wasm64-build/PATCHES.md" && e.STAGE_TEST_PATCHES) say(fs.readFileSync(e.STAGE_TEST_PATCHES));
+    else process.exitCode = 128;
+    break;
+  case "merge-base": if (a[1] === "--is-ancestor" && notAncestor(a[2], a[3])) process.exitCode = 1; break;
+  case "cat-file": if (e.STAGE_TEST_UNKNOWN_COMMIT && a.includes(e.STAGE_TEST_UNKNOWN_COMMIT + "^{commit}")) process.exitCode = 1; break;
+  case "status": break;
+  case "tag": say(e.STAGE_TEST_TAGS ?? "v4.33.0\\nv4.34.0\\nv4.34.0-rc1\\n"); break;
   case "symbolic-ref": say("refs/heads/qed64-wasm64\\n"); break;
+  case "log": say((e.STAGE_TEST_RECIPE ?? JSON.parse(fs.readFileSync(e.STAGE_TEST_BASE_RECORD, "utf8")).docker.recipeCommit) + "\\n"); break;
+  case "diff": {
+    const list = ((a.includes("src/Init") ? e.STAGE_TEST_STDLIB_DIFF : e.STAGE_TEST_FORMAT_DIFF) ?? "").split(",").filter(Boolean);
+    if (a.includes("--quiet")) process.exitCode = list.length ? 1 : 0;
+    else say(list.map((x) => x + "\\n").join(""));
+    break;
+  }
   default: console.error("git shim: refusing " + a.join(" ")); process.exitCode = 97;
 }
 `,
@@ -404,7 +498,7 @@ function world() {
     gate: { commit: KERNEL, wasmSha256: manifest.files["lean.wasm"].sha256, checks: 33 },
     packs: [{ id: "lean-lib", compiler: KERNEL }],
     native64: { commit: "857544b439aa51633344d638dacc03d304b9ea96", os: "linux", arch: "aarch64", tar: "native64/native64.tar.gz" },
-    docker: { tag: "qed64-toolchain:emsdk-6.0.5", recipeCommit: "974ee228b0" },
+    docker: { tag: "qed64-toolchain:emsdk-6.0.5", recipeCommit: "974ee228b0c368f1d74f55ed4794ef60c15de4c2" },
     mathlib, modules: { essential: "lists/essential-modules.txt" },
     hosting: { layout: "served", mount: { "/runtime/": "runtime/", "/profiles/": "profiles/" }, spec: "wasm64-build/js/formats/HOSTING.md" },
     tools: { package: "lean4-wasm64", version: "4.34.0-abcdef1", tgz: "tools/lean4-wasm64-4.34.0-abcdef1.tgz" },
@@ -413,16 +507,22 @@ function world() {
   fs.writeFileSync(path.join(S, "src", "config.json"), JSON.stringify(config));
   run("release.mjs", ["--release", mirror, "--config", path.join(S, "src", "config.json")]);
   const base = JSON.parse(fs.readFileSync(path.join(mirror, "release.json"), "utf8"));
-  // the repository: what staging runs, copied (the script, its node steps, publish's content types, js/
-  // without its tests at a -r3 version) — the printed next steps write into this copy
-  const repo = path.join(S, "repo copy");
-  fs.mkdirSync(path.join(repo, "wasm64-build"), { recursive: true });
-  for (const f of ["stage-release.sh", "stage-by-reference.mjs", "publish-release.mjs"]) fs.copyFileSync(path.join(build, f), path.join(repo, "wasm64-build", f));
-  fs.chmodSync(path.join(repo, "wasm64-build", "stage-release.sh"), 0o755);
-  fs.cpSync(pkg, path.join(repo, "wasm64-build", "js"), { recursive: true, filter: (src) => !["test", "node_modules"].includes(path.relative(pkg, src).split(path.sep)[0]) });
-  const pj = path.join(repo, "wasm64-build", "js", "package.json");
-  fs.writeFileSync(pj, JSON.stringify({ ...JSON.parse(fs.readFileSync(pj, "utf8")), version: "4.34.0-abcdef1-r3" }, null, 2) + "\n");
-  fs.writeFileSync(path.join(repo, "wasm64-build", "import-release.sh"), `${SHIM_HEAD}log({ tool: "import-release.sh", argv: process.argv.slice(2) });\n`, { mode: 0o755 });
+  // the repositories: what staging runs, copied (the script, its node steps, publish's content types, js/
+  // without its tests at the release's version) — the printed next steps write into the copy. One for the
+  // tools re-cut (-r3), one for the runtime release by reference.
+  const repoCopy = (name, version) => {
+    const repo = path.join(S, name);
+    fs.mkdirSync(path.join(repo, "wasm64-build"), { recursive: true });
+    for (const f of ["stage-release.sh", "stage-by-reference.mjs", "publish-release.mjs"]) fs.copyFileSync(path.join(build, f), path.join(repo, "wasm64-build", f));
+    fs.chmodSync(path.join(repo, "wasm64-build", "stage-release.sh"), 0o755);
+    fs.cpSync(pkg, path.join(repo, "wasm64-build", "js"), { recursive: true, filter: (src) => !["test", "node_modules"].includes(path.relative(pkg, src).split(path.sep)[0]) });
+    const pj = path.join(repo, "wasm64-build", "js", "package.json");
+    fs.writeFileSync(pj, JSON.stringify({ ...JSON.parse(fs.readFileSync(pj, "utf8")), version }, null, 2) + "\n");
+    fs.writeFileSync(path.join(repo, "wasm64-build", "import-release.sh"), `${SHIM_HEAD}log({ tool: "import-release.sh", argv: process.argv.slice(2) });\n`, { mode: 0o755 });
+    return repo;
+  };
+  const repo = repoCopy("repo copy", "4.34.0-abcdef1-r3");
+  const rtRepo = repoCopy("repo copy rt", RT_VERSION);
   // the shims, and the same without npm
   const shims = path.join(S, "bin"), nonpm = path.join(S, "bin-nonpm");
   for (const d of [shims, nonpm]) { fs.mkdirSync(d); fs.symlinkSync(process.execPath, path.join(d, "node")); }
@@ -439,9 +539,25 @@ function world() {
     STAGE_TEST_GATE: path.join(S, "gate-standin.mjs"), STAGE_TEST_HANG_SCRIPT: path.join(S, "hang.mjs"), ...extra,
   });
   const script = path.join(repo, "wasm64-build", "stage-release.sh");
-  const stage = (args, { extra = {}, bin } = {}) => spawnSync(script, ["v4.34.0", ...args], { cwd: S, encoding: "utf8", timeout: 120_000, env: env(extra, bin) });
+  const stage = (args, { extra = {}, bin, using = script } = {}) => spawnSync(using, ["v4.34.0", ...args], { cwd: S, encoding: "utf8", timeout: 120_000, env: env(extra, bin) });
   const calls = () => (fs.existsSync(logFile) ? fs.readFileSync(logFile, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
-  W = { S, mirror, base, repo, script, env, stage, logFile, calls, nonpm };
+  // the runtime release by reference's own build dir (gated: GATE-PASSED, gate.log), its lib/lean
+  // trees of oleans with real import tables, and the PATCHES.md that places its kernel commit at 0040
+  const rtBuild = path.join(S, "build 0040");
+  const put = (rel, bytes) => { fs.mkdirSync(path.dirname(path.join(rtBuild, rel)), { recursive: true }); fs.writeFileSync(path.join(rtBuild, rel), bytes); };
+  put("build/stage1/bin/lean.js", Buffer.alloc(1800, 4));
+  const wasm = Buffer.from(Array.from({ length: 4200 }, (_, i) => (i * 11 + 3) % 247));
+  put("build/stage1/bin/lean.wasm", wasm);
+  put("build/stage1/bin/leanmake", "#!/bin/sh\n# the 0040 build's\n");
+  put("build/stage1/bin/lean.js.symbols", "0:main\n");
+  for (const [m, imports] of Object.entries(LEAN_LIB)) put(`build/stage1/lib/lean/${m.split(".").join("/")}.olean`, olean(imports));
+  put("BUILT-COMMIT", `${RT_KERNEL}\n`);
+  put("GATE-PASSED", `${RT_KERNEL}\n${sha(wasm)}\n`);
+  put("gate.log", " ok one\n ok two\n ok three\n ok four\nGATE PASSED\n");
+  const patches = path.join(S, "PATCHES.md");
+  fs.writeFileSync(patches, `# Patches\n\n## 0037 — the base's runtime (${KERNEL.slice(0, 10)})\n\ntext\n\n## 0040 — native Wasm exceptions (${RT_KERNEL.slice(0, 10)})\n\ntext\n`);
+  const rtScript = path.join(rtRepo, "wasm64-build", "stage-release.sh");
+  W = { S, mirror, base, repo, rtRepo, script, rtScript, env, stage, logFile, calls, nonpm, rtBuild, wasmSha: sha(wasm), patches };
   return W;
 }
 
@@ -457,7 +573,7 @@ test("stage-release.sh --base: stages a re-cut by reference end to end, and its 
   assert.match(r.stdout, /^GATE PASSED \(3 checks\): /m);
   assert.match(r.stdout, new RegExp(`RELEASE VERIFIED ${RECUT_ID}`));
   const shared = w.base.files.map((f) => f.path).filter((p) => !isRecutOwnPath(p));
-  assert.match(r.stdout, new RegExp(`^only tools/ differs from ${BASE_ID}: SHA256SUMS differs at release\\.json, tools/${escapeRe(RECUT_TGZ)}, ${escapeRe(w.base.tools.tgz)}; ${shared.length + 1} files, 1 own, ${shared.length} shared `, "m"));
+  assert.match(r.stdout, new RegExp(`^only release\\.json and its own files \\(tools/\\) differ from ${BASE_ID}: SHA256SUMS differs at 3 paths; ${shared.length + 1} files, 1 own, ${shared.length} shared `, "m"));
   // the record: the base's but for the re-cut's own fields and files
   const rec = JSON.parse(fs.readFileSync(path.join(rel, "release.json"), "utf8"));
   assert.deepEqual(rec.base, { id: BASE_ID, digest: w.base.digest });
@@ -579,4 +695,141 @@ test("stage-release.sh --base: a mirror file of the right size with other bytes 
   assert.match(r.stderr, new RegExp(`${escapeRe(chunk)}: the mirror's bytes are not ${BASE_ID}'s`));
   assert.match(r.stderr, /^stage-release: cloning from .* failed \(reason above\); .* removed$/m);
   assert.equal(fs.existsSync(path.join(out, RECUT_ID)), false);
+});
+
+test("stage-release.sh --base --recut: the line's refusals (kernel not on the line, HEAD without it, another upstream tag), before any write", { skip: E2E, timeout: 180_000 }, () => {
+  const w = world();
+  const cases = [
+    ["kernel not on the line", { STAGE_TEST_NOT_ANCESTOR: `${KERNEL} qed64-wasm64` }, new RegExp(`^stage-release: kernel commit ${KERNEL} is not on qed64-wasm64$`, "m")],
+    ["HEAD without the kernel", { STAGE_TEST_NOT_ANCESTOR: `${KERNEL} HEAD` }, /^stage-release: HEAD does not contain kernel commit .* \(stage from qed64-wasm64 or a descendant\)$/m],
+    ["another upstream tag", { STAGE_TEST_TAGS: "v4.34.0\nv4.35.0\n" }, /^stage-release: kernel commit abcdef1234 carries upstream v4\.35\.0, not v4\.34\.0$/m],
+    ["an unknown kernel", { STAGE_TEST_UNKNOWN_COMMIT: KERNEL }, new RegExp(`^stage-release: kernel commit ${KERNEL} is not in this repository$`, "m")],
+  ];
+  for (const [label, extra, re] of cases) {
+    const out = path.join(w.S, `out line ${label}`);
+    const r = w.stage(["--base", w.mirror, "--recut", "3", "--note", "x", "--out", out], { extra });
+    assert.equal(r.status, 1, `${label}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, re, label);
+    assert.equal(fs.existsSync(out), false, `${label}: nothing written`);
+  }
+});
+
+// ---------- stage-release.sh --base --runtime: a runtime release by reference, end to end ----------
+
+const rtArgs = (w, out, more = []) => ["--runtime", w.rtBuild, "--base", w.mirror, "--note", "the 0040 runtime, by reference", ...more, "--out", out];
+
+test("stage-release.sh --base --runtime: stages a runtime release by reference from its own build dir, with no import build dir, Docker or gate run", { skip: E2E, timeout: 180_000 }, () => {
+  const w = world();
+  const out = path.join(w.S, "out rt");
+  fs.rmSync(w.logFile, { force: true });
+  const r = w.stage(rtArgs(w, out), { using: w.rtScript, extra: { STAGE_TEST_PATCHES: w.patches } });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const rel = path.join(out, RT_ID);
+  assert.match(r.stdout, new RegExp(`^runtime release by reference ${RT_ID} of ${BASE_ID} \\(sha256:[0-9a-f]{16}…\\): kernel ${RT_KERNEL.slice(0, 10)} \\(patch 0040\\), runtime .*build 0040 \\(gate 4 checks\\), tools ${RT_VERSION} at cccccccccc, mirror `, "m"));
+  assert.match(r.stdout, /^gate: .*build 0040\/GATE-PASSED \(1234567890, lean\.wasm [0-9a-f]{16}…\), 4 checks — the build dir's gate, as for a release by value$/m);
+  assert.match(r.stdout, new RegExp(`RELEASE VERIFIED ${RT_ID}`));
+  assert.match(r.stdout, new RegExp(`^only release\\.json and its own files \\(runtime/, profiles/lean-lib\\.\\* and tools/\\) differ from ${BASE_ID}: `, "m"));
+  // the record: its own runtime, lean-lib and tools; every other field and file the base's
+  const rec = JSON.parse(fs.readFileSync(path.join(rel, "release.json"), "utf8"));
+  assert.deepEqual(checkReleaseRecord(rec), []);
+  assert.deepEqual(checkRecutBase(rec, w.base), []);
+  assert.deepEqual(rec.base, { id: BASE_ID, digest: w.base.digest });
+  assert.equal(rec.kernel.commit, RT_KERNEL);
+  assert.equal(rec.kernel.patch, "0040");
+  assert.deepEqual(rec.gate, { passed: true, commit: RT_KERNEL, wasmSha256: w.wasmSha, checks: 4 });
+  assert.equal(rec.runtime.buildId, buildIdFromSha256(w.wasmSha));
+  assert.equal(rec.runtime.sourceRevision, `qed64-wasm64@${RT_KERNEL.slice(0, 10)} (upstream v4.34.0)`);
+  const lib = rec.packs.find((p) => p.id === "lean-lib");
+  assert.deepEqual([lib.release, lib.lean.compiler, lib.lean.gitRevision, lib.modules], [`lean-lib-4.34.0-${rec.runtime.buildId}`, RT_KERNEL, RT_KERNEL.slice(0, 12), Object.keys(LEAN_LIB).length]);
+  assert.equal(rec.notes[0], "the 0040 runtime, by reference");
+  assert.match(rec.notes[1], new RegExp(`^Notes of ${BASE_ID} \\(the base, ${escapeRe(w.base.digest)}\\) follow verbatim: `));
+  assert.deepEqual(rec.notes.slice(2), w.base.notes);
+  assert.equal(rec.tools.version, RT_VERSION);
+  // the files: its own are runtime/**, profiles/lean-lib.* and its tgz; the others are exactly the base's outside those
+  const own = rec.files.map((f) => f.path).filter((p) => isOwnPath(rec, p));
+  assert.ok(own.every((p) => p.startsWith("runtime/") || p.startsWith("profiles/lean-lib.") || p === `tools/${RT_TGZ}`), own.join(", "));
+  assert.ok(own.includes(`tools/${RT_TGZ}`) && own.includes("runtime/bin/leanmake") && own.includes("profiles/lean-lib.manifest.json"));
+  const sharedOf = (record) => record.files.filter((f) => !isOwnPath(rec, f.path)).map((f) => `${f.path} ${f.sha256}`);
+  assert.deepEqual(sharedOf(rec), sharedOf(w.base));
+  assert.deepEqual(filesUnder(rel).filter((p) => !["release.json", "SHA256SUMS"].includes(p)), rec.files.map((f) => f.path));
+  // nothing of the base's runtime or lean-lib is left, and the symbol map stays in the build tree
+  const baseOwn = w.base.files.map((f) => f.path).filter((p) => isOwnPath(rec, p) && !rec.files.some((f) => f.path === p));
+  assert.ok(baseOwn.length > 3);
+  for (const p of baseOwn) assert.equal(fs.existsSync(path.join(rel, p)), false, p);
+  assert.equal(fs.readFileSync(path.join(rel, "runtime", "bin", "leanmake"), "utf8"), "#!/bin/sh\n# the 0040 build's\n");
+  assert.equal(fs.existsSync(path.join(rel, "runtime", "bin", "lean.js.symbols")), false);
+  // beside it: the config, the verification, the extracted tools and lean-lib's provenance; no gate, no R2 lists
+  const beside = fs.readdirSync(out).filter((n) => n !== RT_ID).sort();
+  assert.deepEqual(beside, [`${RT_ID}.config.json`, `${RT_ID}.pack-set.json`, `${RT_ID}.tools`, `${RT_ID}.verify.json`, `${RT_ID}.verify.log`]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(out, `${RT_ID}.pack-set.json`), "utf8")).packs.map((p) => [p.id, p.compiler]), [["lean-lib", RT_KERNEL]]);
+  // no Docker, no gate, no import build dir: only git, npm and the step runner were called
+  assert.deepEqual([...new Set(w.calls().map((c) => c.tool))].sort(), ["git", "npm"]);
+  assert.ok(!w.calls().some((c) => c.tool === "git" && JSON.stringify(c.argv).includes("wasm64-lean-kernel-build")));
+  // the printed next step: the publish dry run only, runnable as printed from a path with spaces
+  const steps = r.stdout.slice(r.stdout.indexOf("Next (RELEASE.md)")).split("\n").filter((l) => /^ {2}\S/.test(l) && !/^ {2}#/.test(l));
+  assert.equal(steps.length, 1, steps.join("\n"));
+  fs.rmSync(w.logFile, { force: true });
+  const s = spawnSync("/bin/bash", ["-c", steps[0]], { cwd: w.S, encoding: "utf8", timeout: 60_000, env: w.env() });
+  assert.equal(s.status, 0, s.stderr);
+  assert.deepEqual(w.calls().map((c) => [c.tool, c.argv]), [["import-release.sh", ["publish", RT_ID, "--release-dir", rel, "--dry-run"]]]);
+});
+
+test("stage-release.sh --base --runtime --stdlib-drift: a stdlib change is staged once its note says why, and the note is recorded", { skip: E2E, timeout: 180_000 }, () => {
+  const w = world();
+  const out = path.join(w.S, "out rt drift");
+  const why = "harmless: the runtime runs its own compiled code for Lean/Shell";
+  const r = w.stage(rtArgs(w, out, ["--stdlib-drift", why]), { using: w.rtScript, extra: { STAGE_TEST_PATCHES: w.patches, STAGE_TEST_STDLIB_DIFF: "src/Lean/Shell.lean" } });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const rec = JSON.parse(fs.readFileSync(path.join(out, RT_ID, "release.json"), "utf8"));
+  assert.deepEqual(rec.notes.slice(0, 2), ["the 0040 runtime, by reference", why]);
+  assert.deepEqual(checkRecutBase(rec, w.base), []);
+});
+
+test("stage-release.sh --base --runtime: every refusal comes before any write, with its exit code", { skip: E2E, timeout: 180_000 }, () => {
+  const w = world();
+  const variant = (name, edit) => {
+    const d = path.join(w.S, `build ${name}`);
+    fs.cpSync(w.rtBuild, d, { recursive: true });
+    edit(d);
+    return d;
+  };
+  const noGate = variant("no gate", (d) => fs.rmSync(path.join(d, "GATE-PASSED")));
+  const otherGate = variant("other gate", (d) => fs.writeFileSync(path.join(d, "GATE-PASSED"), `${RT_KERNEL}\n${"0".repeat(64)}\n`));
+  const baseKernel = variant("base kernel", (d) => {
+    fs.writeFileSync(path.join(d, "BUILT-COMMIT"), `${KERNEL}\n`);
+    fs.writeFileSync(path.join(d, "GATE-PASSED"), `${KERNEL}\n${w.wasmSha}\n`);
+  });
+  const P = { STAGE_TEST_PATCHES: w.patches };
+  const pj = path.join(w.rtRepo, "wasm64-build", "js", "package.json");
+  const pjText = fs.readFileSync(pj, "utf8");
+  const cases = [
+    ["--recut with --runtime", (o) => [...rtArgs(w, o), "--recut", "2"], {}, 2, /^stage-release: --base with --runtime is a runtime release by reference, the first cut of its kernel commit: drop --recut/m],
+    ["--base alone", (o) => ["--base", w.mirror, "--note", "x", "--out", o], {}, 2, /^stage-release: --base needs --recut <n> \(a tools-only re-cut\) or --runtime <build dir> \(a runtime release by reference\)$/m],
+    ["--packs-from with --base --runtime", (o) => [...rtArgs(w, o), "--packs-from", w.mirror], {}, 2, /^stage-release: --base excludes --packs-from: a release by reference takes every file and field it does not own from its base$/m],
+    ["no --note", (o) => ["--runtime", w.rtBuild, "--base", w.mirror, "--out", o], {}, 2, /^stage-release: --base needs at least one --note/m],
+    ["--stdlib-drift without --base", (o) => ["--runtime", w.rtBuild, "--stdlib-drift", "x", "--note", "x", "--out", o], {}, 2, /^stage-release: --stdlib-drift goes with --runtime <build dir> --base <mirror> \(a runtime release by reference\)$/m],
+    ["--stdlib-drift with no drift", (o) => rtArgs(w, o, ["--stdlib-drift", "x"]), P, 2, /^stage-release: no stdlib Lean source changed since the base's kernel abcdef1234: drop --stdlib-drift$/m],
+    ["no GATE-PASSED", (o) => ["--runtime", noGate, "--base", w.mirror, "--note", "x", "--out", o], P, 31, /has no passing gate for commit 1234567890 and this lean\.wasm/],
+    ["GATE-PASSED naming another lean.wasm", (o) => ["--runtime", otherGate, "--base", w.mirror, "--note", "x", "--out", o], P, 31, /has no passing gate for commit 1234567890 and this lean\.wasm/],
+    ["a build of the base's kernel", (o) => ["--runtime", baseKernel, "--base", w.mirror, "--note", "x", "--out", o], P, 1, /is a build of the base's kernel abcdef1234: a tools-only re-cut keeps the runtime \(--recut <n> without --runtime\)$/m],
+    ["not descending from the base's kernel", (o) => rtArgs(w, o), { ...P, STAGE_TEST_NOT_ANCESTOR: `${KERNEL} ${RT_KERNEL}` }, 1, /^stage-release: kernel commit 1234567890 does not descend from the base's kernel abcdef1234: /m],
+    ["another Docker recipe", (o) => rtArgs(w, o), { ...P, STAGE_TEST_RECIPE: "0".repeat(40) }, 1, /^stage-release: docker-wasm64 at 1234567890 is not the base's recipe \(974ee228b0\): the base's docker record would not describe this runtime's toolchain — a full import \(RELEASE-PIPELINE\.md\)$/m],
+    ["an olean-format change", (o) => rtArgs(w, o), { ...P, STAGE_TEST_FORMAT_DIFF: "src/runtime/object.h" }, 1, /^stage-release: the olean format's C\+\+ \(src\/include\/lean\/lean\.h .*\) changed since the base's kernel abcdef1234: this runtime could misread the shared packs .* a full import \(RELEASE-PIPELINE\.md\)$/m],
+    ["a stdlib change without --stdlib-drift", (o) => rtArgs(w, o), { ...P, STAGE_TEST_STDLIB_DIFF: "src/Lean/Shell.lean,src/Init/Prelude.lean" }, 1, /^stage-release: stdlib Lean sources changed since the base's kernel abcdef1234 \(2 files, e\.g\. src\/Lean\/Shell\.lean src\/Init\/Prelude\.lean\): .* say why: --stdlib-drift <note>, which is recorded in notes$/m],
+    ["the kernel not on the line", (o) => rtArgs(w, o), { ...P, STAGE_TEST_NOT_ANCESTOR: `${RT_KERNEL} qed64-wasm64` }, 1, new RegExp(`^stage-release: kernel commit ${RT_KERNEL} is not on qed64-wasm64$`, "m")],
+    ["a package version with -r2", (o) => rtArgs(w, o), { ...P, PKG: `${RT_VERSION}-r2` }, 1, new RegExp(`^stage-release: wasm64-build/js/package\\.json version is ${RT_VERSION}-r2, the release needs ${RT_VERSION} \\(bump and commit it first\\)$`, "m")],
+  ];
+  try {
+    for (const [label, args, extra, code, re] of cases) {
+      const out = path.join(w.S, `out rt refused ${label}`);
+      const { PKG, ...env } = extra;
+      fs.writeFileSync(pj, PKG ? JSON.stringify({ ...JSON.parse(pjText), version: PKG }, null, 2) + "\n" : pjText);
+      const r = w.stage(args(out), { using: w.rtScript, extra: env });
+      assert.equal(r.status, code, `${label}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, re, label);
+      assert.equal(fs.existsSync(out), false, `${label}: nothing written`);
+    }
+  } finally {
+    fs.writeFileSync(pj, pjText);
+  }
 });

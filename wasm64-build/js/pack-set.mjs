@@ -8,7 +8,9 @@
 // mathlib-tree.sh): build/stage1/{bin/lean.wasm, lib/lean}, BUILT-COMMIT,
 // native/NATIVE-COMMIT, mathlib/{essential-tree, extra-tree, MATHLIB-COMMIT}.
 // <R> is the released runtime's build directory (default <K>; a kernel-only fix
-// releases its own build with the import's packs). A pack's `build` says which
+// releases its own build with the import's packs). --build-dir may be the
+// runtime's own build dir when only runtime-built packs are cut (--only
+// lean-lib: a runtime release by reference). A pack's `build` says which
 // of the two its source is in; `compiler` says whose compiler wrote its oleans:
 // "wasm" = that build's wasm64 stage1 (its BUILT-COMMIT), "native64" = the
 // import's native compiler (NATIVE-COMMIT).

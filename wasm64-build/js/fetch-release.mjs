@@ -16,16 +16,18 @@
 // --id     refuse unless release.json names this id.
 // --digest refuse unless release.json's digest is this one — the pin: a self-digest
 //          alone proves only consistency, so a consumer pins id AND digest.
-// --base-from  a re-cut by reference (release.json `base`; formats/release.md, "Re-cut by
+// --base-from  a release by reference (release.json `base`; formats/release.md, "Release by
 //          reference"): its base release, a URL or a dir in either layout (inferred).
-//          A FLAT --from (its GitHub release holds only tools/, release.json and SHA256SUMS):
-//          release.json and tools/ come from --from, every other file from the base, routed by
-//          path (never a fallback after a miss), and the base's release.json must pass
-//          checkRecutBase (pinned by base.{id,digest}) before anything is written. Default there:
-//          the sibling <parent of --from>/<base id>/, when --from's last segment is the re-cut's id.
-//          A SERVED --from (an R2 prefix, a mirror dir) is complete under the re-cut's own id, and
-//          a flat fetch that selects only tools/ needs no base: every file comes from --from, and
-//          only a --base-from given adds the comparison (no default: a sibling is never read).
+//          A FLAT --from (its GitHub release holds only its own files, release.json and SHA256SUMS:
+//          tools/ for a tools re-cut; runtime/, profiles/lean-lib.* and tools/ for a runtime
+//          release by reference): release.json and its own files come from --from, every other
+//          file from the base, routed by path (never a fallback after a miss), and the base's
+//          release.json must pass checkRecutBase (pinned by base.{id,digest}) before anything is
+//          written. Default there: the sibling <parent of --from>/<base id>/, when --from's last
+//          segment is the release's id. A SERVED --from (an R2 prefix, a mirror dir) is complete
+//          under the release's own id, and a flat fetch that selects only its own files needs no
+//          base: every file comes from --from, and only a --base-from given adds the comparison
+//          (no default: a sibling is never read).
 //
 // release.json is read first and checked structurally (release-record.mjs
 // checkReleaseRecord: the id rule, the gate binding, safe paths, …) before
@@ -46,7 +48,7 @@ import { pipeline } from "node:stream/promises";
 import { once } from "node:events";
 import { applyCliContract } from "./cli-args.mjs";
 import { RELEASE_SCHEMA, buildIdFromSha256, checkRuntimeManifest, sha256File } from "./artifact-id.mjs";
-import { CHUNK_URL, RELEASE_DIGEST, checkRecutBase, checkReleaseRecord, isRecutOwnPath, serializeRelease, servedPath, sha256sums } from "./release-record.mjs";
+import { CHUNK_URL, RELEASE_DIGEST, checkRecutBase, checkReleaseRecord, isOwnPath, ownLabel, serializeRelease, servedPath, sha256sums } from "./release-record.mjs";
 
 applyCliContract({
   tool: "fetch",
@@ -68,9 +70,10 @@ applyCliContract({
     "  --id <id>          refuse unless release.json names this release id",
     "  --digest <d>       refuse unless release.json's digest is <d> (pin id AND digest)",
     "  --layout <l>       served | flat (default: inferred from --from)",
-    "  --base-from <src>  a re-cut by reference: its base release (a URL or dir, layout inferred). Flat --from:",
-    "                     every file outside tools/ comes from there (default: the sibling <…>/<base id>/ when",
-    "                     --from ends in the re-cut's id). Served --from, or tools/ only: compares with it (no default)",
+    "  --base-from <src>  a release by reference: its base release (a URL or dir, layout inferred). Flat --from:",
+    "                     every file it does not own (outside tools/; a runtime release by reference also owns",
+    "                     runtime/ and lean-lib) comes from there (default: the sibling <…>/<base id>/ when --from",
+    "                     ends in its id). Served --from, or only its own files: compares with it (no default)",
     "  -h, --help         print this help and exit 0",
     "",
     "exit codes: 0 fetched and verified, 1 a check failed, 2 usage",
@@ -106,7 +109,7 @@ const inferLayout = (src) => (isUrlish(src) ? (/\/releases\/download\//.test(src
  * A release source: a URL or a directory (its root), in the served or the flat layout.
  * `sibling(id)` is the release <parent of root>/<id>/ beside it: a URL sibling keeps this
  * layout (GitHub's download dirs are all flat); a directory sibling's layout is inferred from
- * the sibling itself (a thin flat re-cut may sit beside a served base mirror).
+ * the sibling itself (a thin flat release by reference may sit beside a served base mirror).
  */
 function source(src, layout = inferLayout(src)) {
   const isUrl = isUrlish(src);
@@ -125,10 +128,12 @@ function source(src, layout = inferLayout(src)) {
 const own = source(from, arg("layout"));
 const { layout } = own;
 if (!["served", "flat"].includes(layout)) { console.error("fetch: --layout must be served or flat"); process.exit(2); }
-// A re-cut by reference read from its flat (GitHub) release: every file outside tools/ is its
-// base's, routed by path, never by a fallback after a miss. Set once the base's record is checked.
+// A release by reference read from its flat (GitHub) release: every file it does not own is its
+// base's, routed by path, never by a fallback after a miss. Set once the base's record is checked
+// (ownFile: once the record is checked structurally).
 let baseSource = null;
-const sourceOf = (relPath) => (baseSource && relPath !== "release.json" && !isRecutOwnPath(relPath) ? baseSource : own);
+let ownFile = () => true;
+const sourceOf = (relPath) => (baseSource && relPath !== "release.json" && !ownFile(relPath) ? baseSource : own);
 
 async function openSource(relPath, src = sourceOf(relPath)) {
   const where = src.locate(relPath);
@@ -222,8 +227,9 @@ async function main() {
   if (recordProblems.length) { console.error(`fetch: release.json refused — ${recordProblems.length} problem(s):\n  ${recordProblems.join("\n  ")}`); return 1; }
   if (arg("id") && record.id !== arg("id")) { console.error(`fetch: release is ${record.id}, expected ${arg("id")}`); return 1; }
   if (arg("digest") && record.digest !== arg("digest")) { console.error(`fetch: release.json digest is ${record.digest}, pinned ${arg("digest")}`); return 1; }
+  ownFile = (p) => isOwnPath(record, p);
 
-  // ---------- what to fetch: chosen before anything is written (a re-cut's base is needed only outside tools/) ----------
+  // ---------- what to fetch: chosen before anything is written (a base is needed only for files the release does not own) ----------
   const byPath = new Map(record.files.map((f) => [f.path, f]));
   // `all` is every release file (the served layout, a release dir); the artifact layout
   // (`runtime`: <out>/bin rebuilt from the chunks) is never implied — ask for it
@@ -245,18 +251,18 @@ async function main() {
   const empty = [...only].filter((g) => groupFiles[g] && groupFiles[g].length === 0);
   if (empty.length) { console.error(`fetch: FAILED — this release has no files for --only ${empty.join(", ")}`); console.log("\nFETCH FAILED"); return 1; }
 
-  // ---------- a re-cut by reference: its base (formats/release.md), before anything is written ----------
+  // ---------- a release by reference: its base (formats/release.md), before anything is written ----------
   let baseNote = "";
-  if (arg("base-from") && !record.base) { console.error(`fetch: --base-from was given, but ${record.id} is not a re-cut by reference (release.json names no base)`); return 1; }
+  if (arg("base-from") && !record.base) { console.error(`fetch: --base-from was given, but ${record.id} is not a release by reference (release.json names no base)`); return 1; }
   if (record.base) {
-    const recut = `re-cut of ${record.base.id} (${record.base.digest.slice(0, 23)}…)`;
-    // its flat (GitHub) release holds tools/, release.json and SHA256SUMS only: any other file is the base's
-    // (`runtime` reads the runtime manifest, the chunks and runtime/bin)
-    const needFiles = layout === "flat" && (want("runtime") || [...selected].some((p) => !isRecutOwnPath(p)));
+    const byRef = `release by reference of ${record.base.id} (${record.base.digest.slice(0, 23)}…)`;
+    // its flat (GitHub) release holds its own files, release.json and SHA256SUMS only: any other file
+    // is the base's (`runtime` reads the runtime manifest, the chunks and runtime/bin)
+    const needFiles = layout === "flat" && [...selected, ...(want("runtime") ? under("runtime") : [])].some((p) => !ownFile(p));
     const bsrc = arg("base-from") ? source(arg("base-from"))
       : needFiles && own.lastSegment === record.id ? own.sibling(record.base.id) : null;
     if (needFiles && !bsrc) {
-      console.error(`fetch: ${record.id} is a re-cut by reference of ${record.base.id}: every file outside tools/ is the base's, and --from (${own.label}) does not end in ${record.id}, so its sibling cannot be found — pass --base-from <the base release's download URL or dir>`);
+      console.error(`fetch: ${record.id} is a release by reference of ${record.base.id}: every file outside ${ownLabel(record)} is the base's, and --from (${own.label}) does not end in ${record.id}, so its sibling cannot be found — pass --base-from <the base release's download URL or dir>`);
       return 1;
     }
     if (bsrc) {
@@ -265,7 +271,7 @@ async function main() {
         baseRecord = JSON.parse(await readText("release.json", bsrc));
       } catch (e) {
         const hint = arg("base-from") ? "" : " (the sibling of --from: pass --base-from <the base release's download URL or dir> if the base is elsewhere)";
-        console.error(`fetch: ${record.id} is a re-cut by reference of ${record.base.id}: cannot read the base's release.json from ${bsrc.locate("release.json")}${hint}: ${e.message}`);
+        console.error(`fetch: ${record.id} is a release by reference of ${record.base.id}: cannot read the base's release.json from ${bsrc.locate("release.json")}${hint}: ${e.message}`);
         return 1;
       }
       // checkRecutBase runs checkReleaseRecord on the base too: one call, nothing to forget. Should
@@ -274,9 +280,9 @@ async function main() {
       try { problems = checkRecutBase(record, baseRecord); } catch (e) { problems = [`the base's release.json could not be checked: ${e.message}`]; }
       if (problems.length) { console.error(`fetch: ${record.id} refused against its base ${record.base.id} at ${bsrc.label} — ${problems.length} problem(s):\n  ${problems.join("\n  ")}`); return 1; }
       if (needFiles) baseSource = bsrc;
-      baseNote = `; ${recut}, base checked${needFiles ? `, files outside tools/ from ${bsrc.label}` : ""}`;
+      baseNote = `; ${byRef}, base checked${needFiles ? `, files outside ${ownLabel(record)} from ${bsrc.label}` : ""}`;
     } else {
-      baseNote = `; ${recut}, ${layout === "served" ? "served, complete under its own id" : "only tools/ selected"}: base not compared (--base-from compares)`;
+      baseNote = `; ${byRef}, ${layout === "served" ? "served, complete under its own id" : `only ${ownLabel(record)} selected`}: base not compared (--base-from compares)`;
     }
   }
   fs.mkdirSync(out, { recursive: true });
