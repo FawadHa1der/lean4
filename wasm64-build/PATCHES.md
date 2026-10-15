@@ -921,3 +921,53 @@ Node 26.3), against 0039b's (570d16f926):
 
 **Still to be measured** (by the hosts, on the staged release): Chrome and Firefox (QED64), the
 lean4game lanes, the proof sheets' Chrome lane.
+
+## 0041 — wasm: cap Binaryen's one-caller inlining (engine stack per monadic level) (61b063d74c)
+
+**What happened.** Binaryen's post-link optimizer inlines a function that has a single caller,
+whatever its size. In r3's `MAIN_MODULE` link every `lean_*` runtime function was exported, which
+kept them out of line. Since 0039's static link nothing exports them, and `lean_apply_n` became the
+only caller of `lean_apply_16` and `lean_apply_m`. Both were folded into it: `lean_apply_n` went
+from 0 locals and 913 bytes to 26 locals and 4,037 bytes. `lean_apply_n` runs at every level of a
+monadic continuation chain (EIO `bind` → `lean_apply_2` → `lean_apply_n` → `lean_apply_1` →
+`bind` …), the shape a generic `for`/`forM` over a monad takes when it is not specialized, e.g. in
+interpreted package code.
+
+**How it showed.** The proof sheets' bake of a 4,824-module entry (WaterproofGenre, Verbose,
+Bewijzen.Customlib): `finalizeImport` runs an interpreted extension's import handler whose loop
+nests one level per imported module, and it overflowed Node's default 4 MB pthread stack
+(`RangeError` in post-import setup) on 0039b and 0040, where e1a79c1 gets through. Not native
+exceptions: 0039b (JS exceptions) fails the same way. Measured with full traces at a fixed pthread
+stack (Node 26.3; reproduction: the waterproof session's probe of `sheets-6d5569a709`, QED64's
+node-runner, a `worker_threads` stack wrapper):
+
+| runtime | levels at 2 MB | bytes per level | entry at 4 MB |
+|---|---|---|---|
+| e1a79c1 (r3 era) | 3,292 | ~637 | passes (needs 2-3 MB) |
+| 0039b | — | ~909 | overflows (passes at 6 MB) |
+| 0040 | — | ~1,002 | overflows |
+| 0041 | 2,631 | ~797 | passes |
+
+**The fix.** One link flag, no source change: `-sBINARYEN_EXTRA_PASSES=--one-caller-inline-max-function-size=20`
+in `src/CMakeLists.txt` (`EMSCRIPTEN_LINK_SETTINGS`; a wasm-opt option, which holds for the whole run
+wherever it stands in the argument list). Single-caller functions are then inlined only up to
+Binaryen's ordinary (flexible) size limit, as any other function, wherever they are; it names no
+function. `lean_apply_n` is back to r3's 0 locals and 913 bytes, `lean_apply_16` and `lean_apply_m`
+are functions again, and the module has ~10,600 more functions but is 0.6 MB smaller. A first
+attempt that called `lean_apply_m` through a volatile pointer (C++) was dropped: it left
+`lean_apply_16` inlined and moved nothing. A cap of 100 was also measured: the same depth.
+
+**What remains.** On this chain 0041 still needs ~25% more stack per level than e1a79c1: 0040's
+native-exception frames (~90 B per level here: 0039b → 0040) and one extra frame (EIO `bind`'s
+boxed wrapper now calls `EST.bind`, a shared function no one-caller cap inlines). Elsewhere 0040's
+stack is better than e1a79c1's (PATCHES 0040). Node tools that bake large closures can give the
+runtime's pthreads more engine stack (`resourceLimits.stackSizeMb`; it is native thread stack, not
+linear memory); browsers cannot, and run such handlers only for imports outside their snapshot.
+
+**Guard.** `check-link.py` (build.sh, after the link) fails the build when any of `lean_apply_1` …
+`lean_apply_16`, `lean_apply_m`, `lean_apply_n` is missing from `lean.js.symbols`, i.e. inlined
+into its caller: verified to fail on the 0040 binary and pass on 0041's.
+
+**Measured** on the first build (61b063d74c, cap 20; Node 26.3, perf file of 0040, 3 alternating
+rounds): interpreted 167-168 ms, elaboration 469-507 ms, kernel 682-721 ms against 0040's 167-170,
+484-502, 698-733 — no speed change. Gate: see the line below once it ran.

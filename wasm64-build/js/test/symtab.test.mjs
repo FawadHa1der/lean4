@@ -282,7 +282,9 @@ const CHECK = path.join(BUILD, "check-link.py");
 test("check-link.py: signature mismatches and undefined table entries fail; other undefined symbols follow the allowlist", { skip: noPython }, () => {
   const d = tmp(), bin = path.join(d, "bin"), tu = path.join(d, "t.c");
   write(tu, "void * const lean_wasm_symtab_addr[] = {\n  (void*)l_A___boxed,\n  (void*)&l_cell,\n};\n");
-  write(path.join(bin, "lean.js.symbols"), "0:main\n1:l_A___boxed\n");
+  const APPLY = [...Array(16).keys()].map((i) => `lean_apply_${i + 1}`).concat(["lean_apply_m", "lean_apply_n"]);
+  const symbolMap = (extra) => ["main", "l_A___boxed", ...APPLY, ...extra].map((n, i) => `${i}:${n}`).join("\n") + "\n";
+  write(path.join(bin, "lean.js.symbols"), symbolMap([]));
   const allow = (text) => { const p = path.join(d, `allow-${made.length}-${Math.random()}.txt`); write(p, text); return p; };
   const log = (text) => { const p = path.join(d, `log-${Math.random()}.txt`); write(p, text); return p; };
   const LINK = "[    ] Building /build/stage1/bin/lean.js\n";
@@ -304,7 +306,16 @@ test("check-link.py: signature mismatches and undefined table entries fail; othe
   r = run(log(`${LINK}wasm-ld: warning: function signature mismatch: l_A___boxed\n`), UNCAL);
   assert.equal(r.status, 1);
   assert.match(r.stdout, /LINK CHECK FAILED: 1 signature-mismatch lines in the link log/);
-  write(path.join(bin, "lean.js.symbols"), "0:main\n7:signature_mismatch:l_A___boxed\n");
+  // patch 0041: a closure-application entry point inlined away (missing from the map) fails
+  write(path.join(bin, "lean.js.symbols"), symbolMap([]).replace(/^\d+:lean_apply_16\n/m, ""));
+  r = run(log(LINK), UNCAL);
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /LINK CHECK FAILED: 1 closure-application entry points were inlined .*: lean_apply_16$/m);
+  write(path.join(bin, "lean.js.symbols"), symbolMap([]));
+  r = run(log(LINK), UNCAL);
+  assert.equal(r.status, 0, r.stdout);
+  assert.match(r.stdout, /the 18 closure-application entry points \(lean_apply_\*\) are functions of their own/);
+  write(path.join(bin, "lean.js.symbols"), symbolMap(["signature_mismatch:l_A___boxed"]));
   r = run(log("make: Nothing to be done\n"), UNCAL);
   assert.equal(r.status, 1);
   assert.match(r.stdout, /shows no `lean` link/);
