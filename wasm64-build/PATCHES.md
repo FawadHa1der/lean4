@@ -922,7 +922,7 @@ Node 26.3), against 0039b's (570d16f926):
 **Still to be measured** (by the hosts, on the staged release): Chrome and Firefox (QED64), the
 lean4game lanes, the proof sheets' Chrome lane.
 
-## 0041 — wasm: cap Binaryen's one-caller inlining (engine stack per monadic level) (61b063d74c)
+## 0041 — wasm: keep the closure-application entry points out of line (engine stack per monadic level) (53cb11e6d6)
 
 **What happened.** Binaryen's post-link optimizer inlines a function that has a single caller,
 whatever its size. In r3's `MAIN_MODULE` link every `lean_*` runtime function was exported, which
@@ -931,43 +931,46 @@ only caller of `lean_apply_16` and `lean_apply_m`. Both were folded into it: `le
 from 0 locals and 913 bytes to 26 locals and 4,037 bytes. `lean_apply_n` runs at every level of a
 monadic continuation chain (EIO `bind` → `lean_apply_2` → `lean_apply_n` → `lean_apply_1` →
 `bind` …), the shape a generic `for`/`forM` over a monad takes when it is not specialized, e.g. in
-interpreted package code.
+interpreted package code. Every r3-exported function was compared by its locals: `lean_apply_n` is
+the only runtime function whose frame grew this way.
 
 **How it showed.** The proof sheets' bake of a 4,824-module entry (WaterproofGenre, Verbose,
 Bewijzen.Customlib): `finalizeImport` runs an interpreted extension's import handler whose loop
 nests one level per imported module, and it overflowed Node's default 4 MB pthread stack
 (`RangeError` in post-import setup) on 0039b and 0040, where e1a79c1 gets through. Not native
-exceptions: 0039b (JS exceptions) fails the same way. Measured with full traces at a fixed pthread
-stack (Node 26.3; reproduction: the waterproof session's probe of `sheets-6d5569a709`, QED64's
-node-runner, a `worker_threads` stack wrapper):
+exceptions: 0039b (JS exceptions) fails the same way. The browser never runs that handler for the
+proof sheets (every sheet boots from a snapshot of its exact import closure).
 
-| runtime | levels at 2 MB | bytes per level | entry at 4 MB |
-|---|---|---|---|
-| e1a79c1 (r3 era) | 3,292 | ~637 | passes (needs 2-3 MB) |
-| 0039b | — | ~909 | overflows (passes at 6 MB) |
-| 0040 | — | ~1,002 | overflows |
-| 0041 | 2,631 | ~797 | passes |
-
-**The fix.** One link flag, no source change: `-sBINARYEN_EXTRA_PASSES=--one-caller-inline-max-function-size=20`
-in `src/CMakeLists.txt` (`EMSCRIPTEN_LINK_SETTINGS`; a wasm-opt option, which holds for the whole run
-wherever it stands in the argument list). Single-caller functions are then inlined only up to
-Binaryen's ordinary (flexible) size limit, as any other function, wherever they are; it names no
-function. `lean_apply_n` is back to r3's 0 locals and 913 bytes, `lean_apply_16` and `lean_apply_m`
-are functions again, and the module has ~10,600 more functions but is 0.6 MB smaller. A first
-attempt that called `lean_apply_m` through a volatile pointer (C++) was dropped: it left
-`lean_apply_16` inlined and moved nothing. A cap of 100 was also measured: the same depth.
-
-**What remains.** On this chain 0041 still needs ~25% more stack per level than e1a79c1: 0040's
-native-exception frames (~90 B per level here: 0039b → 0040) and one extra frame (EIO `bind`'s
-boxed wrapper now calls `EST.bind`, a shared function no one-caller cap inlines). Elsewhere 0040's
-stack is better than e1a79c1's (PATCHES 0040). Node tools that bake large closures can give the
-runtime's pthreads more engine stack (`resourceLimits.stackSizeMb`; it is native thread stack, not
-linear memory); browsers cannot, and run such handlers only for imports outside their snapshot.
+**The fix.** No source change: `lean_apply_16` and `lean_apply_m` are exported, in their own
+section of `src/emscripten-exports.seed.txt` ("kept out of line", not called from JavaScript; the
+contract copy in `js/runtime-contract.mjs` tags them 0041, which only the repository's seed
+requires, since no glue marker tells 0041 from 0040). An exported function is never inlined into
+its caller, as in r3. Two other approaches were measured and dropped: calling `lean_apply_m`
+through a volatile pointer (C++) left `lean_apply_16` inlined and moved nothing; a global cap on
+one-caller inlining (`--one-caller-inline-max-function-size` at 20, 100 or 400) fixed the chain but
+made the elaborator probes need 3-11% more stack (fin 1.071, have 2.874-3.005, chain 1.159-1.203
+MiB), because inlining large single-caller Lean functions saves frames there.
 
 **Guard.** `check-link.py` (build.sh, after the link) fails the build when any of `lean_apply_1` …
 `lean_apply_16`, `lean_apply_m`, `lean_apply_n` is missing from `lean.js.symbols`, i.e. inlined
-into its caller: verified to fail on the 0040 binary and pass on 0041's.
+into its caller: it fails on the 0040 binary (`lean_apply_16`, `lean_apply_m`) and passes on 0041.
 
-**Measured** on the first build (61b063d74c, cap 20; Node 26.3, perf file of 0040, 3 alternating
-rounds): interpreted 167-168 ms, elaboration 469-507 ms, kernel 682-721 ms against 0040's 167-170,
-484-502, 698-733 — no speed change. Gate: see the line below once it ran.
+**Measured** on the first build (53cb11e6d6, build id `wasm64-5650321f3f58aeb0`, 2026-10-15, host Node 26.3):
+- Sizes: `lean.wasm` 106,335,445 bytes, `lean.js` 120,123 (two more bindings). `lean_apply_n` 0
+  locals and 913 bytes, as r3; EIO `bind` inlined into its boxed wrapper, as in r3 and 0040.
+- The proof sheets' entry (their probe, QED64's node-runner, a `worker_threads` stack wrapper; full
+  traces): bytes per chain level and the entry at Node's default 4 MB:
+
+  | runtime | bytes per level | entry at 4 MB |
+  |---|---|---|
+  | e1a79c1 (r3 era) | ~637 (3,292 levels in 2 MB) | passes (needs 2-3 MB) |
+  | 0039b | ~909 | overflows (passes at 6 MB) |
+  | 0040 | ~1,002 | overflows |
+  | 0041 | ~706 (2,970 levels in 2 MB) | passes |
+
+  The ~70 B per level still above e1a79c1 are 0040's native-exception frames.
+- Stack margins (`stack-margin.mjs`, survives / passes, MiB; Chrome 0.68): identical to 0040's —
+  fin 0.427 / 1.042, have 0.661 / 2.683, chain 0.427 / 1.086, kernel 0.427 / 0.647. Interpreted
+  recursion (`sumTo`, deepest at 0.68 MiB): 812, as 0040 (e1a79c1: 412).
+- Speed (0040's perf file, 3 alternating rounds against 0040): the same within noise.
+- Gate: 56 checks passed (deep recursion at Chrome's stack: the Meta and kernel errors, the thread alive).
