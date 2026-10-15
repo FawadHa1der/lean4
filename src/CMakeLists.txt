@@ -237,6 +237,14 @@ if(CMAKE_SYSTEM_NAME MATCHES "Emscripten")
       string(APPEND EMSCRIPTEN_SETTINGS " -m64")
     endif()
     set(EMSCRIPTEN_LINK_SETTINGS "-sALLOW_MEMORY_GROWTH=1 -sINCOMING_MODULE_JS_API=print,printErr,setStatus,locateFile,mainScriptUrlOrBlob,INITIAL_MEMORY,wasmMemory,noInitialRun,preRun,onRuntimeInitialized,onAbort,onExit,arguments,ENV")
+    # Patch 0041: Binaryen's post-link inliner inlines a function with a single caller whatever its
+    # size. Since 0039's static link nothing exports lean_apply_16 or lean_apply_m any more, so both
+    # were folded into lean_apply_n, which sits on every level of a monadic continuation chain
+    # (bind → lean_apply_2 → lean_apply_n → lean_apply_1): its frame grew from 0 to 26 locals, ~1000 B
+    # of engine stack per level against r3's ~640 B. Capping one-caller inlining at Binaryen's ordinary
+    # limit (20, its flexible-inline size) keeps large functions out of line wherever they are. A
+    # wasm-opt option, passed through BINARYEN_EXTRA_PASSES: options hold for the whole run.
+    string(APPEND EMSCRIPTEN_LINK_SETTINGS " -sBINARYEN_EXTRA_PASSES=--one-caller-inline-max-function-size=20")
 
   # EMSCRIPTEN_DEBUG: Enable readable function names and assertions for debugging
   # This makes the WASM larger and slower but shows actual function names in stack traces
