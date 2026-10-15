@@ -32,6 +32,9 @@ export const CONTRACT = Object.freeze([
   // also bound on Module since 0039 lists them
   { name: "__emscripten_proxy_main", patch: "0039" }, { name: "__emscripten_check_mailbox", patch: "0039" },
   { name: "_pthread_self", patch: "0039" },
+  // not called from JavaScript: exported only so that Binaryen cannot inline them into lean_apply_n
+  // (0041). No glue marker tells 0041 from 0040, so only the repository's seed requires them (S2)
+  { name: "_lean_apply_16", patch: "0041" }, { name: "_lean_apply_m", patch: "0041" },
 ]);
 
 /** The names of a seed file's text (`#` starts a comment, on its own line or after a name). */
@@ -189,7 +192,7 @@ export function contractLevel(glue, wasm = null) {
   return has0038 ? "0038" : "base";
 }
 
-const LEVELS = { base: 0, "0038": 1, "0039": 2 };
+const LEVELS = { base: 0, "0038": 1, "0039": 2, "0041": 3 }; // "0041": never detected; see CONTRACT
 /** The contract names a runtime of `level` must export and bind (`extra`: more names, e.g. a seed's, for 0039). */
 export function requiredExports(level, extra = []) {
   const want = CONTRACT.filter((c) => c.patch === null || LEVELS[c.patch] <= LEVELS[level]).map((c) => c.name);

@@ -49,3 +49,11 @@ _lean_wasm_symtab_selfcheck                 # kernel js persistent-probe (the ga
 __emscripten_proxy_main                     # the glue's callMain (W --worker, resident, node-runner's main)
 __emscripten_check_mailbox                  # W: the mailbox kick (QED64 HARDENING #52); storm, liveness lanes
 _pthread_self                               # W: the main thread's mailbox word; storm, liveness lanes
+
+# kept out of line (0041): NOT called from JavaScript. Binaryen's post-link inliner folds a function
+# with a single caller into it whatever its size; lean_apply_n is the only caller of these two, and
+# inlined they made its frame (one per level of a monadic continuation chain) 26 locals larger. An
+# export keeps a function out of line, as r3's MAIN_MODULE link did for every lean_* function.
+# check-link.py fails the build if any lean_apply_* entry point is inlined away.
+_lean_apply_16                              # none (0041: kept out of lean_apply_n)
+_lean_apply_m                               # none (0041: kept out of lean_apply_n)

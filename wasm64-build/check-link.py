@@ -18,8 +18,8 @@ undefined symbol that is a table entry; once the allowlist has a `# calibrated-f
 undefined symbol it does not list; a closure-application entry point of the runtime
 (lean_apply_1 … lean_apply_16, lean_apply_m, lean_apply_n) missing from the symbol map, i.e. inlined
 into its caller (patch 0041: inlined, lean_apply_16 and lean_apply_m turned lean_apply_n, a frame on
-every level of a monadic continuation chain, from 0 into 26 locals; src/CMakeLists.txt caps
-Binaryen's one-caller inlining so they stay out of line). Otherwise the undefined symbols are
+every level of a monadic continuation chain, from 0 into 26 locals; src/emscripten-exports.seed.txt
+exports the two so that Binaryen keeps them out of line). Otherwise the undefined symbols are
 compared with the allowlist and the differences printed. A make output without the link (nothing to relink) skips
 the log checks: the binary is the one an earlier check passed. Exit 2: usage.
 """
@@ -60,7 +60,7 @@ else:
     inlined = [n for n in out_of_line if n not in functions]
     if inlined:
         problems.append(f"{len(inlined)} closure-application entry points were inlined into their callers (no longer "
-                        f"functions of their own; check the one-caller inline cap in src/CMakeLists.txt): " + ", ".join(inlined))
+                        f"functions of their own; check the '# kept out of line' exports in src/emscripten-exports.seed.txt): " + ", ".join(inlined))
     else:
         say(f"the {len(out_of_line)} closure-application entry points (lean_apply_*) are functions of their own")
 
