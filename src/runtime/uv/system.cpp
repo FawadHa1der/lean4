@@ -555,6 +555,8 @@ extern "C" LEAN_EXPORT lean_obj_res lean_uv_get_available_memory() {
 
 #else
 
+#include <unistd.h>
+
 // Std.Internal.UV.System.getProcessTitle : IO String
 extern "C" LEAN_EXPORT lean_obj_res lean_uv_get_process_title() {
     lean_always_assert(
@@ -577,10 +579,11 @@ extern "C" LEAN_EXPORT lean_obj_res lean_uv_uptime() {
 }
 
 // Std.Internal.UV.System.osGetPid : IO UInt64
+// Without libuv (Emscripten) libc's getpid still works. Since v4.35 (#14811) `lean -c <file>` names
+// its temporary file with it (Shell.lean's writeFileAtomically → Std.IO.Process.getId), which this
+// stub would otherwise abort.
 extern "C" LEAN_EXPORT lean_obj_res lean_uv_os_getpid() {
-    lean_always_assert(
-        false && ("Please build a version of Lean4 with libuv to invoke this.")
-    );
+    return lean_io_result_mk_ok(lean_box_uint64((uint64_t)getpid()));
 }
 
 // Std.Internal.UV.System.osGetPpid : IO UInt64
