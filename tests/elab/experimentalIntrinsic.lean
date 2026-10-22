@@ -1,13 +1,13 @@
-import Std.Internal.Do
+import Std.WP
 
 /-!
 Every form of the intrinsic verification syntax reports that it is experimental, at the keyword that
 introduces the form, and `set_option experimental.intrinsic true` silences those reports.
 -/
 
-open Std.Internal.Do
+open Std.WP
 
-set_option mvcgen.warning false
+set_option experimental.vcgen true
 
 /--
 warning: The `requires` clause is part of the experimental intrinsic verification syntax; `set_option experimental.intrinsic true` acknowledges its experimental status and silences this warning.
@@ -42,6 +42,20 @@ def sum (xs : List Nat) : Id Nat := do
     acc := acc + 1
   return acc
 
+/--
+warning: The `invariant` clause is part of the experimental intrinsic verification syntax; `set_option experimental.intrinsic true` acknowledges its experimental status and silences this warning.
+---
+warning: The `decreasing` clause is part of the experimental intrinsic verification syntax; `set_option experimental.intrinsic true` acknowledges its experimental status and silences this warning.
+-/
+#guard_msgs in
+def countDown (n : Nat) : Id Nat := do
+  let mut i := n
+  while i > 0
+      invariant _ => i ≤ n
+      decreasing i do
+    i := i - 1
+  return i
+
 /-! Acknowledging the experimental status silences every form. -/
 
 set_option experimental.intrinsic true
@@ -65,3 +79,12 @@ def sum' (xs : List Nat) : Id Nat := do
   for _x in xs invariant _pref _suff => 0 ≤ acc do
     acc := acc + 1
   return acc
+
+#guard_msgs in
+def countDown' (n : Nat) : Id Nat := do
+  let mut i := n
+  while i > 0
+      invariant _ => i ≤ n
+      decreasing i do
+    i := i - 1
+  return i

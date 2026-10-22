@@ -139,7 +139,6 @@ void initialize_libuv_loop() {
 }
 
 #else
-// Emscripten/WASM: Async/Network/IO operations are not supported on WebAssembly.
 
 /* Std.Internal.UV.Loop.configure (options : Loop.Options) : BaseIO Unit */
 extern "C" LEAN_EXPORT lean_obj_res lean_uv_event_loop_configure(b_obj_arg options) {
@@ -148,7 +147,7 @@ extern "C" LEAN_EXPORT lean_obj_res lean_uv_event_loop_configure(b_obj_arg optio
 
 /* Std.Internal.UV.Loop.alive : BaseIO Bool */
 extern "C" LEAN_EXPORT uint8_t lean_uv_event_loop_alive() {
-    return 0;  // No libuv event loop in Emscripten
+    return 0;
 }
 
 #endif

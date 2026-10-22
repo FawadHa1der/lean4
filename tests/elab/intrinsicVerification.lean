@@ -1,11 +1,11 @@
-import Std.Internal.Do
+import Std.WP
 import Std.Data.HashMap
 
 /-! Tests for `def` contracts. A `def` carrying `requires`/`ensures` clauses elaborates to the
 definition plus an `@[spec]`-tagged `f.spec` Hoare triple that `vcgen` proves automatically; a
 `for … invariant` clause inside the body supplies the loop invariant it needs. New cases go here. -/
 
-set_option mvcgen.warning false
+set_option experimental.vcgen true
 set_option experimental.intrinsic true
 
 /-! ## Contracts elaborate with nothing opened
@@ -39,7 +39,53 @@ def onlyRequire (n : Nat) : Id Nat
 #guard_msgs in
 #check @onlyRequire.spec
 
-open Std.Internal.Do Lean.Order
+/-! Loop annotations and `assert` also elaborate with nothing opened: the `do` elaborator
+activates the scoped instances of `Std.WP` for the annotation terms. -/
+
+def countDownNoOpen (n : Nat) : Id Nat
+    ensures r => r = 0 := do
+  let mut i := n
+  while i > 0
+      invariant exit => if exit then i = 0 else True
+      decreasing i
+    do
+    i := i - 1
+  return i
+
+#guard_msgs (drop info) in
+#check @countDownNoOpen.spec
+
+def sumNoOpen (xs : List Nat) : StateM Nat Unit
+    requires s => s = 0
+    ensures _ s => s = xs.sum
+  := do
+  for x in xs invariant pref _ s => s = pref.sum do
+    modify (· + x)
+
+#guard_msgs (drop info) in
+#check @sumNoOpen.spec
+
+def assertNoOpen (n : Nat) : Id Nat
+    requires n > 0
+    ensures r => r ≥ 2
+  := do
+  let d := 2 * n
+  assert d ≥ 2
+  return d
+
+#guard_msgs (drop info) in
+#check @assertNoOpen.spec
+
+-- A loop annotation elaborates without a contract on the definition.
+def decreasingNoOpen (n : Nat) : Id Nat := do
+  let mut i := n
+  while i > 0
+      decreasing i
+    do
+    i := i - 1
+  return i
+
+open Std.WP Lean.Order
 
 /-! ## An `ensures` contract with a `for … invariant` loop, proved with no manual steps -/
 
@@ -195,6 +241,41 @@ def sumValues (m : Std.HashMap Nat Nat) : Id Nat
 #guard_msgs (drop info) in
 #check @sumValues.spec
 
+/-! ## A loop over an iterator, and over the iterators a combinator builds
+
+An iterator is a container like any other: it has a `PureForIn` instance, and a combinator returns
+an iterator, so one instance covers `map` and `filter` too. -/
+
+def sumIter (xs : List Nat) : Id Nat
+    ensures r => r = xs.sum := do
+  let mut s := 0
+  for x in xs.iter invariant pref _suff => s = pref.sum do
+    s := s + x
+  return s
+
+#guard_msgs (drop info) in
+#check @sumIter.spec
+
+def sumIterMap (xs : List Nat) : Id Nat
+    ensures r => 0 ≤ r := do
+  let mut s := 0
+  for x in xs.iter.map (· + 1) invariant _pref _suff => 0 ≤ s do
+    s := s + x
+  return s
+
+#guard_msgs (drop info) in
+#check @sumIterMap.spec
+
+def sumIterFilter (xs : List Nat) : Id Nat
+    ensures r => 0 ≤ r := do
+  let mut s := 0
+  for x in xs.iter.filter (· > 2) invariant _pref _suff => 0 ≤ s do
+    s := s + x
+  return s
+
+#guard_msgs (drop info) in
+#check @sumIterFilter.spec
+
 /-! A loop over several collections takes no invariant. -/
 
 /-- error: The `invariant` clause takes a `for` loop over a single collection. -/
@@ -249,18 +330,252 @@ def ensuresAscribed (n : Nat) : Id Nat
 #guard_msgs in
 #check @ensuresAscribed.spec
 
-/-! ## An `ensures` clause written with match alternatives
+/-! ## The binders of a clause
 
-The clause is a `fun`, so it may state the postcondition per shape of the result. -/
+A clause binds like a `fun`, so a binder may name the components of the value it stands for. A
+postcondition that tells the shapes of the result apart states a `match`. -/
+
+def bounds (n : Nat) : Id (Nat × Nat)
+    ensures (lo, hi) => lo ≤ hi
+  := pure (n, n)
+
+#guard_msgs (drop info) in
+#check @bounds.spec
 
 def halve (n : Nat) : Id (Option Nat)
-    ensures
+    ensures r => match r with
       | none => False
       | some v => 2 * v ≤ n
   := pure (some (n / 2))
 
 #guard_msgs (drop info) in
 #check @halve.spec
+
+/-! A `requires`, `invariant` or `assert` clause binds the same way. Here the state of the monad is
+a pair, and every clause names both components. -/
+
+def sumInto (xs : List Nat) : StateM (Nat × Nat) Unit
+    requires (lo, _hi) => lo = 0
+    ensures _ (lo, _hi) => lo = 0 := do
+  assert (lo, _hi) => lo = 0
+  for x in xs invariant _pref _suff (lo, _hi) => lo = 0 do
+    modify fun (lo, hi) => (lo, hi + x)
+
+#guard_msgs (drop info) in
+#check @sumInto.spec
+
+/-! A clause declares the type of the argument it binds, so a projection of the state resolves. -/
+
+def sumIntoProj (xs : List Nat) : StateM (Nat × Nat) Unit
+    requires (lo, _hi) => lo = 0
+    ensures _ (lo, _hi) => lo = 0 := do
+  for x in xs invariant _pref _suff s => s.1 = 0 do
+    modify fun (lo, hi) => (lo, hi + x)
+
+#guard_msgs (drop info) in
+#check @sumIntoProj.spec
+
+/-! A `while` loop states both of its clauses over the state. -/
+
+def countInto : StateM (Nat × Nat) Unit
+    requires (lo, hi) => lo ≤ hi
+    ensures _ (lo, hi) => lo ≤ hi := do
+  while (← get).1 < (← get).2
+      invariant _exit (lo, hi) => lo ≤ hi
+      decreasing (lo, hi) => hi - lo
+    do
+    modify fun (lo, hi) => (lo + 1, hi)
+
+#guard_msgs (drop info) in
+#check @countInto.spec
+
+/-! A binder that leaves a shape of the value out is reported as a missing case. -/
+
+/--
+error: Missing cases:
+none
+-/
+#guard_msgs in
+def halveSome (n : Nat) : Id (Option Nat)
+    ensures (some v) => 2 * v ≤ n
+  := pure (some (n / 2))
+
+/-! ## A `repeat` or `while` loop binds whether it has left
+
+The clause's first binder is a `Bool`: `true` once the loop is done, `false` while it iterates. The
+`decreasing` clause gives the termination measure, a term over the loop's mutable variables. -/
+
+def countDown (n : Nat) : Id Nat
+    ensures r => r = 0 := do
+  let mut i := n
+  while i > 0
+      invariant exit => if exit then i = 0 else True
+      decreasing i
+    do
+    i := i - 1
+  return i
+
+#guard_msgs (drop info) in
+#check @countDown.spec
+
+/-! Binders past the first bind the arguments of the assertion itself, such as the state of a state
+monad. -/
+
+def countIntoState (n : Nat) : StateM Nat Unit
+    requires s => s = 0
+    ensures _ s => s = n := do
+  let mut i := 0
+  while i < n
+      invariant exit s => s = i ∧ if exit then i = n else i ≤ n
+      decreasing n - i
+    do
+    modify (· + 1)
+    i := i + 1
+where finally
+  | spec => all_goals grind
+
+#guard_msgs (drop info) in
+#check @countIntoState.spec
+
+/-! A wildcard binder states one assertion for both cases. A clause left out is a
+condition like any other: the omitted measure is named `inv1` and discharged in the `spec` section,
+which then proves the step that mentions it. -/
+
+def countUp (n : Nat) : Id Nat
+    ensures r => r ≤ n := do
+  let mut i := 0
+  repeat
+      invariant _ => i ≤ n
+    do
+    if i = n then break
+    i := i + 1
+  return i
+where finally
+  | spec =>
+    case inv1 => exact .ofMeasure fun i => n - i
+    all_goals grind
+
+#guard_msgs (drop info) in
+#check @countUp.spec
+
+/-! A loop may state its measure alone. The invariant is then the hole, named `inv1` like the
+measure omitted by `countUp`, and it states an assertion of the monad the loop runs in. -/
+
+def countMeasureOnly (n : Nat) : StateM Nat Unit
+    requires s => s = 0
+    ensures _ s => s = n := do
+  let mut i := 0
+  while i < n
+      decreasing n - i
+    do
+    modify (· + 1)
+    i := i + 1
+where finally
+  | spec =>
+    case inv1 =>
+      exact fun exit i s => match exit with
+        | false => s = i ∧ i ≤ n
+        | true => s = i ∧ i = n
+    all_goals grind
+
+#guard_msgs (drop info) in
+#check @countMeasureOnly.spec
+
+/-! The measure is the hole when the loop states only its invariant, in any monad. -/
+
+def countInvariantOnly (n : Nat) : StateM Nat Unit
+    requires s => s = 0
+    ensures _ s => s = 0 := do
+  let mut i := 0
+  while i < n
+      invariant _ s => s = 0
+    do
+    i := i + 1
+where finally
+  | spec =>
+    case inv1 => exact .ofMeasure fun i => n - i
+    all_goals grind
+
+#guard_msgs (drop info) in
+#check @countInvariantOnly.spec
+
+/-! The measure may read the state of a state monad, and its binders are the arguments the
+assertions take. Binding more than that is reported at the clause. -/
+
+def drain (n : Nat) : StateM Nat Unit
+    requires s => s ≤ n
+    ensures _ s => s = n := do
+  repeat
+      invariant exit s => s ≤ n ∧ (exit → s = n)
+      decreasing s => n - s
+    do
+    let s ← get
+    if s = n then break
+    set (s + 1)
+where finally
+  | spec => all_goals grind
+
+#guard_msgs (drop info) in
+#check @drain.spec
+
+/--
+error: The measure of a loop in this monad takes one argument, and this clause has 2 binders. The loop's mutable variables are named without binding them.
+-/
+#guard_msgs in
+example (n : Nat) : StateM Nat Unit := do
+  let mut go := true
+  while go
+      invariant _ s => s ≤ n
+      decreasing _ s => n - s
+    do
+    set n
+    go := false
+
+/-! A `repeat … until` loop takes the same clauses. -/
+
+def countUntil (n : Nat) : Id Nat
+    ensures r => r ≤ n := do
+  let mut i := 0
+  repeat
+      invariant _ => i ≤ n
+      decreasing n - i
+    do
+    if i < n then i := i + 1
+  until i = n
+  return i
+
+#guard_msgs (drop info) in
+#check @countUntil.spec
+
+/-! A loop that returns early carries the returned value in a slot of the state tuple that the
+invariant skips over, so a `repeat` with a `return` in its body takes the clauses like any other.
+The invariant cannot name that slot, so what the loop returns is beyond what it can state. -/
+
+def firstZero (xs : Array Nat) : Id (Option Nat)
+    ensures _ => True := do
+  let mut i := 0
+  repeat
+      invariant _ => i ≤ xs.size
+      decreasing xs.size - i
+    do
+    if h : i < xs.size then
+      if xs[i] = 0 then return some i
+      i := i + 1
+    else
+      break
+  return none
+
+#guard_msgs (drop info) in
+#check @firstZero.spec
+
+/-! A `for` loop over a collection ends with the collection. -/
+
+/--
+error: A `for` loop terminates with the collection it iterates; `decreasing` states the termination measure of a `repeat` or `while` loop.
+-/
+#guard_msgs in
+example (xs : List Nat) : Id Unit := do
+  for _ in xs invariant _ _ => True decreasing xs.length do pure ()
 
 /-! ## The contract telescope is transplanted faithfully to `f.spec`
 
@@ -320,7 +635,7 @@ def sumEvens (xs : List Nat) : Id Nat
     acc := acc + 2 * x
   return acc
 where finally
-  | spec => case vc1 acc h => exact ⟨acc / 2, by omega⟩
+  | spec => case vc1 => exact ⟨acc / 2, by omega⟩
 
 /-- info: sumEvens.spec : ∀ (xs : List Nat), ⦃ ⊤ ⦄ sumEvens xs ⦃ fun r => ∃ k, r = 2 * k ⦄ -/
 #guard_msgs in
@@ -431,3 +746,266 @@ def residualSectionIllTyped (n : Nat) : Id Nat
   := pure n
 where finally
   | spec => exact opq_ax 0
+
+/-! ## A `while` loop whose contract asks for a witness
+
+The invariant relates `mn`, `mx` and `i` at every iteration, and its `exit` binder states what the
+loop reaches once it leaves: `i = a.size`, so the bounds the invariant records for the prefix `[0, i)`
+cover the whole array. The postcondition claims a minimum and a maximum exist, and the `spec` section
+names the two the exit state holds. -/
+
+@[local grind] def InArray (a : Array Int) (v : Int) : Prop :=
+  ∃ i : Nat, i < a.size ∧ a[i]! = v
+
+@[local grind] def IsMinOfArray (a : Array Int) (mn : Int) : Prop :=
+  InArray a mn ∧ ∀ i : Nat, i < a.size → mn ≤ a[i]!
+
+@[local grind] def IsMaxOfArray (a : Array Int) (mx : Int) : Prop :=
+  InArray a mx ∧ ∀ i : Nat, i < a.size → a[i]! ≤ mx
+
+def differenceMinMax (a : Array Int) : Id Int
+    requires a.size ≠ 0
+    ensures r => ∃ mn mx, IsMinOfArray a mn ∧ IsMaxOfArray a mx ∧ r = mx - mn
+  := do
+  let mut mn := a[0]!
+  let mut mx := a[0]!
+  let mut i : Nat := 1
+  while i < a.size
+      invariant exit => 1 ≤ i ∧ i ≤ a.size ∧ (exit → i = a.size) ∧
+        (∃ j : Nat, j < i ∧ a[j]! = mn) ∧ (∀ j : Nat, j < i → mn ≤ a[j]!) ∧
+        (∃ j : Nat, j < i ∧ a[j]! = mx) ∧ (∀ j : Nat, j < i → a[j]! ≤ mx)
+      decreasing a.size - i
+    do
+    let v := a[i]!
+    if v < mn then mn := v
+    if v > mx then mx := v
+    i := i + 1
+  return mx - mn
+where finally
+  | spec => case vc2 => exact ⟨mn, mx, by grind, by grind, by grind⟩
+
+#guard_msgs (drop info) in
+#check @differenceMinMax.spec
+
+/-! ## A loop nested in a loop
+
+The inner loop's invariant names `i`, the index the outer loop stands at, by ordinary lexical
+scoping: the clause elaborates in the body of the outer loop, where `i` is in scope alongside the
+inner loop's own mutable variable `count`. -/
+
+@[local grind] def isMajorityElement (lst : List Int) (x : Int) : Prop :=
+  lst.count x > lst.length / 2
+
+@[local grind] def hasMajorityElement (lst : List Int) : Prop :=
+  ∃ x, x ∈ lst ∧ isMajorityElement lst x
+
+@[local grind →] theorem mem_getElem! (lst : List Int) (w : Int) (hw : w ∈ lst) :
+    ∃ k, k < lst.length ∧ lst[k]! = w := by
+  obtain ⟨k, hk, hkv⟩ := List.getElem_of_mem hw
+  exact ⟨k, hk, by rw [getElem!_pos lst k hk, hkv]⟩
+
+def findMajorityElement (lst : List Int) : Id Int
+    ensures r => (hasMajorityElement lst → r ∈ lst ∧ isMajorityElement lst r) ∧
+                 (¬hasMajorityElement lst → r = -1)
+  := do
+  let n := lst.length
+  let threshold := n / 2
+  let mut found := false
+  let mut candidate : Int := -1
+  for i in [0:n]
+      invariant pref _suff =>
+        (found = true → candidate ∈ lst ∧ isMajorityElement lst candidate) ∧
+        (found = false → ∀ k : Nat, k < pref.length → ¬isMajorityElement lst lst[k]!)
+    do
+    let elem := lst[i]!
+    let mut count := 0
+    for j in [0:n]
+        invariant inner _suff => count = (lst.take inner.length).count lst[i]!
+      do
+      if lst[j]! = elem then
+        count := count + 1
+    if count > threshold then
+      found := true
+      candidate := elem
+  if found then
+    return candidate
+  else
+    return -1
+where finally
+  | spec => all_goals grind [List.take_length, List.take_succ_eq_append_getElem]
+
+#guard_msgs (drop info) in
+#check @findMajorityElement.spec
+
+/-! ## The `given` clause binds logical variables -/
+
+def mkFreshNat : StateM Nat Nat
+    given (n : Nat)
+    requires s => s = n
+    ensures r s => r = n ∧ s = n + 1
+  := do
+  let m ← get
+  set (m + 1)
+  pure m
+
+/--
+info: mkFreshNat.spec : ∀ (n : Nat), ⦃ fun s => s = n ⦄ mkFreshNat ⦃ fun r s => r = n ∧ s = n + 1 ⦄
+-/
+#guard_msgs in
+#check @mkFreshNat.spec
+
+def widen (k : Nat) : StateM Nat Unit
+    given (lo hi : Nat) {d : Nat}
+    requires s => lo ≤ s ∧ s ≤ hi ∧ d = k
+    ensures _ s => lo ≤ s + k ∧ s ≤ hi + d
+  := modify (· + k)
+
+/--
+info: widen.spec : ∀ (k lo hi : Nat) {d : Nat},
+  ⦃ fun s => lo ≤ s ∧ s ≤ hi ∧ d = k ⦄ widen k ⦃ fun x s => lo ≤ s + k ∧ s ≤ hi + d ⦄
+-/
+#guard_msgs in
+#check @widen.spec
+
+def peek : StateM Nat Nat
+    given (n : Nat)
+    ensures r s => r = n → s = n
+  := get
+
+/-- info: peek.spec : ∀ (n : Nat), ⦃ ⊤ ⦄ peek ⦃ fun r s => r = n → s = n ⦄ -/
+#guard_msgs in
+#check @peek.spec
+
+def bumpUnconstrained (k : Nat) : StateM Nat Unit
+    given (n : Nat)
+  := modify (· + k)
+
+/-- info: bumpUnconstrained.spec : ∀ (k n : Nat), ⦃ ⊤ ⦄ bumpUnconstrained k ⦃ fun x => ⊤ ⦄ -/
+#guard_msgs in
+#check @bumpUnconstrained.spec
+
+def onOneLine (k : Nat) : Id Nat given (n : Nat) requires k = n ensures r => r = n := pure k
+
+/-- info: onOneLine.spec : ∀ (k n : Nat), ⦃ k = n ⦄ onOneLine k ⦃ fun r => r = n ⦄ -/
+#guard_msgs in
+#check @onOneLine.spec
+
+/-! ## Erased state
+
+`erased` declares verification-only state. The variable reads at its underlying type everywhere,
+its carried `Erased` binding erases in compiled code, and its slot in a loop's state tuple holds
+a dummy. -/
+
+def erasedSumEvens (xs : List Nat) : Id Nat
+    ensures r => r % 2 = 0 := do
+  let mut acc := 0
+  erased mut seen : List Nat := []
+  for x in xs invariant _pre _suff => acc = 2 * seen.length do
+    acc := acc + 2
+    seen := x :: seen
+  return acc
+
+/-- info: 6 -/
+#guard_msgs in
+#eval erasedSumEvens [1, 2, 3]
+
+/-! An existential `ensures` takes its witness from an erased variable: the invariant carries the
+witness, and the exit condition instantiates the existential from it. -/
+
+def erasedDoubleSum (xs : List Nat) : Id Nat
+    ensures r => ∃ n, r = 2 * n := do
+  let mut acc := 0
+  erased mut half : Nat := 0
+  for x in xs invariant _pre _suff => acc = 2 * half do
+    acc := acc + x + x
+    half := half + x
+  return acc
+
+/-- info: 12 -/
+#guard_msgs in
+#eval erasedDoubleSum [1, 2, 3]
+
+/-! The declaration forms: `erased` with and without `mut`, reassignment with an ascription, and
+monadic binds (the action runs, its result erases). -/
+
+def erasedForms : Id Nat := do
+  erased y := 5
+  erased mut x := 1
+  x := x + y
+  x : Nat := 2
+  erased z ← pure 3
+  erased mut m ← pure 4
+  m := m + z
+  pure 0
+
+/-- info: 0 -/
+#guard_msgs in
+#eval erasedForms
+
+/-! An erased variable reassigned in a branch flows through the join point. -/
+
+def erasedBranch (b : Bool) : Id Nat
+    ensures r => r = 0 := do
+  erased mut n : Nat := 0
+  if b then
+    n := n + 1
+  else
+    n := n + 2
+  assert n > 0
+  return 0
+
+/-- info: 0 -/
+#guard_msgs in
+#eval erasedBranch true
+
+/-! An erased value reaching compiled code is rejected through the noncomputability of
+`Erased.out`. -/
+
+/--
+error: failed to compile definition: it depends on 'Erased.out', which recovers the value of an erased variable. An erased variable's value is available in specifications such as `invariant` clauses and `assert`s, but not in compiled code. Consider marking the definition as 'noncomputable'.
+-/
+#guard_msgs in
+def erasedLeak (xs : List Nat) : Id Nat := do
+  erased mut seen : List Nat := []
+  for x in xs do
+    seen := x :: seen
+  return seen.length
+
+/-! An erased reassignment checks a contradicting type ascription like a plain one. -/
+
+/--
+error: Type mismatch
+  g
+has type
+  Int
+but is expected to have type
+  Nat
+-/
+#guard_msgs in
+def erasedAscriptionMismatch : Id Nat := do
+  erased mut g : Int := 0
+  g : Nat := 1
+  pure 0
+
+/-! `erased` stays a regular identifier at a doElem head when no erased shape parses. -/
+
+def erasedAsIdent (erased : Nat → Id Unit) : Id Nat := do
+  erased 5
+  let mut erased := 1
+  erased := erased + 1
+  erased ← pure 3
+  pure erased
+
+/-- info: 3 -/
+#guard_msgs in
+#eval erasedAsIdent fun _ => pure ()
+
+/-! An erased variable stays out of pattern reassignments. -/
+
+/-- error: an erased variable takes a plain reassignment, as in `g := e` -/
+#guard_msgs in
+def erasedPatReassign : Id Nat := do
+  let mut a := 1
+  erased mut g := 2
+  (a, g) := (3, 4)
+  pure a
