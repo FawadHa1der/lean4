@@ -10,3 +10,4 @@ Mathlib.Data.Int.Star                   # formerly vendored in lean4game wasm/co
 Mathlib.Data.Rat.Star                   # formerly vendored in lean4game wasm/compat
 Mathlib.Analysis.SpecialFunctions.Log.Base   # RealAnalysisGame (pulls Mathlib.Data.Int.Log)
 Mathlib.Tactic.NormNum.Prime            # LinearAlgebraGame Game/MyTactic.lean: norm_num decides primality (added 2026-09-22, first built at the next pack build)
+Batteries.Tactic.OpenPrivate             # `open private`: lean4game GameServer, NNG4, Reintro, Robo; Mathlib v4.35 stopped importing it, so it left every pack (lean4game vendors a copy until the next pack build; added 2026-10-23)
