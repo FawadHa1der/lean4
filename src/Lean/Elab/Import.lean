@@ -159,9 +159,14 @@ def processHeaderCore
     (origHeaderStx? : Option HeaderSyntax := none)
     : IO (Environment × MessageLog) := do
   -- Determine import level based on context
-  -- Emscripten/WASM builds only have .exported level files, so always use that
+  -- Emscripten/WASM: one level for every file, as its environments are shared between files
+  -- (snapshots, `wasmCompile`'s cache). `.server` is the stock editor's level for a `module` file:
+  -- the `.olean`'s exported view plus the `.olean.server` docstrings and declaration ranges, the
+  -- `.olean`'s alone where a tree omits `.olean.server`. Not stock's `.private` for a legacy file
+  -- (every proof and non-`@[expose]` body): a Mathlib snapshot at that level is ~2.5x larger and
+  -- overflows the snapshot compactor (wasm64-build/PATCHES.md, 0042).
   let level : OLeanLevel := if System.Platform.isEmscripten then
-    .exported
+    .server
   else if isModule then
     if Elab.inServer.get opts then .server else .exported
   else

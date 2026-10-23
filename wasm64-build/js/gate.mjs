@@ -9,6 +9,8 @@
 //     deep recursion at a browser's stack (0036), and async elaboration through
 //     lean_wasm_compile (0037: every message of an Elab.async declaration reported once)
 //  5. THE PARSE GATE     — garbage input must produce >=1 error diagnostic
+//  6. module files on a shared environment through lean_wasm_compile (0042: the public constant
+//     map setIsModule builds), and imported docstrings/ranges (the `.server` import level)
 //  0038 (folded into the runs above, no runtime of its own): the glue's pool size from
 //     Module.pthreadPoolSize, the opt-in exits of surplus standard workers and idle parked
 //     threads, the engine-guard counters. Skipped, with a note, on a runtime before 0038.
@@ -325,8 +327,8 @@ if (is0039) {
 }
 
 // MODULE-SEMANTICS GATES (qed64 HARDENING #51): the environment's own facts for a
-// user file, not its messages. On Emscripten every import happens at
-// `OLeanLevel.exported`; if the file's header flag is not threaded through,
+// user file, not its messages. On Emscripten every import happens at one level
+// (`.server` since 0042); if the file's header flag is not threaded through,
 // `importModules` derives `isModule` from the level and a legacy file elaborates
 // as a module (private-by-default defs, `@[server_rpc_method]` rejected). The
 // three legacy probes run as ONE file (they all `import Lean`); the `module`
@@ -610,6 +612,60 @@ gate(!!reErr && !!reOk && reErr.scalar === 1 && reErr.diags.some((d) => d.severi
 console.log(`note  [0037] mixed-mode linting (option scoped by \`in\`; informational): ${shown(caseOf("async-mixed-lint"))}`);
 gate(parseFixed, "THE PARSE GATE: lean_wasm_compile reports parser diagnostics",
   parseFixed ? "" : "persistent shell still swallows parse errors");
+
+// MODULE FILES ON A SHARED ENVIRONMENT (patch 0042). wasmCompile's cache and the snapshots import
+// once, as for a legacy file, and `setIsModule` gives each file its own flag. Stock `finalizeImport`
+// builds the public constant map only for a `module` importer, so a `module` file served such an
+// environment resolved no imported name in a public declaration ("Unknown identifier `Nat`"); the
+// CLI run above imports per file and never had the bug. Entering the module system now treats every
+// imported module as publicly imported in both phases (a superset of stock). Through
+// lean_wasm_compile, in one runtime, twice each: a `module` file importing Lean PRIVATELY first (it
+// creates the cache entry the next files reuse; stock rejects its public use of Lean.Expr, the shared
+// environment accepts it), a `public meta import` of the same modules, the CLI's module file, Init
+// alone, the legacy probes (a legacy file after module files), and a legacy file's imported docs.
+const PUB = /isModule=(\w+) publicScope=(\d+) importedDocs=(\w+) importedRanges=(\w+)/;
+const MOD_CASES = ["module-private-import", "module-meta", "module-file", "module-no-import", "legacy-after-module", "legacy-docs"];
+const modDir = mkTemp("lean4-wasm64-gate-0042-");
+let modRun;
+try {
+  fs.writeFileSync(path.join(modDir, "legacy-after-module.lean"), legacySrc);
+  const files = MOD_CASES.map((n) => path.join(n === "legacy-after-module" ? modDir : probes, `${n}.lean`));
+  modRun = await runChild([STACK, path.join(root, "persistent-probe.mjs"), "--artifact", artifact,
+    "--cases", files.join(","), "--passes", "2"], 900_000, TRACE_LEAN);
+  noteMisses("0042 cases", modRun.stderr);
+} finally {
+  rmTemp(modDir);
+}
+const modCases = [...modRun.stdout.matchAll(/^CASE (\{.*\})$/gm)].flatMap((m) => { try { return [JSON.parse(m[1])]; } catch { return []; } });
+const modCase = (name, pass = 1) => modCases.find((c) => c.name === name && c.pass === pass);
+const errorsOf = (c) => (c ? c.diags.filter((d) => d.severity === "error") : []);
+const textOf = (c) => (c ? c.diags.map((d) => String(d.data)).join("\n") : "");
+const modCount = MOD_CASES.length * 2 + 2;
+gate(modRun.status === 0 && /^CASES DONE$/m.test(modRun.stdout) && modCases.length === modCount,
+  "[0042] module cases: every lean_wasm_compile returned", `${modCases.length}/${modCount} compiles${modRun.timedOut ? ", killed by the timeout" : ""}`);
+const modClean = ["module-private-import", "module-meta", "module-file", "module-no-import"]
+  .flatMap((n) => [1, 2].map((p) => [`${n}#${p}`, modCase(n, p)]));
+gate(modClean.every(([, c]) => c && c.scalar === 0 && errorsOf(c).length === 0),
+  "[0042] lean_wasm_compile: `module` files on a shared environment compile (public names from public and private imports, a `meta` import after a plain one, Init alone, cache hits)",
+  modClean.filter(([, c]) => !c || c.scalar !== 0 || errorsOf(c).length).map(([n, c]) => `${n}: ${shown(c)}`).join("; "));
+const cliPub = PUB.exec(moduleOut), wcPub = PUB.exec(textOf(modCase("module-file")));
+gate(!!cliPub && !!wcPub && Number(cliPub[2]) > 0 && Number(wcPub[2]) >= Number(cliPub[2]),
+  "[0042] the public scope setIsModule builds contains the CLI's `module` import's (every loaded module counts as public)",
+  `lean_wasm_compile ${wcPub?.[2] ?? "no count"}, CLI ${cliPub?.[2] ?? "no count"}`);
+const after = modCase("legacy-after-module"), afterText = textOf(after);
+gate(!!after && errorsOf(after).length === 0 && /isModule=false/.test(afterText) && /plainDef/.test(afterText) && !/_private/.test(afterText),
+  "[0042] lean_wasm_compile: a legacy file after `module` files elaborates as legacy (plain defs public, rpc/tactic attributes accepted)",
+  shown(after));
+const docsIn = (s) => /importedDocs=true importedRanges=true/.test(s);
+const docsVerdict = `CLI module ${docsIn(moduleOut)}, compile module ${docsIn(textOf(modCase("module-file")))}, compile legacy ${docsIn(textOf(modCase("legacy-docs")))}`;
+// the docs live in `.olean.server`: a tree without it (none ships so) has nothing to load
+if (fs.existsSync(path.join(artifact, "lib/lean/Init/Prelude.olean.server"))) {
+  gate(docsIn(moduleOut) && docsIn(textOf(modCase("module-file"))) && docsIn(textOf(modCase("legacy-docs"))),
+    "[0042] imported docstrings and declaration ranges are loaded (the `.server` level: CLI and lean_wasm_compile, module and legacy files)", docsVerdict);
+} else {
+  console.log(`note  [0042] the artifact's tree has no .olean.server facets: imported docs not judged (${docsVerdict})`);
+}
+console.log(`note  [0042] legacy \`decide\` on Nat.toDigits (stock passes at .private; a known deviation): ${errorsOf(modCase("legacy-docs")).length ? "fails" : "passes"}`);
 
 // G7 (0039), over every run: no lookup missed a `lean_*` name. The interpreter's keys are Lean
 // names (boxed wrappers, @[export] names, cells, initializers); the C runtime's lean_* functions

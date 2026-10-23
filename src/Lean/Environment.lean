@@ -1195,27 +1195,6 @@ def setMainModule (env : Environment) (m : Name) : Environment := Id.run do
 def mainModule (env : Environment) : Name :=
   env.header.mainModule
 
-/--
-Sets `env.header.isModule`, the flag that selects module-system semantics for the file being
-elaborated (private-by-default declarations, `meta` requirements on attributes, `isExporting`).
-`importModules` bakes it in from the importing file's header, but an environment served from a
-registry or snapshot (`Language.Lean.lookupPrebuiltEnv`) is shared between files, so the served
-copy must carry the flag of the file it is handed to, not the one it was imported for. Clears
-`isExporting` when leaving the module system (`setExporting` is a no-op outside it).
--/
-def setIsModule (env : Environment) (isModule : Bool) : Environment := Id.run do
-  if env.header.isModule == isModule then
-    return env
-  let env := env.modifyCheckedAsync ({ · with
-    header.isModule := isModule
-  })
-  { env with
-    isExporting := isModule && env.isExporting
-    importRealizationCtx? := env.importRealizationCtx?.map ({ · with
-      -- safety: `RealizationContext` is private
-      env := unsafe unsafeCast env
-    }) }
-
 def getModuleIdxFor? (env : Environment) (declName : Name) : Option ModuleIdx :=
   -- async constants are always from the current module
   env.base.get env |>.const2ModIdx[declName]?
@@ -2534,6 +2513,70 @@ def importModules (imports : Array Import) (opts : Options) (trustLevel : UInt32
     let (_, s) ← importModulesCore (globalLevel := level) imports arts |>.run
     finalizeImport (leakEnv := leakEnv) (loadExts := loadExts) (level := level)
       (isModule := isModule) s imports opts trustLevel
+
+/--
+The public constant map of a shared environment entering the module system (`setIsModule`):
+`finalizeImport`'s loop for a `module` importer, over every module with data instead of the
+publicly imported ones, duplicates merged with `subsumesInfo` as there. `moduleData` holds each
+module's main data: its base `.olean` part (`publicModule?`), or, for a module that was
+`import all`ed, its `.olean.private` part where the tree ships one.
+-/
+private def publicConstantMapOfHeader (header : EnvironmentHeader) :
+    Std.HashMap Name ConstantInfo := Id.run do
+  let mut numPublicConsts := 0
+  for mod in header.modules, data in header.moduleData do
+    if mod.hasData then
+      numPublicConsts := numPublicConsts + data.constants.size
+  let mut publicConstantMap : Std.HashMap Name ConstantInfo :=
+    Std.HashMap.emptyWithCapacity (capacity := numPublicConsts)
+  for mod in header.modules, data in header.moduleData do
+    unless mod.hasData do continue
+    for cname in data.constNames, cinfo in data.constants do
+      match publicConstantMap.getThenInsertIfNew? cname cinfo with
+      | (cinfoPrev?, constantMap') =>
+        publicConstantMap := constantMap'
+        if let some cinfoPrev := cinfoPrev? then
+          if subsumesInfo publicConstantMap cinfo cinfoPrev then
+            publicConstantMap := publicConstantMap.insert cname cinfo
+  return publicConstantMap
+
+/--
+Sets `env.header.isModule`, the flag that selects module-system semantics for the file being
+elaborated (private-by-default declarations, `meta` requirements on attributes, `isExporting`).
+`importModules` bakes it in from the importing file's header, but an environment served from a
+registry or snapshot (`Language.Lean.lookupPrebuiltEnv`) is shared between files, so the served
+copy must carry the flag of the file it is handed to, not the one it was imported for. Clears
+`isExporting` when leaving the module system (`setExporting` is a no-op outside it).
+
+A shared environment is imported for a legacy file, and its header's import flags are another
+file's, so entering the module system treats every imported module as publicly imported in every
+phase. It builds the public constant map, which `finalizeImport` builds only for a `module`
+importer (`publicConstantMapOfHeader`; without it, a `public` declaration resolved no imported
+name at all, "Unknown identifier `Nat`"), and sets `isExported` on each module with data and
+`irPhases := .all` (the wasm build loads every module's IR), which the `meta`, `@[inline]` and
+namespace checks read. A superset of stock: a file's private and `meta` imports count as public
+and as both phases.
+-/
+def Environment.setIsModule (env : Environment) (isModule : Bool) : Environment := Id.run do
+  if env.header.isModule == isModule then
+    return env
+  let env := env.modifyCheckedAsync fun kenv => { kenv with
+    header.isModule := isModule
+    header.modules := if isModule then
+        kenv.header.modules.map fun mod => { mod with isExported := mod.hasData, irPhases := .all }
+      else kenv.header.modules
+  }
+  let env := if isModule then
+      { env with base.public := { env.base.private with
+          constants := SMap.fromHashMap (publicConstantMapOfHeader env.header) false
+          header.regions := #[] } }
+    else env
+  { env with
+    isExporting := isModule && env.isExporting
+    importRealizationCtx? := env.importRealizationCtx?.map ({ · with
+      -- safety: `RealizationContext` is private
+      env := unsafe unsafeCast env
+    }) }
 
 /--
 Creates environment object from imports and frees compacted regions after calling `act`. No live

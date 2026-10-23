@@ -85,8 +85,8 @@ def getOrCreateWasmEnvFor (imports : Array Import) : IO Environment := do
   --  * `loadExts := true` loads the environment extensions — parser notation
   --    (e.g. `+`) and the instance database (e.g. `OfNat`). Without it (the
   --    default `false`), `#check 2 + 2` fails with "OfNat" / "unexpected '+'".
-  --  * `level := .exported` matches the only data the WASM build ships (base
-  --    `.olean`); the default `.private` expects absent private/server data.
+  --  * `level := .server`, the level `processHeaderCore` uses on Emscripten (see
+  --    there): docstrings and declaration ranges, not private data.
   --  * `leakEnv := true` keeps the compacted regions alive. Environments are
   --    cached and reused across compiles; with the default (regions freed after
   --    import) a later compile dereferences freed regions and fails. Freeing is
@@ -100,7 +100,7 @@ def getOrCreateWasmEnvFor (imports : Array Import) : IO Environment := do
   --    sets the real one per file with `setIsModule`.
   unsafe enableInitializersExecution
   let env ← importModules imports {} 0
-    (level := .exported) (loadExts := true) (leakEnv := true) (isModule := false)
+    (level := .server) (loadExts := true) (leakEnv := true) (isModule := false)
   IO.eprintln "[WASM DEBUG] getOrCreateWasmEnvFor: importModules completed"
   wasmEnvCache.modify (·.push (key, env))
   return env
@@ -270,7 +270,8 @@ def wasmLoadSnapshot (path : String) : IO UInt32 := do
   try
     IO.eprintln s!"[WASM DEBUG] wasmLoadSnapshot: loading {path}"
     let (cmdState, initModIdxs) ← unsafe Elab.loadHeaderSnapshotCmdState ⟨path⟩
-    let env := cmdState.env.setMainModule .anonymous
+    -- shared environments are legacy imports; `setIsModule` gives each file its flag (0042)
+    let env := cmdState.env.setMainModule .anonymous |>.setIsModule false
     -- Replay the `[init]` attributes the imported modules would have run.
     -- `runInitAttrsForModules` requires initializer execution to be enabled,
     -- and `withImporting` clears the flag when it returns, so enable on both
@@ -302,7 +303,8 @@ def wasmLoadSnapshotMem (ptr size flags : USize) : IO UInt32 := do
     let t0 ← IO.monoMsNow
     let (cmdState, initModIdxs) ← unsafe Elab.loadHeaderSnapshotCmdStateMem ptr size
     let t1 ← IO.monoMsNow
-    let env := cmdState.env.setMainModule .anonymous
+    -- shared environments are legacy imports; `setIsModule` gives each file its flag (0042)
+    let env := cmdState.env.setMainModule .anonymous |>.setIsModule false
     let t2 ← IO.monoMsNow
     unsafe enableInitializersExecution
     -- Per-module timing: `runInitAttrsForModules` is a plain loop over the

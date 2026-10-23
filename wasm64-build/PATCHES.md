@@ -333,6 +333,9 @@ kernel-only fix: the apps re-pair (rebake) against the new runtime with their
 packs unchanged; the pack's oleans of the four modules lag the compiled code
 until the next full import (harmless: native dispatch wins). Upstream-worthy
 as the explicit-`isModule` parameter; the wasm `.exported` policy is ours.
+Gap, fixed by 0042: the flip into the module system did not build the public constant map, so
+a `module` file served a shared environment resolved no imported name in a public declaration
+(this entry's probe only printed the flag). The level is `.server` since 0042.
 
 ## 0035 — wasm: no thread creation under the task manager's lock; dedicated tasks reuse parked threads (6b3a491f76)
 
@@ -974,3 +977,141 @@ into its caller: it fails on the 0040 binary (`lean_apply_16`, `lean_apply_m`) a
   recursion (`sumTo`, deepest at 0.68 MiB): 812, as 0040 (e1a79c1: 412).
 - Speed (0040's perf file, 3 alternating rounds against 0040): the same within noise.
 - Gate: 56 checks passed (deep recursion at Chrome's stack: the Meta and kernel errors, the thread alive).
+
+## Upstream import: Lean v4.35.0 (branch `import/v4.35.0`)
+
+The line's base moves from v4.34.0 to the `v4.35.0` tag by a merge (`3c0f24c445`), with the
+procedure of `RELEASE-PIPELINE.md`. The line is master-based. Its merge base with v4.35.0 is master
+#14729, and the v4.34.0 release-branch backports it carried (#14788, #14791, #14833, #14838,
+#14849, #14477, #14938, #15104) arrive as their master originals.
+- **Conflict resolutions** are in the merge commit's message:
+  - 11 upstream-only files taken from v4.35.0, among them `Server/InfoUtils.lean`, which drops
+    backport #15104;
+  - `lean.h`/`object.cpp`: v4.35.0's reference-count rework, with the old duplicate
+    `lean_dec_ref_cold` deleted;
+  - `stdlib.make.in` keeps `LEAN_WASM_SYMTAB` and takes upstream's
+    `CMAKE_DYN_EXE_LINKER_FLAGS_MAKE`, which is empty under Emscripten;
+  - `Shell.lean` keeps both imports;
+  - stage0 is v4.35.0 with the two pointer-width gates re-applied (`stage0-line-edits.patch`
+    refreshed).
+- **`lean_uv_os_getpid` without libuv** (`30d45eced3`). Since v4.35 (#14811), `lean -c <file>`
+  names its temporary file after the process id (`writeFileAtomically` → `IO.Process.getId`), and
+  the Emscripten stub aborted. It now returns libc's `getpid()`. `lean -c` writes the same C as on
+  0041.
+- **Drift review** (4 areas, each finding verified): no blocking finding. 0035 holds with #14982
+  (thread-local heartbeat), and 0041 with #14969 (`lean_apply_m`). The kernel equals v4.35.0
+  (`reduce_native` removed upstream, #14953). Notes for consumers:
+  - #15133 removed `Lean.Server.findCmdParsedSnap`, `findCmdDataAtPos` and `findInfoTreeAtPos`
+    (moved to `Lean.Language.Lean` / `Lean.Elab.InfoTree.Util`);
+  - #15159/#15391: library-suggestion symbol frequencies are now computed on first use, over all
+    imported theorems.
+
+## 0042 — wasm: `module` files on a shared environment see every loaded module publicly; imports at `.server`
+
+**The bug (pre-existing, live on 53cb11e).** wasmCompile's cache and every snapshot (the resident
+registry) import once, as for a legacy file (`isModule := false`). 0034's `setIsModule` then gives
+each file its header's flag. Stock `finalizeImport` builds the PUBLIC constant map, the scope of a
+`module` file's public signatures, only `if isModule`, and `setIsModule(true)` flipped the flag
+without building it. Measured on 0041 and v4.35, and by the QED64 session on the live site through
+the resident FileWorker:
+- every public declaration of a `module` file resolved no imported name: the public scope held 0
+  constants, against 133,315 through the 0041 CLI and 127,639 on stock v4.35 for
+  `public import Lean`;
+- `module` / `public def pubN : Nat := 4` gave "Unknown identifier `Nat` … imported privately";
+- the one-shot CLI, which imports per file with the header's flag, never had it.
+
+The gates missed it: the 0034 `module` probe only printed the flag and declared nothing public.
+
+**Not the `.olean.private` parts.** Research of 2026-10-22 (11 agents; summary in
+`work/v4.35/PLAN.md`) found:
+- the failure is identical with every `.olean.private` present or deleted;
+- stock itself at `.private` with `isModule := true` builds an empty public map, because no module
+  counts as publicly imported at that level;
+- the cause is one environment shared between files of different module-ness and import flags,
+  made a module after import.
+
+**The fix.** A shared environment's header carries ANOTHER file's import flags (the bake probe's,
+or the first compile's). Its key is the module names alone, and the resident resolver also serves
+"covering" environments. So `Environment.setIsModule` (moved below `finalizeImport`), on entering
+the module system, treats every imported module as publicly imported in both phases:
+- `base.public` is rebuilt by `publicConstantMapOfHeader`: `finalizeImport`'s loop over every
+  module with data, its `moduleData` (the base `.olean` part), merged with `subsumesInfo`;
+- `header.modules` gets `isExported := hasData` and `irPhases := .all`. Those flags feed the
+  `public meta`, `@[inline]`/specialize visibility and namespace checks. The wasm build loads every
+  module's IR (needsIR wherever data), so `.all` claims nothing absent;
+- the snapshot loaders apply `setIsModule false` to what they load, so every registry environment
+  is a legacy import and a `module`-baked snapshot is rebuilt like the rest.
+
+This is a superset of stock that the user accepted, rather than an exact public scope or a second
+environment per module-ness (a second Mathlib snapshot). A `module` file served a shared
+environment may use, in public signatures and in either phase, anything the environment loaded:
+- privately or `meta` imported modules;
+- the modules of a covering umbrella;
+- for an `import all`ed module on a tree that ships `.olean.private`, its private part. The browser
+  never mounts those.
+
+The flags it read before were narrower but wrong. The reviews found three failures, each now gated
+or covered:
+- a covering environment left out modules it reached only privately (`public import Std.Time`
+  served by the Lean closure);
+- the first file's `meta` flags made a later file's `public meta def` fail ("not accessible here");
+- a `module`-baked snapshot was never rebuilt.
+
+**Cost.** One hash map per `module` file header:
+- natively for all of Mathlib (639,019 entries): ~55 ms to build, ~23 ms to MT-mark on entering a
+  task, ~54 ms to free, ~29 MB while the file's environment lives;
+- not memoized: wasmCompile rebuilds per compile of a `module` file, and the resident FileWorker
+  rebuilds per header processing;
+- legacy files and every bake pay nothing;
+- wasm timings at umbrella scale: measured at the [Q] rebake.
+
+**`.server` instead of `.exported`.** `processHeaderCore` (CLI and snapshot bakes) and wasmCompile
+import at `OLeanLevel.server`, the stock editor's level for a `module` file.
+- The only difference from `.exported` on wasm is `serverBaseExts`: the `.olean.server` entries of
+  six extensions (declaration ranges, docstrings, inherited and Verso docstrings, module docs). No
+  compiled output changes.
+- Before this, hover in the browser showed no imported docstring (QED64, live site: `List.map`,
+  `Finset.sum`; `Nat.add_comm` has none upstream).
+- Imported declaration ranges load too. They cannot drive go-to-definition in the browser:
+  `locationLinksFromDecl` needs the module's `.lean` source, and no tree ships sources.
+- QED64's and lean4game's slim trees KEEP `.olean.server`: `unpack --slim`, the bake overlays and
+  the browser mount drop only `.olean.private`. Their snapshots therefore grow, measured natively
+  as +9.2 MB on the Init closure (~+7.5% of the 122 MB init snapshot). Estimated: +50-57 MB on the
+  1,127 MB Mathlib snapshot, with the post-load heap growing likewise. To be measured at the
+  [Q]/[G] rebakes; lean4game re-baselines `expectedRaw`.
+- A tree without `.olean.server` falls back to the `.olean` data (`serverData?` → `moduleData`).
+- Message changes, all toward stock:
+  - a legacy file's `@[inherit_doc X]` no longer warns "X does not have a doc string";
+  - doc-printing commands and the DocsOnAlt linter now see imported docs.
+- The old rationale, "WASM builds only have .exported level files", was stale. Every pack has
+  shipped all three facets since 4.34; mathlib-essential carries 868 MB of `.olean`, 60 MB of
+  `.olean.server` and 2,154 MB of `.olean.private`.
+
+**Unchanged on purpose.** Stock imports a legacy file at `.private`: every proof, every
+non-`@[expose]` body and the private declarations. At `.server` a legacy file sees the exported
+view of module-system libraries. For `import Lean`, that is 82,715 axioms against 12 on stock, so
+`decide` on `Nat.toDigits 10 123` fails and `#print Nat.add_zero` shows `<not imported>`. A
+`.private` Mathlib snapshot is ~2.5× larger and overflows the compactor (see the v4.34 import's
+known limitation). That level waits on lean4game's sweep of every level solution through wasm.
+
+**Gate** (`js/gate.mjs` block 6; probes `module-private-import`, `module-meta`, `module-file`,
+`module-no-import`, `legacy-docs`, and the legacy probes). The cases run twice each through
+lean_wasm_compile in one runtime:
+- a `module` file importing Lean privately creates the cache entry and must compile its public use
+  of `Lean.Expr`, which pins the superset;
+- a `public meta import Lean` file must reach Lean's elaborator in a `public meta def`;
+- the CLI's `module` file must resolve `Lean.Name` and `Lean.Expr` in public defs;
+- Init alone, with an `@[expose]` def and an exported `rfl`;
+- the rebuilt public scope must contain the CLI import's;
+- a legacy file after `module` files stays legacy;
+- imported docs and ranges must load, CLI and compile, module and legacy, when the tree ships
+  `.olean.server`.
+
+The legacy `decide` gap prints as a note. Calibrated on 0041:
+- every `module` case fails there ("Unknown identifier `Lean.Name`/`Nat`/`Lean.Expr`");
+- the public scope is 0 against the CLI's 133,315;
+- no docs load.
+
+The resident FileWorker and snapshot-loaded paths are not in this gate (no snapshot bake). Natively,
+a legacy environment saved and read back self-contained keeps `header.modules`/`moduleData` and
+rebuilds the same map. QED64 adds module cases to its corpus at the [Q] re-pair.
