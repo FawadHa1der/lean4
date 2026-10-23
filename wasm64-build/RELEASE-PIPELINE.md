@@ -164,8 +164,11 @@ bake prints them); `LEAN_VERSION` in `build-from-source.sh` is bumped.
 
 A fix that touches the runtime but not what the packs contain (v4.34.0:
 patch 0034) is built in its own dir (`QED64_BUILD_DIR=<K'> wasm64-build/build.sh`
-from a clean, committed tree — it then records `BUILT-COMMIT`; warm ccache; a
-change to `Environment.lean` re-elaborates the whole stdlib, ~1 h), gated
+from a clean, committed tree — it then records `BUILT-COMMIT`; warm ccache. Since
+v4.35 the stage1 stdlib build rebuilds a module's dependents only when its exported
+interface changes: 0042's `Environment.lean` change, private bodies only, rebuilt 126
+of 5,116 steps in 5 min; a changed exported signature still re-elaborates its
+dependents, up to ~1 h), gated
 (`import-release.sh gate-dir <K'>`, which writes `GATE-PASSED`; the gate also
 asks the environment for its own facts: `isModule`, default privacy, meta
 attributes), released by reference of the release whose packs it keeps

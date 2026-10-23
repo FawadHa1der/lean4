@@ -981,9 +981,9 @@ into its caller: it fails on the 0040 binary (`lean_apply_16`, `lean_apply_m`) a
 ## Upstream import: Lean v4.35.0 (branch `import/v4.35.0`)
 
 The line's base moves from v4.34.0 to the `v4.35.0` tag by a merge (`3c0f24c445`), with the
-procedure of `RELEASE-PIPELINE.md`. The line is master-based. Its merge base with v4.35.0 is master
-#14729, and the v4.34.0 release-branch backports it carried (#14788, #14791, #14833, #14838,
-#14849, #14477, #14938, #15104) arrive as their master originals.
+procedure of `RELEASE-PIPELINE.md`. The line is master-based. Its merge base with v4.35.0 is
+master PR 14729, and the v4.34.0 release-branch backports it carried (PRs 14788, 14791, 14833,
+14838, 14849, 14477, 14938, 15104) arrive as their master originals.
 - **Conflict resolutions** are in the merge commit's message:
   - 11 upstream-only files taken from v4.35.0, among them `Server/InfoUtils.lean`, which drops
     backport #15104;
@@ -1006,7 +1006,7 @@ procedure of `RELEASE-PIPELINE.md`. The line is master-based. Its merge base wit
   - #15159/#15391: library-suggestion symbol frequencies are now computed on first use, over all
     imported theorems.
 
-## 0042 — wasm: `module` files on a shared environment see every loaded module publicly; imports at `.server`
+## 0042 — wasm: `module` files on a shared environment see every loaded module publicly; imports at `.server` (b081e7c041)
 
 **The bug (pre-existing, live on 53cb11e).** wasmCompile's cache and every snapshot (the resident
 registry) import once, as for a legacy file (`isModule := false`). 0034's `setIsModule` then gives
