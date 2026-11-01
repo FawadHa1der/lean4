@@ -477,6 +477,9 @@ test("gate: block 7's inputs are refused before any child runs when given but un
   write(path.join(lib, "Mathlib", "Basic", "Real", "Basic.olean.server"), Buffer.alloc(8));
   refused(["--mathlib-lib", lib], /is not paired with --artifact: its Init\/Prelude\.olean is missing/);
   refused(["--mathlib-lib", lib, "--resident-snapdir", snaps], /^gate: unknown argument --resident-snapdir$/m);
+  refused(["--mathlib-lib", ""], /^gate: --mathlib-lib needs a value$/m);
+  refused(["--resident-probe"], /^gate: --resident-probe needs a value$/m);
+  refused(["--resident-probe", "--mathlib-lib", lib], /^gate: --resident-probe needs a value$/m);
   write(path.join(lib, "Init", "Prelude.olean"), Buffer.from("another build's prelude"));
   refused(["--mathlib-lib", lib], /is not paired with --artifact: its Init\/Prelude\.olean differs/);
 });
@@ -538,6 +541,7 @@ test("gate: block 7's resident facts read the FileWorker's dump lines (resident-
     '  const d = (severity, l, data) => console.log(JSON.stringify({ caption: "", severity, pos: { line: l, column: 0 }, endPos: { line: l, column: 1 }, data }));',
     '  d("information", line(/^#print plainDef/), `${mod ? "private " : ""}def plainDef : Nat :=\\n1`);',
     '  if (mod) d("error", line(/^@\\[app_unexpander/), "Cannot add attribute: must be marked as `meta`");',
+    '  if (!process.env.L4W_NOT_REACHED) d("information", line(/-- R10:reached/), "Nat : Type");',
     '  console.log(`compile: tag=0 elapsed=1ms errors=${mod ? 1 : 0}`);',
     "}",
     'console.log("RESIDENT PROBE PASS " + JSON.stringify({ ok: true, why: "fake", diagnostics: 1, frames: 2, nonFrameStdoutBytes: 0, wallMs: 3, argv: ["--worker"] }));',
@@ -545,7 +549,7 @@ test("gate: block 7's resident facts read the FileWorker's dump lines (resident-
   const r = run("gate.mjs", ["--artifact", a, "--resident-probe", resident], { env: { ...process.env, L4W_TEST_LOG: log }, timeout: 120_000 });
   assert.equal(r.status, 1, r.stdout + r.stderr); // a fake runtime fails the other checks
   for (const re of [
-    /^ ok {3}\[R10\] resident cell · parity-legacy-init: the resident FileWorker settled — 1 diagnostics$/m,
+    /^ ok {3}\[R10\] resident cell · parity-legacy-init: the resident FileWorker settled — 2 diagnostics$/m,
     /^ ok {3}\[R10\] resident · parity-legacy-init · plainPrivate = false \(stock, editor level false\) — false$/m,
     /^ ok {3}\[R10\] resident · parity-legacy-init · importedDocs = true /m,
     /^ ok {3}\[R10\] resident · parity-legacy-init · attrUse = true /m,
@@ -561,4 +565,9 @@ test("gate: block 7's resident facts read the FileWorker's dump lines (resident-
     assert.equal(c[c.indexOf("--snapshots") + 1], "init");
     assert.ok(c.includes("--dump-messages"));
   }
+  // a document not elaborated to its last line (no message on `-- R10:reached`) yields no facts at all,
+  // never facts that hold because a line has no error
+  const n = run("gate.mjs", ["--artifact", a, "--resident-probe", resident], { env: { ...process.env, L4W_TEST_LOG: log, L4W_NOT_REACHED: "1" }, timeout: 120_000 });
+  assert.match(n.stdout, /^FAIL {2}\[R10\] resident · parity-module-init · publicUse = true \(stock, editor level true\) — no result$/m);
+  assert.match(n.stdout, /^FAIL {2}\[R10\] resident · parity-legacy-init · attrUse = true \(stock, editor level true\) — no result$/m);
 });

@@ -64,6 +64,11 @@ for (let i = 2; i < process.argv.length; i += 2) {
     console.error(`gate: unknown argument ${a}\nusage: gate.mjs --artifact <dir> [--mathlib-lib <dir>] [--resident-probe <file> [--resident-snap-dir <dir>]]`);
     process.exit(2);
   }
+  const v = process.argv[i + 1];
+  if (v === undefined || v === "" || v.startsWith("--")) {
+    console.error(`gate: ${a} needs a value`);
+    process.exit(2);
+  }
 }
 if (!arg("artifact")) {
   console.error("usage: gate.mjs --artifact <dir>   (bin/lean.js, bin/lean.wasm, lib/lean)");
@@ -704,7 +709,7 @@ console.log(`note  [0042] legacy \`decide\` on Nat.toDigits (stock passes at .pr
 // -DElab.inServer=true, Mathlib 56a00585 from stock-built oleans), never against this runtime's CLI,
 // which shares the fork's import level. A fact passes on its stock value unless R10_ALLOW names the
 // deviation; then only the listed value passes, so a deviation that disappears fails until its entry
-// goes. The cells: exact (block 6's run: an environment of wasmCompile's cache imported for another
+// goes (a `>= stock` bound, the public scope, also passes the stock value). The cells: exact (block 6's run: an environment of wasmCompile's cache imported for another
 // file), snapshot (an init.snap this gate bakes itself and loads as the browser does, an EMPTY library
 // mounted, so every compile is served by the snapshot), and from the optional inputs Mathlib
 // (--mathlib-lib: a real `import Mathlib.…` header through lean_wasm_compile), resident
@@ -743,19 +748,25 @@ const R10_MATHLIB = ["parity-legacy-mathlib", "parity-module-mathlib", "parity-m
  *  the privacy its `#print plainDef` shows; `doc`, no "does not have a doc string" warning there (the
  *  check `@[inherit_doc]` runs in a legacy file); any other fact, no error on that line. */
 function r10FactsOf(name, c) {
-  if (!c) return null;
+  if (!c || (c.tag ?? 0) !== 0) return null; // a lean_wasm_compile that threw elaborated nothing
+  const lines = readProbe(`${name}.lean`).split("\n");
+  const on = (i) => c.diags.filter((d) => d.pos?.line === i + 1);
+  // Every probe ends with `#check Nat  -- R10:reached`. Without its message the file was not elaborated
+  // to its end (a refused header, a lost compile), and a mark judged by the absence of an error would
+  // hold vacuously: no facts at all.
+  const reached = lines.findIndex((l) => /-- R10:reached\s*$/.test(l));
+  if (reached < 0 || !on(reached).some((d) => d.severity === "information")) return null;
   const facts = {};
   for (const [, k, v] of (/PARITY ([^\n]*)/.exec(textOf(c))?.[1] ?? "").matchAll(/(\w+)=(\S+)/g))
     facts[k] = /^\d+$/.test(v) ? Number(v) : v === "true" ? true : v === "false" ? false : v;
-  readProbe(`${name}.lean`).split("\n").forEach((l, i) => {
+  lines.forEach((l, i) => {
     const mark = /-- R10:(\w+)\s*$/.exec(l)?.[1];
-    if (!mark) return;
-    const on = c.diags.filter((d) => d.pos?.line === i + 1);
+    if (!mark || mark === "reached") return;
     if (mark === "print") {
-      const p = on.find((d) => d.severity === "information");
+      const p = on(i).find((d) => d.severity === "information");
       if (p) facts.plainPrivate = String(p.data).startsWith("private ");
-    } else if (mark === "doc") facts.importedDocs = !on.some((d) => /does not have a doc string/.test(String(d.data)));
-    else facts[mark] = !on.some((d) => d.severity === "error");
+    } else if (mark === "doc") facts.importedDocs = !on(i).some((d) => /does not have a doc string/.test(String(d.data)));
+    else facts[mark] = !on(i).some((d) => d.severity === "error");
   });
   return facts;
 }
@@ -763,7 +774,7 @@ function r10FactsOf(name, c) {
 // resident FileWorker runs in the server, where a `module` file's imports carry their docstrings.
 const R10_EDITOR = { "parity-module-lean": { importedDocs: true }, "parity-module-mathlib": { importedDocs: true, realDocs: true } };
 // The covered cell's environment is the umbrella's, with more modules than the header imports.
-const R10_COVERED = { modules: [2388, "covered", atLeast(2388)] };
+const R10_COVERED = { modules: [2388, "covered", atLeast(2389)] }; // the umbrella's, more than the header's
 /** One gate line per fact of probe `name` in `cell`; every pass of its compile must hold it.
  *  `editor`: judge against stock's editor level; `extra`: facts this cell adds. */
 function judgeR10(cell, name, caseOf, { passes = [1, 2], editor = false, extra = {} } = {}) {
@@ -875,7 +886,7 @@ try {
 
   // THE RESIDENT FILEWORKER: QED64's Init probe on the gate's init.snap (its --snap-dir names init.snap)
   if (!residentProbe) {
-    console.log("note  [R10] resident FileWorker: skipped (no --resident-probe <QED64 checkout>/pipeline/snapshot/resident-probe.mjs; QED64's adopt-release passes it)");
+    console.log("note  [R10] resident FileWorker: skipped (no --resident-probe <QED64 checkout>/pipeline/snapshot/resident-probe.mjs; an adoption passes it to run this cell)");
   } else if (!baked) {
     gate(false, "[R10] resident FileWorker", "not run: no init.snap (the bake above)");
   } else {
@@ -890,7 +901,7 @@ try {
 
   // THE MATHLIB-HEADER CELL: a real `import Mathlib.…` header through lean_wasm_compile, --mathlib-lib the only library
   if (!mathlibLib) {
-    console.log("note  [R10] Mathlib-header cell: skipped (no --mathlib-lib <a complete olean tree paired with --artifact>; QED64's adopt-release passes $W/lib-tree-slim)");
+    console.log("note  [R10] Mathlib-header cell: skipped (no --mathlib-lib <a complete olean tree paired with --artifact>; an adoption passes its lib-tree-slim to run this cell)");
   } else {
     const ml = await r10Timed("Mathlib cell", () => r10Run("Mathlib", R10_MATHLIB, ["--lib", mathlibLib], 1_200_000));
     for (const n of R10_MATHLIB) judgeR10("Mathlib", n, ml.caseOf);

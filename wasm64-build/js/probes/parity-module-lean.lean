@@ -13,3 +13,4 @@ open Lean Elab Command in
   let publicScope : Nat := env.constants.map₁.fold (init := 0) fun n c _ =>
     if (pub.find? c (skipRealize := true)).isSome then n + 1 else n
   logInfo m!"PARITY isModule={env.header.isModule} plainPrivate={plainPrivate} importedDocs={doc.isSome} publicScope={publicScope}"
+#check Nat  -- R10:reached

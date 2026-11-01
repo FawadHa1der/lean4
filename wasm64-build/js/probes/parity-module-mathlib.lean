@@ -1,6 +1,6 @@
 module
 public import Mathlib.Basic.Real.Basic
--- R10 stock parity (gate block 7): a `module` file, a real Mathlib header (the Mathlib cell).
+-- R10 stock parity (gate block 7): a `module` file, a real Mathlib header (the Mathlib and covered cells).
 -- HARDENING #80 on 53cb11e: "Unknown constant `Real`".
 def plainDef := 1
 public def probeReal : ℝ := 1  -- R10:publicUse
@@ -14,3 +14,4 @@ open Lean Elab Command in
   let publicScope : Nat := env.constants.map₁.fold (init := 0) fun n c _ =>
     if (pub.find? c (skipRealize := true)).isSome then n + 1 else n
   logInfo m!"PARITY isModule={env.header.isModule} plainPrivate={plainPrivate} importedDocs={doc.isSome} realDocs={realDoc.isSome} publicScope={publicScope} modules={env.header.moduleNames.size}"
+#check Nat  -- R10:reached
