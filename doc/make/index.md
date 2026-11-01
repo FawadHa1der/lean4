@@ -77,8 +77,3 @@ Troubleshooting
 ---------------
 
 * Call `make` with an additional `VERBOSE=1` argument to print executed commands.
-
-Browser sidecar builds
-----------------------
-
-* [Mathlib manifold dependency closure](browser-mathlib-manifold-closure.md)

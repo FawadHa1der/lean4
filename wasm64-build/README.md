@@ -36,8 +36,8 @@ JavaScript contract and its raw export names are minified, so a
 itself). `LEAN_WASM_SYMTAB_TRACE` (EMBED-RUNTIME.md §3.1) prints the IR
 interpreter's native-symbol lookups, e.g. `LEAN_WASM_SYMTAB_TRACE=miss:
 lean4-wasm64 run …` for every name it did not find natively.
-`stack-margin.mjs` measures, through the host lock, the smallest pthread stack
-each deep-recursion proof needs on a runtime (to compare runtimes).
+`stack-margin.mjs`, which measured the stack margins `PATCHES.md` records, left
+the repository on 2026-11-01 (its last version is in git at `66e4f0c431`).
 
 Outputs: `build/stage1/bin/lean.{js,wasm}` (the browser runtime) and its
 `lib/lean`. `native64.sh` builds the same commit as a native linux compiler

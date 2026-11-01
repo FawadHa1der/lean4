@@ -694,8 +694,9 @@ made), G3 (no Init/Std/Lean initializer missed in the legacy and `module` runs, 
 (`Lean.versionString` and `Lean.Meta.simpExtension` read from their cells), G5 (a function calling
 plain core functions computes its value; whether `Lean.Name.append` ran native is reported, and
 required since 0039b adds the plain functions), G6 (timing, informational), G7 (no lookup in any
-run missed a `lean_*` name; with `--baseline-exports <r3's lean.wasm>`, none missed a name r3
-exported). `js/probes/symtab.lean` rides on the legacy run. `js/exports-audit.mjs` lists what
+run missed a `lean_*` name; with `--baseline-exports <r3's lean.wasm>` (an option
+removed 2026-11-01), none missed a name r3 exported). `js/probes/symtab.lean` rides on the
+legacy run. `js/exports-audit.mjs` lists what
 consumer trees touch against the contract and S6, reading a chain such as `globalThis.Module.X` at
 every link: over lean4game (client, served worker, relay) and the widgets showcase it reports
 every name covered (`ENVIRONMENT_IS_PTHREAD`, the showcase's typeof-guarded UX probes, is a test

@@ -1,8 +1,8 @@
 // Kernel patch 0039, without a runtime: the generator of the native-symbol table and the export
 // list (../gen-exports.py, on synthetic C, with a fake nm), the link check (../check-link.py), the
-// static contract checks the gate runs (runtime-contract.mjs, on synthetic glue and wasm bytes), the
-// consumer audit (exports-audit.mjs, on a fixture tree) and the stack-margin bisection
-// (../stack-margin.mjs, on a fake runtime). The Python tools need python3; their tests skip without it.
+// static contract checks the gate runs (runtime-contract.mjs, on synthetic glue and wasm bytes) and the
+// consumer audit (exports-audit.mjs, on a fixture tree). The Python tools need python3; their tests
+// skip without it.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -545,36 +545,4 @@ test("exports-audit: every runtime name a consumer touches is in the contract or
     assert.doesNotMatch(r.stderr, /\n\s+at /); // a usage error, not a stack trace
   }
   assert.equal(run("--help").status, 0);
-});
-
-// ---------- ../stack-margin.mjs ----------
-
-test("stack-margin.mjs bisects the pthread stack each probe survives and passes with (a fake runtime)", () => {
-  const art = tmp();
-  // the fake: Lean's error below 0.6 MiB, a RangeError below 0.3 (Fin 40); an overflow ends the run at once
-  write(path.join(art, "bin", "lean.js"), [
-    "const mb = Number(process.env.LEAN4_WASM64_PTHREAD_STACK_MB);",
-    "const work = process.argv[process.argv.indexOf('--work') + 1];",
-    "const src = require('node:fs').readFileSync(work + '/input.lean', 'utf8');",
-    "if (!src.includes('Fin 40')) throw new Error('unexpected probe');",
-    "if (mb < 0.3) console.log('Uncaught RangeError: Maximum call stack size exceeded');",
-    "else { if (mb < 0.6) console.log('/work/input.lean:1:0: error: maximum recursion depth has been reached'); console.log('MARGIN DONE'); }",
-    "setInterval(() => {}, 1000);", ""].join("\n"));
-  write(path.join(art, "bin", "lean.wasm"), "fake");
-  write(path.join(art, "bin", "package.json"), '{"type":"commonjs"}');
-  fs.mkdirSync(path.join(art, "lib", "lean"), { recursive: true });
-  const json = path.join(art, "margins.json");
-  const run = (...args) => spawnSync(process.execPath, [path.join(BUILD, "stack-margin.mjs"), "--artifact", art, ...args], { encoding: "utf8", timeout: 120_000 });
-  const r = run("--probes", "fin", "--lo", "0.2", "--hi", "1", "--step", "0.05", "--timeout-ms", "20000", "--json", json, "--no-lock-check");
-  assert.equal(r.status, 0, r.stdout + r.stderr);
-  const fin = JSON.parse(fs.readFileSync(json, "utf8")).results.fin;
-  assert.ok(fin.survives.mb >= 0.3 && fin.survives.mb <= 0.35, JSON.stringify(fin.survives));
-  assert.ok(fin.passes.mb >= 0.6 && fin.passes.mb <= 0.65, JSON.stringify(fin.passes));
-  assert.deepEqual([...new Set(fin.trials.map((t) => t.outcome))].sort(), ["guard", "ok", "overflow"]);
-  assert.match(r.stdout, /fin: survives from 0\.3\d* MiB, passes from 0\.6\d* MiB/);
-  // outside the host lock it refuses to start; a proof that never passes is exit 1
-  assert.equal(run("--probes", "fin").status, 2);
-  const never = run("--probes", "fin", "--lo", "0.1", "--hi", "0.5", "--step", "0.2", "--timeout-ms", "20000", "--no-lock-check");
-  assert.equal(never.status, 1, never.stdout);
-  assert.match(never.stdout, /passes from more than 0\.5 MiB/);
 });

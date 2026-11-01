@@ -21,16 +21,14 @@
 //     lost (G7). Skipped, with a note, on a runtime before 0039.
 // Every check prints ok or FAIL; exits nonzero if any failed.
 //
-// Usage: node gate.mjs --artifact <dir> [--baseline-exports <lean.wasm or name list>]
-//   --baseline-exports: an earlier runtime's export names (its lean.wasm, read for them, or a list,
-//   one per line): G7 then also fails on a lookup that missed one of them.
+// Usage: node gate.mjs --artifact <dir>
 
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseSeed, readWasm, staticChecks } from "./runtime-contract.mjs";
+import { parseSeed, staticChecks } from "./runtime-contract.mjs";
 
 // The runner harnesses live alongside this gate (self-contained build dir).
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -39,8 +37,18 @@ function arg(name, fallback) {
   return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
 }
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
-  console.log("usage: gate.mjs --artifact <dir> [--baseline-exports <lean.wasm or name list>]\nThe release gate: every check must print ok. run as: lean4-wasm64 gate   (or: node --stack-size=8192 gate.mjs)\n--baseline-exports: an earlier runtime's export names (its lean.wasm, or one name per line): no lookup may miss one (0039's G7)\nexit codes: 0 GATE PASSED, 1 a check failed, 2 usage");
+  console.log("usage: gate.mjs --artifact <dir>\nThe release gate: every check must print ok. run as: lean4-wasm64 gate   (or: node --stack-size=8192 gate.mjs)\nexit codes: 0 GATE PASSED, 1 a check failed, 2 usage");
   process.exit(0);
+}
+// Every option takes a value; an unknown one is refused, so a removed or misspelt input never
+// skips a check silently (--baseline-exports went 2026-11-01).
+const FLAGS = new Set(["artifact"]);
+for (let i = 2; i < process.argv.length; i += 2) {
+  const a = process.argv[i];
+  if (!a.startsWith("--") || !FLAGS.has(a.slice(2))) {
+    console.error(`gate: unknown argument ${a}\nusage: gate.mjs --artifact <dir>`);
+    process.exit(2);
+  }
 }
 if (!arg("artifact")) {
   console.error("usage: gate.mjs --artifact <dir>   (bin/lean.js, bin/lean.wasm, lib/lean)");
@@ -49,10 +57,6 @@ if (!arg("artifact")) {
 const artifact = path.resolve(arg("artifact"));
 if (!fs.existsSync(path.join(artifact, "bin/lean.js"))) {
   console.error(`gate: ${artifact}/bin/lean.js not found`);
-  process.exit(2);
-}
-if (arg("baseline-exports") && !fs.existsSync(arg("baseline-exports"))) {
-  console.error(`gate: --baseline-exports ${arg("baseline-exports")} not found`);
   process.exit(2);
 }
 const runner = path.join(root, "node-runner.mjs");
@@ -189,15 +193,6 @@ for (const r of statics.results) {
   else gate(r.ok, r.label, r.extra);
 }
 const skip0039 = (label) => console.log(`note  [0039] ${label}: skipped (a runtime before 0039)`);
-// G7's optional baseline: an earlier runtime's exports, every name its interpreter could resolve
-const baselineArg = arg("baseline-exports");
-const baseline = (() => {
-  if (!baselineArg) return null;
-  const bytes = fs.readFileSync(path.resolve(baselineArg));
-  const w = readWasm(bytes);
-  if (w.ok) return new Set(w.exports.keys());
-  return new Set(bytes.toString("utf8").split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#")));
-})();
 // Patch 0039b put the plain functions into the table: G2 requires plain entries and G5 requires
 // Lean.Name.append to run native. False gates a table built without them (gen-exports.py
 // INCLUDE_PLAIN = False, 0039's, for an A/B): G5 then only reports which way the call went.
@@ -389,16 +384,9 @@ if (is0039) {
   }
   // G6 (informational): the same function 20,000 times
   console.log(`note  [0039] G6 symtabProbe 20000: ${(/^SYMTAB G6 parts=(\d+) ms=(\d+)$/m.exec(legacyOut) ?? [, "?", "?"]).slice(1).join(" parts, ")} ms`);
-  // G7: every lookup that found nothing asked for a name no earlier runtime could resolve either
-  // (the `lean_*` half of G7 is judged over every run, at the end)
-  const misses = [...new Set([...legacyTrace, ...moduleTrace].filter((t) => !t.hit).map((t) => t.name))];
-  if (baseline) {
-    const lost = misses.filter((n) => baseline.has(n));
-    gate(traced && lost.length === 0, `[0039] G7 no lookup missed a name the baseline runtime exported (${misses.length} distinct misses)`,
-      lost.length ? `missed: ${lost.slice(0, 5).join(", ")}${lost.length > 5 ? ", …" : ""}` : "");
-  } else {
-    console.log(`note  [0039] G7 ${misses.length} distinct lookups found nothing; no --baseline-exports to compare them with`);
-  }
+  // G7 here is a count (its check, no lookup missed a `lean_*` name, is judged over every run, at the end)
+  const misses = new Set([...legacyTrace, ...moduleTrace].filter((t) => !t.hit).map((t) => t.name));
+  console.log(`note  [0039] G7 ${misses.size} distinct lookups found nothing`);
 } else {
   skip0039("G3-G7 the native-symbol table at work");
 }

@@ -255,28 +255,6 @@ jobs:
             export CCACHE_MAXSIZE=1600M
           fi
           time make -C build $TARGET_STAGE -j$NPROC
-      - name: Pack wasm link kit
-        if: matrix.wasm
-        run: |
-          # Everything the final `bin/lean.js` link consumes, so link-flag
-          # experiments can relink locally (emsdk runs natively on any host)
-          # instead of paying a full CI cycle. Consumed by
-          # docker-wasm/relink-local.sh.
-          mkdir -p linkkit
-          find build -name '*.a' -path '*stage1*' -exec cp {} linkkit/ \;
-          find build -name 'libuv*.a' -not -path '*stage1*' -exec cp {} linkkit/ \; || true
-          cp build/stage0/stdlib.make linkkit/stdlib.make.txt || true
-          cp build/stage0/leanc.sh linkkit/leanc.sh.txt || true
-          cp src/emscripten-exports.txt linkkit/ || true
-          git rev-parse HEAD > linkkit/githash.txt
-          ls -la linkkit/
-          tar cf - linkkit | zstd -T0 --no-progress -o linkkit.tar.zst
-      - uses: actions/upload-artifact@v7
-        if: matrix.wasm
-        with:
-          name: linkkit-${{ matrix.name }}
-          path: linkkit.tar.zst
-          retention-days: 30
       - name: Dump wasm link configuration on failure
         if: failure() && matrix.wasm
         run: |
