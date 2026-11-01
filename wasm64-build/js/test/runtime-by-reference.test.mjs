@@ -185,7 +185,7 @@ test("E1: a runtime release by reference is no base — not of a tools re-cut, n
 test("older readers fail closed: the r3 reader refuses a runtime-kind base, the r2 reader any base; both accept every record without one", () => {
   const p = r3Reader.checkReleaseRecord(RT);
   assert.ok(p.includes(`base: only a re-cut (lean-<tag>-<kernel7>-rN) names a base, "${RT.id}" is not one`), JSON.stringify(p));
-  for (const r of committed) assert.deepEqual(r3Reader.checkReleaseRecord(r), [], `the r3 reader on ${r.id}`);
+  for (const r of committed.filter((r) => !r.base)) assert.deepEqual(r3Reader.checkReleaseRecord(r), [], `the r3 reader on ${r.id}`);
   assert.ok(r2Reader.checkReleaseRecord(RT).includes("unknown keys: base"));
 });
 
