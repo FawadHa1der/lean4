@@ -320,8 +320,8 @@ dirs, and two kinds are kept:
   the tag, a tools re-cut included, takes native64, the lists and the pack
   commit check from it (consumers also build against its `native/` and
   `mathlib/` trees);
-- a released runtime's build dir, while an app pins it (a tools re-cut takes
-  `--runtime` it).
+- a released runtime's build dir, while an app pins it (a tools re-cut takes it
+  as `--runtime`: its gated `lean.wasm`, `GATE-PASSED` and `lib/lean`).
 
 Any other build directory can be reclaimed once its runtime is either released
 or superseded and no app pins it; R2 objects of a release are
@@ -356,6 +356,6 @@ caused an outage.
 Reclaiming a released runtime's build dir has one cost: a tools-only fix of
 that runtime is then a rebuild, with a new build id that apps re-pair against,
 not a re-cut by value. Reclaiming a tag's import build dir ends every by-value
-release of that tag; the fallback is a full import. The two runtimes released by
-reference cannot be re-cut by reference either (the record rules refuse an
-`-r<N>` of a runtime release by reference).
+release of that tag; the fallback is a full import. The runtime released by reference
+(`lean-v4.34.0-53cb11e`) cannot be re-cut by reference either (the record rules
+refuse an `-r<N>` of a runtime release by reference).
