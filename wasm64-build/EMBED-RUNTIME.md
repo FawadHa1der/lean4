@@ -402,6 +402,16 @@ environment importing `QED64.Essential` covers `Mathlib`, `Mathlib.Tactic`,
 "Load exact imports" action; the `$/qed64/headerStatus` notification name; and
 the `QED64_ALLOW_LEGACY_IMPORTS` variable name.
 
+**Frozen since 2026-11-01** (architecture review K3). The umbrella's name and its four aliases
+(`src/Lean/Language/Lean.lean`, `lookupPrebuiltEnv`: an environment whose closure holds
+`QED64.Essential` covers `Mathlib`, `Mathlib.Tactic`, `Batteries` and `MIL.Common`) change only
+with a `PATCHES.md` entry. Two changes are parked until an embedder other than QED64 needs them or
+a new alias is requested: taking the alias list as data, and renaming `$/qed64/headerStatus` (its
+readers bind to the method name, so a rename needs a window that serves both names). The next
+runtime release makes the refused-header text generic, no longer naming "Load exact imports" but
+keeping the substring "are not loaded in this session", which consumers match, and fixes
+`headerStatus.version`. Neither needs a protocol bump.
+
 ## Compatibility
 
 Within a release line, a later patch keeps every [RT] entry point and its

@@ -241,6 +241,10 @@ else refused with one header diagnostic; snapshot loads publish into that one
 registry. `$/qed64/headerStatus` reports each resolution. Exports are generated
 from the build's own C (`gen-exports.py`). QED64's `minKernelPatch` floor.
 
+The umbrella aliases (`Mathlib`, `Mathlib.Tactic`, `Batteries`, `MIL.Common` under
+`QED64.Essential`, `src/Lean/Language/Lean.lean`) are frozen since 2026-11-01; taking them as
+data and renaming `$/qed64/headerStatus` are parked (EMBED-RUNTIME.md §7).
+
 ## 0033 — wasm: retire the host-pumped LSP entry points (37c3fc3adf)
 
 Deletes `lean_wasm_lsp_init` / `lean_wasm_lsp_send` and the pump session code
