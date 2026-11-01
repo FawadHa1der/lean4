@@ -590,6 +590,11 @@ Also left out: `lean_wasm_compile` elaborating with `Elab.async` on unless the f
 as native `lean` does. That changes a default, with thread and stack effects of its own, and
 needs a decision of its own.
 
+**2026-11-01:** the user closed the pool ceiling as "no" (architecture review D14), and any kernel
+thread cap with it, withdrawing the 2026-10-12 approval of a soft ceiling with shrink. The runtime
+has neither, and none is planned. The bounds are QED64's: HARDENING #59's pool hold and in-flight
+request cap together, #69's thread budget, and `-DElab.async=false` (#70).
+
 Gate, folded into the existing runs (the gate still boots 11 runtimes; on a runtime before 0038
 every 0038 check is skipped with a note): the glue's pool loop reads the library's variable and the
 three counters are exported (static); `LEAN4_WASM64_PTHREAD_POOL` -3, 4 and abc give pools of 0, 4
