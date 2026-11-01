@@ -294,7 +294,7 @@ wakes futex waiters on `READ` after consuming. QED64 uses a 64 MiB ring and
 refuses frames over half of it; it never sets `CLOSED` (a session ends with
 its Worker).
 
-## 5. stdout, the mailbox and exit
+## 5. stdout, stderr, the mailbox and exit
 
 - **stdout** [RT/GLUE]: every write from a pthread is a synchronous proxied
   `fd_write` to the main runtime thread, then a line-buffered TTY (`print` per
@@ -326,6 +326,25 @@ its Worker).
   `proxiedJSCallArgs`, `EXITSTATUS`, `runtimeKeepaliveCounter`, `runtimeExited`,
   `ENVIRONMENT_IS_PTHREAD`) are reported, not required. `js/exports-audit.mjs` lists what a
   consumer tree touches against this list and the export contract.
+
+**stderr: the lines hosts parse (the progress contract)** [RT]. The runtime prints these lines
+itself, and consumers parse them, so their text is frozen: a runtime that changes one is a
+breaking change for the consumers named, made only with a `PATCHES.md` entry and after they are
+told. Lean prints the first four with `IO.eprintln` (stderr; in a browser, `Module.printErr`,
+§3.1, one line each); the compactor text is part of an IO error's message.
+
+| Line, as printed | Printed by (source text) | When | Parsed by |
+|---|---|---|---|
+| `[DEBUG:PROGRESS] Loading <n> modules...` | `src/Lean/Environment.lean`, `finalizeImport`: `s!"[DEBUG:PROGRESS] Loading {modules.size} modules..."` (the base's line, on stderr since 0031) | once per olean import | the showcase's `scripts/judge-bake.mjs` J2 (`Loading (\d+) modules`: exactly one, `n` the staged tree's module count) |
+| `[DEBUG:PROGRESS] <i>/<n>: <module>` | the same: `s!"[DEBUG:PROGRESS] {i + 1}/{modules.size}: {mod.module}"` | modules 1, 51, 101, … and the last | QED64's worker (`public/workers/lean.worker.js`, `/\[DEBUG:PROGRESS\]\s*(\d+)\/(\d+)/`: import progress); `judge-bake.mjs` J2 (an `n/n:` line) |
+| `[WASM INIT] <i>/<n> <module>` | `src/Lean/Shell.lean`, `wasmLoadSnapshotMem` (`lean_wasm_load_snapshot_mem`, 0014): `s!"[WASM INIT] {i}/{total} {env.header.modules[modIdx].module}"` | per module of the `[init]` replay (flags bit 0), during that blocking call | QED64's worker (`/^\[WASM INIT\] (\d+)\/(\d+) (.*)$/`: live progress of a snapshot load) |
+| `[WASM DEBUG] wasmLoadSnapshotMem: cached env for #[<imports>]`, and `[WASM DEBUG] wasmLoadSnapshot: cached env for #[<imports>]` | `src/Lean/Shell.lean`: `s!"[WASM DEBUG] wasmLoadSnapshotMem: cached env for {key}"` (0013) and `s!"[WASM DEBUG] wasmLoadSnapshot: cached env for {key}"` (the base) | at the end of each successful snapshot load | the showcase's `scripts/headless/exact-header.mjs` (`/cached env for #\[([^\]]*)\]/` on the log of QED64's `snapshot-probe.mjs`, which echoes `[WASM DEBUG]` lines: the key the snapshot seeded) and `scripts/headless/wasm-lsp.mjs` |
+| `object compactor: out of memory growing the region buffer to …`, inside the save's IO error `failed to write '<file>': …` | `src/runtime/compact.cpp`, `object_compactor::alloc` (0011): `"object compactor: out of memory growing the region buffer to " << … << " MB (" << … << " MB used); " << "set LEAN_COMPACTOR_RESERVE to reserve the buffer up front"`; the IO error is `lean_compacted_region_save`'s (`src/library/module.cpp`) | when a snapshot save outgrows its region buffer | the showcase's `scripts/bake.sh` (on that substring it rebakes once with 512 MiB more `--reserve`) and `judge-bake.mjs` J1 (any `object compactor:` line fails a bake) |
+
+QED64 freezes the same list (its `docs/CLI-CONTRACT.md`, "Toolchain lines consumers parse"). The
+`[WASM DEBUG]` prefix does not make the cached-env line removable. Every other `[WASM DEBUG]`,
+`[WASM PROFILE]` and `[WASM LSP]` line is a diagnostic: consumers only filter or log them (the gate
+strips them, with these, before it judges Lean's output), and they may change or go.
 
 ## 6. Placement and engines
 

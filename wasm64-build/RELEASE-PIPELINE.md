@@ -16,8 +16,8 @@ owns the lanes inside its own repository. This file is the map and the order.
  [K6] mathlib  Mathlib@vX.Y.Z with [K5], essential tree  mathlib-tree.sh            hours
  [K7] release  stage + record + verify lean-vX.Y.Z-<k7>  import-release.sh release  ~20 min (RELEASE.md)
                        ▼
- [Q]  QED64        packs → manifests → umbrella → bump-chain.sh stage-artifact → test pyramid → promote
- [G]  lean4game    closure sync → build-from-source.sh (core,trees,compat,games,bake,bundle) → cypress
+ [Q]  QED64        adopt-release.sh: fetch → umbrella → both bakes → promote (isolated tree) → test pyramid
+ [G]  lean4game    re-pin → build-from-source.sh (preflight,release,trees,games,bake,bundle) → cypress
                        ▼
  [S]  SHIP GATE — run by the repository owner, never by the pipeline:
         import-release.sh publish <id> (record + tag, atomic push, GitHub, R2, each verified),
@@ -41,8 +41,11 @@ release, and the apps need all three at the same version.
 
 `stage0/` is upstream's bootstrap compiler and is never merged: the import
 takes upstream's files and re-applies `stage0-line-edits.patch` (two
-pointer-width gates for a 32-bit native stage0). If that patch stops applying,
-check whether upstream absorbed the gates, then refresh it with
+pointer-width gates for a 32-bit native stage0). They are not needed: this
+line's stage0 is native 64-bit, and each gate changes only a native 32-bit
+build (its Emscripten and 64-bit branches are stock's). The next import drops
+the patch and this step once one build confirms it. Until then, if the patch
+stops applying, check whether upstream absorbed the gates, then refresh it with
 `git diff --text vX.Y.Z HEAD -- stage0 > wasm64-build/stage0-line-edits.patch`.
 
 ## Judgment points (where automation stops)
@@ -129,36 +132,43 @@ link and must not be shared with another build (silent rc-137 OOM kills).
 the wasm64 build's core library (every `.olean*`/`.ir*` compared) — that
 equality is what makes natively compiled Mathlib loadable in the browser.
 
-## QED64 (`wasm64-lean-fable/qed64`) — see its docs/REBUILD.md § 3b
+## QED64 (`wasm64-lean-fable/qed64`) — see its docs/REBUILD.md §3 and §3b
 
 ```sh
-pipeline/release/import-packs.sh <build dir> --lean-version 4.34.0   # --dry-run validates the contract; --from <step> resumes
+pipeline/release/adopt-release.sh --id <lean-vX.Y.Z-hash> --digest sha256:<hex> \
+  --from https://github.com/FawadHa1der/lean4/releases/download/<id>/ \
+  --public <isolated served tree> --rebuild-umbrella      # --dry-run prints the plan
 ```
 
-The lane reads the contract above (`build/stage1`, `BUILT-COMMIT`,
-`mathlib/{essential-tree,essential-modules.txt,MATHLIB-COMMIT}`, optional
-`mathlib/extra-tree`): packs lean-core + mathlib-essential (+ mathlib-game-extra
-into `work/staging/<buildId>/extra/`, never promoted), checks the two packs form
-one import-closed library, unpacks into a fresh tree, regenerates and compiles
-the `QED64.Essential` umbrella with the new runtime, then
-`bump-chain.sh stage-artifact` (gate → chunk → slim trees → both bakes). The
-pyramid runs on the staged pairing with `?profiles=` so it sees the staged
-packs, then KERNEL-PIN (the `BUILT-COMMIT`, which must already be on
-`origin/qed64-wasm64`) and `bump-chain.sh promote`, which moves packs,
-manifests, runtime and snapshots in one step. The promote commit is the
-qed64 commit lean4game syncs to.
+QED64 adopts the published release; it packs and chunks nothing itself (its
+`import-packs.sh` and `bump-chain.sh` are gone). `adopt-release.sh` fetches the
+release pinned by `--id` and `--digest`, checks `kernel.patch` against its
+`minKernelPatch` floor, unpacks the slim trees, regenerates and compiles the
+`QED64.Essential` umbrella with the new runtime (`--rebuild-umbrella`; a
+runtime-only release reuses the served one, `--umbrella`), optionally runs this
+package's gate (`--gate`), bakes both snapshots with its own
+`pipeline/snapshot/bake-snapshot.mjs`, and promotes the staging into the
+isolated served tree. QED64's resident gate then runs on that tree; the
+landing steps (its tracked release record, `embedding/base-tree.json`, the
+manifests) are printed, not performed. The kernel commit must already be on
+`origin/qed64-wasm64`.
 
 ## lean4game (`wasm64-lean4game`) — see its wasm/KERNEL.md
 
 ```sh
-scripts/sync-qed64.sh <qed64 commit>                       # vendored closure must match the runtime's transport
-KERNEL_DIR=<kernel checkout> BUILD_DIR=<build dir> MATHLIB_PACK_DIR=<new pack dir> \
-  wasm/build-from-source.sh --lanes core,trees,compat,games,bake,bundle --verify-snapshots
+wasm/build-from-source.sh --plan                  # every step, nothing run
+wasm/build-from-source.sh --verify-snapshots      # a full run: preflight,release,trees,games,bake,bundle
 ```
 
-`wasm/compat/**` is regenerated from the new Mathlib commit and the new pack's
-module list; `wasm/catalog.json` `expectedRaw` values are re-recorded (the
-bake prints them); `LEAN_VERSION` in `build-from-source.sh` is bumped.
+lean4game pins one published release, as QED64 does: the root `package.json`
+devDependency is the release's own tools tgz, and `wasm/lean4-wasm64-release.json`
+is a byte copy of its `release.json` (the id and digest every fetch is checked
+against; the lanes read the runtime build id, the Lean version and the native
+compiler from it, and `scripts/stage-workers.sh` its `kernel.patch` floor). A
+re-pin changes those two files; the lanes then unpack the release's packs,
+compile the games with its `native64`, bake with QED64's bake and bundle.
+`wasm/catalog.json` `expectedRaw` values are re-recorded for the new pairing
+(the bake prints them).
 
 ## A kernel-only fix after an import
 

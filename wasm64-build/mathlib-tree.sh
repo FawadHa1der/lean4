@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the Mathlib olean tree the two apps ship, with the native64 compiler of
 # this kernel commit (native64.sh), and stage the "essential" selection as one
-# flat olean tree ready for the apps' packer.
+# flat olean tree for the release's packs (below).
 #
 #   wasm64-build/mathlib-tree.sh <tag>          # Mathlib at the SAME tag as Lean, e.g. v4.34.0
 #
@@ -18,9 +18,8 @@
 #   essential-modules.txt, essential-selection.json
 #   extra-tree/, extra-modules.txt, extra-selection.json   (only with MATHLIB_EXTRA_ROOTS: the
 #                        closure of those roots MINUS essential — a second, additive pack)
-# Pack it with the consumer's packer, e.g. qed64:
-#   node pipeline/artifacts/pack.mjs --lib <essential-tree> --id mathlib-essential --out <dir> \
-#        --lean-version <x.y.z> --revision <kernel commit> --roots <MATHLIB_ROOTS, comma separated>
+# The release cuts the packs from these trees (js/pack-set.mjs per js/packs.json, run by
+# stage-release.sh; RELEASE.md); apps take them from the release.
 #
 # No `lake exe cache get`: the community cache holds oleans written by the
 # official compiler (GMP bignums, another platform target); only oleans written

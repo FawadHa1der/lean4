@@ -96,12 +96,14 @@ showcase); a host that breaks one gets a refusal, not a slow page.
 | GitHub Release asset | < 2 GiB each, ≤ 1000 per release |
 | `wrangler r2 object put` | ~300 MiB per object (use rclone for more) |
 
-`lean.js` (~49 MB) and `lean.wasm` (~110 MB) exceed 25 MiB, so both ship as
-16 MiB (16,777,216 B) parts, and so does every pack's gzip transport. Snapshots
-(`.snapz`, up to ~365 MB) are single objects and need an object store or a host
-without a per-file cap; they are a site's product, not part of a toolchain
-release (baked with `lean4-wasm64 bake`, indexed as
-[snapshot-index.md](snapshot-index.md) specifies).
+`lean.wasm` (~106 MB) exceeds 25 MiB, so it ships as 16 MiB (16,777,216 B)
+parts, and so does every pack's gzip transport; `lean.js` (~120 KB since
+`lean-v4.34.0-53cb11e`, ~49 MB before) is chunked the same way, as one part.
+Snapshots (`.snapz`, up to ~365 MB) are single objects and need an object store
+or a host without a per-file cap; they are a site's product, not part of a
+toolchain release (baked with QED64's `pipeline/snapshot/bake-snapshot.mjs`,
+indexed as QED64's `docs/SNAPSHOT-INDEX.md` specifies;
+[snapshot-index.md](snapshot-index.md) points there).
 
 ## Where a release lives
 

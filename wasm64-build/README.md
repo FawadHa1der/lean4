@@ -59,8 +59,8 @@ ABI; `js/` the tools (installed from a release's `tools/` tarball: `npx lean4-wa
 - **QED64 / Lean playground** (`wasm64-lean-fable/qed64`): serves the runtime
   and the lean-core + mathlib-essential packs, bakes environment snapshots
   (binary-paired to the exact runtime — rebake after every runtime change).
-- **wasm64-lean4game**: game snapshots on the line's runtime (it serves a
-  4.33 build until its v4.34.0 re-pair) and the mathlib-game-extra pack.
+- **wasm64-lean4game**: game snapshots on the line's runtime (the release it
+  pins: its `wasm/lean4-wasm64-release.json`) and the mathlib-game-extra pack.
 - **widgets showcase**: QED64's runtime and packs under its own origin.
 
 One branch serves every app deliberately: app-specific behavior is gated at

@@ -1,9 +1,10 @@
 # The wasm64 patch series
 
-**The authoritative, upstream-ready series lives in [`patches/`](patches/):**
-twenty-three `git am`-able commits over `cauli/lean4@5732b84` (branch `qed64-wasm64`
-in `work/lean4`), each with full rationale and an explicit upstreaming
-verdict in its commit message. Summary:
+**The series is this branch's git history** (`qed64-wasm64` over `cauli/lean4@5732b84`;
+the former mail-patch files under `patches/` are retired). The table summarizes the first
+twenty-three commits, each with its rationale and an upstreaming verdict in its commit
+message; a row marked **retired** has no code left on the line. The entries from 0024 on
+follow below. Summary:
 
 | # | Patch | Upstream? |
 |---|---|---|
@@ -11,11 +12,11 @@ verdict in its commit message. Summary:
 | 0002 | CMake wasm64 configuration (-m64 end-to-end, memory cache vars, platform target) | plumbing yes; memory values are policy |
 | 0003 | `LEAN_SCALAR_PTR_LITERAL` gated on pointer width, not `LEAN_EMSCRIPTEN` | **as-is** |
 | 0004 | `llvm_is_declaration` C ABI + `LLVMBindings.lean` `Context` declaration order | **as-is** (live correctness bugs) |
-| 0005 | `lean_kernel_diag_is_enabled`: `uint8`, not `uint8*` | **as-is** |
+| 0005 | `lean_kernel_diag_is_enabled`: `uint8`, not `uint8*` | **retired**: upstreamed (lean4#14886, in v4.35.0) |
 | 0006 | `EM_ASM_PTR` for pointer-returning EM_ASM in `runtime/io.cpp` | **as-is** |
 | 0007 | Five missing non-libuv fallback stubs (Std.Net externs) | **as-is** (family of lean4#6817) |
 | 0008 | Remove wasm32-era debug instrumentation; `lean_shell_main` 2-arg ABI | arity fix relevant; rest fork hygiene |
-| 0009 | Regenerated explicit Emscripten export list (LP64 symbol universe) | regenerate, don't merge |
+| 0009 | Regenerated explicit Emscripten export list (LP64 symbol universe) | **retired**: the list is generated since 0032, and is the JS contract only since 0039 |
 | 0010 | **`lean_wasm_compile` reports parser diagnostics** (the parse-error fix) | pattern applies to any `processCommand`-loop embedder |
 | 0011 | **Compacted-region buffer growth survives multi-GB saves**: `realloc` + null check (a failed growth threw a null-pointer `memcpy` = "memory access out of bounds") + `LEAN_COMPACTOR_RESERVE` to reserve the output buffer up front | null check + realloc **as-is**; the reserve knob matters to any no-mmap embedder saving whole environments |
 | 0012 | **Flat open-addressing object table for the compactor** (node-based map cost ~5 GB for the ~10^8 objects of a whole-Mathlib save; flat table ~2 GB, faster walk) | **as-is** (pure memory/perf win on every platform) |
@@ -23,13 +24,13 @@ verdict in its commit message. Summary:
 | 0014 | **Snapshot-load stage timings + streamed init progress**: every load reports region-read vs `[init]`-replay split (plus top-10 module timings when replay >5 s), and streams `[WASM INIT] i/n module` per module so hosts can render live progress through the blocking call | diagnostic; the numbers justify upstream work on initializer execution |
 | 0015 | Multi-arch emsdk base image (drops the -arm64 pin so amd64 hosts build natively) | build hygiene |
 | 0016 | **Replay-control flags on `lean_wasm_load_snapshot_mem`** (bit 0 = run the `[init]` replay; extension states come from the region, the replay rebuilds process-side registrations) | fork-shaped control surface; useful to any embedder |
-| 0017 | **Interpreter dlsym probes gated on the wasm export table**: `lookup_symbol_in_cur_exe` consults a one-time `Set` of export names before calling dlsym | **as-is** for the Emscripten target — turns a 173 s pathology into ~1 s (below). **Superseded by 0039** (an in-module table, no dlsym, no JS) |
-| 0018 | **Host-pumped LSP file worker** (`lean_wasm_lsp_init` / `lean_wasm_lsp_send`): drive a single-file server session one message at a time when a blocking stdin is impossible (WASM event-loop hosts); forces `server.reportDelayMs := 0` (timed sleeps on dedicated pthreads do not wake under this build) | experimental (branch `feature/lean4web-frontend`); the embedding shape mirrors the watchdog contract |
-| 0019 | **24 preallocated pthread workers, 8 MiB thread stacks**: every `ServerTask` is `prio := .dedicated`, and synchronous `pthread_create` under Emscripten can only claim preallocated workers | needed by any wasm host running the language server |
+| 0017 | **Interpreter dlsym probes gated on the wasm export table**: `lookup_symbol_in_cur_exe` consults a one-time `Set` of export names before calling dlsym | **as-is** for the Emscripten target — turns a 173 s pathology into ~1 s (below). **Superseded by 0039** (an in-module table, no dlsym, no JS); a 2-line `#ifdef` skeleton remains |
+| 0018 | **Host-pumped LSP file worker** (`lean_wasm_lsp_init` / `lean_wasm_lsp_send`): drive a single-file server session one message at a time when a blocking stdin is impossible (WASM event-loop hosts); forces `server.reportDelayMs := 0` (timed sleeps on dedicated pthreads do not wake under this build) | **retired** by 0033: the resident transport (0031/0032) replaced it |
+| 0019 | **24 preallocated pthread workers, 8 MiB thread stacks**: every `ServerTask` is `prio := .dedicated`, and synchronous `pthread_create` under Emscripten can only claim preallocated workers | needed by any wasm host running the language server; no line of it is left, its settings live on rewritten: the pool of 24 in 0038's `src/emscripten-pthread-pool.js`, the 8 MiB stacks in `src/CMakeLists.txt` (`-sDEFAULT_PTHREAD_STACK_SIZE=8388608`) |
 | 0020 | **Keepalive-guard emscripten's `$checkMailbox`** (build-image patch to emsdk 6.0.5): mailbox servicing ran through `callUserCallback`→`maybeExit`, which `_exit()`s an EXIT_RUNTIME=1 runtime with no keepalives — terminating the pthread blocked in `emscripten_proxy_sync` right after its proxied op executed. Reproduced in 30 lines of pure C on stock wasm32 | **upstream emscripten PR ready** — see docs/EMSDK-BUG-REPORT.md |
 | 0021 | **Pre-built header environments** (`Language.Lean.prebuiltHeaderEnvs`, consulted by `processHeader` before the disk import; populated by `lean_wasm_lsp_init` from the wasm env cache): olean reads from elaboration pthreads proxy to the host and stall under WORKERFS | the hook shape is upstream-plausible for any embedder pre-importing on a preferred thread |
-| 0022 | **Flush the worker's LSP output after each message**: frame bodies have no trailing newline; a line-buffered host stream held them until the next message, whose bytes a framed reader ate as the missing body | **as-is** — correct for any line-buffered stdout |
-| 0023 | **Covering-environment aliasing for worker headers**: `lean_wasm_lsp_init` serves a document from the smallest cached env whose closure covers its imports (snapshot-seeded Init/umbrella envs ⇒ no olean import; exact positions; playground superset semantics) | fork-shaped; pairs with 0021 |
+| 0022 | **Flush the worker's LSP output after each message**: frame bodies have no trailing newline; a line-buffered host stream held them until the next message, whose bytes a framed reader ate as the missing body | **retired**: upstream already flushed after each message; only a comment is left |
+| 0023 | **Covering-environment aliasing for worker headers**: `lean_wasm_lsp_init` serves a document from the smallest cached env whose closure covers its imports (snapshot-seeded Init/umbrella envs ⇒ no olean import; exact positions; playground superset semantics) | **retired** by 0033; the covering logic moved to 0032's resolver |
 
 Profile verdict (2026-08-23, superseded 2026-08-24): a whole-Mathlib snapshot
 load spent **~0.7 s relocating 2.6 GB and ~114 s in 152 modules' interpreted
@@ -56,7 +57,7 @@ A 128 MB main stack and a heap-stacked thread were both tried and discarded
 before the counters settled it.
 
 Build deviations from the evidence recipe (documented in
-`work/lean4/docker-wasm64/configure-qed64.sh`): declared memory maximum
+`docker-wasm64/configure-qed64.sh`): declared memory maximum
 raised to 16 GiB (embedder-import compatibility), and
 `CHECK_OLEAN_VERSION=OFF` (this clone embeds its real githash while the
 certified profile packs carry the producer's; compatibility is enforced at
@@ -67,7 +68,7 @@ from, kept for the reasoning trail.
 
 ---
 
-# The wasm64 patch contract (15 files, +78/−307 over reinstate-wasm)
+# The wasm64 patch contract (at the first spike: 15 files, +78/−307 over reinstate-wasm)
 
 Verified against the successful spike; each item says WHY so the patch can be
 re-derived on any future base revision.
@@ -129,9 +130,14 @@ re-derived on any future base revision.
 - `USE_GMP=OFF` stays: the olean header's GMP flag must match between the
   artifact producer and this runtime.
 
-## Known defect in runtime `wasm64-02e0ac24cced25d8` (fix on next rebuild)
+## Resolved by 0010: parse errors dropped in runtime `wasm64-02e0ac24cced25d8` (historical)
 
-**Parse errors are silently dropped by `lean_wasm_compile`.** Empirically
+*Historical.* Patch 0010 (7b8a81a980) shipped this fix, and the gate's PARSE GATE (`js/gate.mjs`)
+holds it on every runtime. The shipped loop differs in detail from the sketch below: `wasmCompile`
+(`src/Lean/Shell.lean`) hands `parseCommand` an empty log. The notes are kept for the reasoning
+trail.
+
+**Parse errors were silently dropped by `lean_wasm_compile`.** Empirically
 characterized (see the persistent probe): garbage text, bare identifiers, and
 unterminated declarations produce `scalar=0`, zero diagnostics; elaboration
 errors (type mismatches, failed tactics, false proofs) report correctly.
@@ -188,6 +194,7 @@ Gate the rebuild on: garbage input → ≥1 error diagnostic; the defect test in
     cache choke points. Output now matches live.lean-lang.org exactly.
 26. **0026-exports-drop-stale-specialization.patch** — export-list refresh
     forced by 0025's reshaped loop. Runtime wasm64-284a58df5421c4f4.
+    **Retired**: exports are generated since 0032.
 
 27. **0027-wasmLspInit-resolve-header-before-replacing.patch** — typing an
     import line sent every settled keystroke through a session replacement
@@ -195,7 +202,7 @@ Gate the rebuild on: garbage input → ≥1 error diagnostic; the defect test in
     Resolution now runs FIRST; unresolvable returns 2 with the live session
     untouched (the page shows a calm "imports incomplete" note, live-parity)
     and teardown happens only when the header resolves. Runtime
-    wasm64-31aef224f49e8385.
+    wasm64-31aef224f49e8385. **Retired** by 0033, with the pump session code.
 
 28. **0028-HeaderSyntax.imports-degrade-gracefully.patch** — error-recovered
     headers (unterminated block comment opening the file, non-identifier
@@ -204,9 +211,9 @@ Gate the rebuild on: garbage input → ≥1 error diagnostic; the defect test in
     adversarial corpus; skip malformed import nodes instead. Upstream-worthy.
 29. **0029-exports-drop-stale-imports-specialization.patch** — export-list
     refresh forced by 0028's filterMap reshape. Runtime
-    wasm64-dca2763359db27e7.
+    wasm64-dca2763359db27e7. **Retired**: exports are generated since 0032.
 
-## 0030 — wasm: tolerate legacy (non-`module`) oleans in the exported-level env cache (2d75ec14cf)
+## 0030 — wasm: tolerate legacy (non-`module`) oleans in the shared env cache, imported below `.private` (`.server` since 0042) (2d75ec14cf)
 
 The lean4game ecosystem (GameServer + every published game) is legacy-mode
 Lean; its oleans are self-contained. Under the wasm target (or
