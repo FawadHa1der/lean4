@@ -63,11 +63,11 @@ const cli = applyCliContract({
     "  --work <dir>      mounted read-write at /work, created when absent once the artifact checks pass (default: a fresh temporary directory);",
     "                    Lean's cwd is /, so name files /work/<file> (/work/x.lean is module work.x, as under QED64's runner)",
     "  --exit-with-parent  exit (1) once the process that started this one is gone: the one-shot CLI never exits by itself,",
-    "                    so a runner whose supervisor was SIGKILLed would otherwise run on (lean4-wasm64 bake passes it)",
+    "                    so a runner whose supervisor was SIGKILLed would otherwise run on",
     "  --parent-pid <pid>  the pid of the process that spawned node-runner.mjs itself, which --exit-with-parent watches",
     "                    (default: the parent pid when the runner starts, which misses a parent that died while Node",
     "                    started); a live process that is not this runner's parent is exit 2. Not through `lean4-wasm64",
-    "                    run` or npx, which add a process: start node <package>/node-runner.mjs. lean4-wasm64 bake passes it",
+    "                    run` or npx, which add a process: start node <package>/node-runner.mjs",
     "  -h, --help        print this help and exit 0, before any side effect (after Lean's arguments start, --help goes to Lean)",
     "",
     "arguments: Lean's own, verbatim: everything after --, or from the first token that is not one of the flags above",
@@ -96,9 +96,9 @@ const cli = applyCliContract({
 const args = { artifact: cli.values.artifact ?? null, work: cli.values.work ?? null, lib: cli.values.lib ?? null, leanArgs: cli.passthrough };
 
 // --exit-with-parent: the one-shot CLI never exits by itself (patches 0020/0031), so a runner
-// whose supervisor died without passing a signal on (a SIGKILLed bake) would run on, writing into
-// --work. Installed first, before any check: the parent is --parent-pid when given (the bake passes
-// its own pid, so a bake that died while this Node was still starting is seen at once: the ppid
+// whose supervisor died without passing a signal on (a SIGKILLed supervisor) would run on, writing into
+// --work. Installed first, before any check: the parent is --parent-pid when given (a supervisor passes
+// its own pid, so one that died while this Node was still starting is seen at once: the ppid
 // is then another process's), else the ppid now. Every 500 ms, and at once: when this process's
 // ppid is no longer the parent, or the parent no longer runs, exit 1. The runtime runs on
 // pthreads (Workers); this thread only serves their proxied calls, so the check keeps running.
@@ -293,7 +293,7 @@ globalThis.Module = {
         globalThis.Module.ENV.QED64_ALLOW_LEGACY_IMPORTS = "1";
       }
       // Whole-environment saves need the region buffer reserved up front (see
-      // toolchain patch 0011); the bake passes the size through this env var.
+      // toolchain patch 0011); a bake passes the size through this env var.
       if (process.env.LEAN_COMPACTOR_RESERVE) {
         globalThis.Module.ENV.LEAN_COMPACTOR_RESERVE = process.env.LEAN_COMPACTOR_RESERVE;
       }

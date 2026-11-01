@@ -1,5 +1,5 @@
 // Kernel patch 0038, without a runtime: runtime-knobs.mjs (the Module keys, the forwarded wasm
-// environment, the counters object), how node-runner, persistent-probe and snapshot-probe use it
+// environment, the counters object), how node-runner and persistent-probe use it
 // (each on a FAKE artifact whose bin/lean.js reports what it was given), and the pool-size JS
 // library src/emscripten-pthread-pool.js, evaluated the way emsdk 6.0.5's jsifier emits it.
 import { test, after } from "node:test";
@@ -144,19 +144,12 @@ test("node-runner: with both QED64_COUNT_PTHREADS and LEAN4_WASM64_RTSTATS each 
   assert.match(lines[3], /^\[rtstats\] \{"pool":/);
 });
 
-test("persistent-probe and snapshot-probe pass the pool key and forward the knobs as node-runner does", () => {
+test("persistent-probe passes the pool key and forwards the knobs as node-runner does", () => {
   const a = fakeArtifact("process.exit(0);");
   const knobs = { LEAN4_WASM64_PTHREAD_POOL: "abc", LEAN_WASM_STACK_PROBE_SLOTS: "0", LEAN_WASM_STD_SURPLUS_EXIT: "1" };
   let r = runTool("persistent-probe.mjs", ["--artifact", a], knobs);
   assert.equal(r.status, 0, r.stderr + r.stdout);
   let [seen] = fakeLines(r.stdout);
-  assert.equal(seen.pthreadPoolSize, "abc");
-  assert.deepEqual(seen.env, { LEAN_PATH: "/lib/lean", LEAN_WASM_STACK_PROBE_SLOTS: "0", LEAN_WASM_STD_SURPLUS_EXIT: "1" });
-  const snap = path.join(tmp(), "x.snap");
-  fs.writeFileSync(snap, "not a snapshot");
-  r = runTool("snapshot-probe.mjs", ["--artifact", a, "--snap", snap, "--lib", path.join(a, "lib", "lean"), "--probe", "#check 1", "--watchdog-ms", "0"], knobs);
-  assert.equal(r.status, 0, r.stderr + r.stdout);
-  [seen] = fakeLines(r.stdout);
   assert.equal(seen.pthreadPoolSize, "abc");
   assert.deepEqual(seen.env, { LEAN_PATH: "/lib/lean", LEAN_WASM_STACK_PROBE_SLOTS: "0", LEAN_WASM_STD_SURPLUS_EXIT: "1" });
 });

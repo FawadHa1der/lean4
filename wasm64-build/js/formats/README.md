@@ -10,7 +10,7 @@ release by reference against its base too, given `--base`).
 | [release.md](release.md) | `lean4-wasm64.release/v1` | `release.mjs` | `fetch-release.mjs`, `verify-release.mjs`, every consumer that pins a release |
 | [runtime-manifest.md](runtime-manifest.md) | `org.lean-browser64.runtime/v1` | `chunk-runtime.mjs` | browser workers, `verify-release.mjs`, `fetch-release.mjs` |
 | [artifact-manifest.md](artifact-manifest.md) | `browser64.artifact-manifest` v1 | `pack.mjs` | browser workers (WORKERFS mounts), `unpack.mjs`, `inspect.mjs`, `verify-release.mjs` |
-| [snapshot-index.md](snapshot-index.md) | `qed64.snapshot-index/v1` | `bake-snapshot.mjs` (`snapshot-index.mjs`) | browser shells (QED64's `loadSnapshotIndex`, lean4game), sites' deploy tools; not part of a release |
+| [snapshot-index.md](snapshot-index.md) | `qed64.snapshot-index/v1` | QED64's `pipeline/snapshot/bake-snapshot.mjs` (the spec: QED64's `docs/SNAPSHOT-INDEX.md`; snapshot-index.md points there) | browser shells (QED64's `loadSnapshotIndex`, lean4game), sites' deploy tools; not part of a release |
 | [HOSTING.md](HOSTING.md) | — | — | anyone serving release bytes to a browser |
 
 The runtime's embedding ABI (exports, boot sequence, environment, the stdin

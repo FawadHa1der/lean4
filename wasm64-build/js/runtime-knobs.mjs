@@ -1,5 +1,5 @@
-// The runtime's host knobs and counters (kernel patch 0038), shared by node-runner,
-// persistent-probe and snapshot-probe (EMBED-RUNTIME.md §3.1, §3.6).
+// The runtime's host knobs and counters (kernel patch 0038), shared by node-runner and
+// persistent-probe (EMBED-RUNTIME.md §3.1, §3.6).
 //
 // - poolModuleKeys: LEAN4_WASM64_PTHREAD_POOL=<n> → Module.pthreadPoolSize, the number of
 //   pthread Workers the glue creates at load. Passed as the raw string ("" or unset: not

@@ -184,7 +184,7 @@ shell built for another runtime refuses them. So the index is pinned like the
 runtime manifest: beside the mutable `/snapshots/index.json` the site serves
 `/snapshots/index.<buildId>.json`, the same bytes, for every runtime a deployed
 shell may be paired with (and, for a site that pins its profile index the same
-way, `/snapshots/profiles-index.<buildId>.json`). `lean4-wasm64 bake` writes the
+way, `/snapshots/profiles-index.<buildId>.json`). QED64's bake writes the
 copy beside the `index.json` it upserts; a site that merges baked entries into
 its served index publishes a copy derived from the merged index instead.
 
@@ -192,8 +192,8 @@ its served index publishes a copy derived from the merged index instead.
   1. reads the mutable `index.json` (revalidating: `cache: "no-cache"` in a
      browser) and checks it: the `schema`, a `snapshots` array, every entry
      well formed (`name` and `url` strings, `imports` an array, `runtime` a
-     string when present, the page fields as snapshot-index.md defines them)
-     and every `url` on the page's origin;
+     string when present, the page fields as QED64's `docs/SNAPSHOT-INDEX.md`
+     defines them) and every `url` on the page's origin;
   2. only when B has the runtime/v1 shape `^wasm64-[0-9a-f]{16}$` (any other
      paired id is ignored, and then no copy is ever read) and an entry's
      `runtime` is a string other than B, reads the copy `index.<B>.json` from
@@ -266,7 +266,7 @@ in every `location` that adds one), `gzip off` for octet-stream, `try_files $uri
   and deep recursion is bounded by it (EMBED-RUNTIME.md §6). Node's are 4 MiB; to test at a
   browser's budget headlessly, `LEAN4_WASM64_PTHREAD_STACK_MB=0.68 lean4-wasm64 run …` (Chrome).
 - The thread knobs (kernel patch 0038, EMBED-RUNTIME.md §3.6) reach a Node runtime through the
-  environment of `run`, `probe` and `snapshot-probe`: `LEAN4_WASM64_PTHREAD_POOL=<n>` sizes the
+  environment of `run` and `probe`: `LEAN4_WASM64_PTHREAD_POOL=<n>` sizes the
   pool of pthread Workers created at load (0..64, default 24), and `LEAN_WASM_PARKED_DEDICATED`,
   `LEAN_WASM_PARKED_IDLE_MS`, `LEAN_WASM_STD_SURPLUS_EXIT`, `LEAN_WASM_STACK_PROBE_SLOTS` and
   `LEAN_WASM_SYMTAB_TRACE` (kernel patch 0039: native-symbol lookups on stderr) are copied into the

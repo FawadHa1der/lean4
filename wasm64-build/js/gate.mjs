@@ -341,10 +341,6 @@ const legacyOut = stripDebug(legacy.stdout);
 gate(/isModule=false/.test(legacyOut) && !/isModule=true/.test(legacyOut), "legacy file: env.header.isModule = false",
   legacy.timedOut ? "CLI kept alive (expected)" : `exit ${legacy.status}`);
 gate(/plainDef/.test(legacyOut) && !/_private/.test(legacyOut), "legacy file: plain `def` is not private by default");
-// the runner's layout (lean4-wasm64 -r2): Lean runs at the VFS root, so /work/input.lean is
-// module work.input — the layout under which a bake is byte-identical to QED64's runner
-gate(/main=work\.input\b/.test(legacyOut), "the one-shot CLI runs at VFS cwd / (main module work.input; bakes byte-identical to QED64's runner)",
-  (/main=\S+/.exec(legacyOut) ?? ["no main= line"])[0]);
 gate(!/error/i.test(legacyOut), "legacy file: @[server_rpc_method] / attribute [tactic] / @[app_unexpander] on plain defs accepted",
   /error/i.test(legacyOut) ? legacyOut.split("\n").find((l) => /error/i.test(l))?.slice(0, 160) : "");
 const moduleFile = await runLean(readProbe("module-file.lean"), "module", { LEAN_WASM_SYMTAB_TRACE: "miss:" });

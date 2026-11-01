@@ -27,8 +27,10 @@ directory.
 | `release.json`, `SHA256SUMS` | the record and its digests | `release.mjs` |
 
 Snapshots (`.snapz`) are not in a release: they are memory images of one app's
-environment, baked by the app with `lean4-wasm64 bake` against a release's
-runtime (`js/formats/snapshot-index.md`).
+environment, baked by the app with QED64's `pipeline/snapshot/bake-snapshot.mjs`
+against a release's runtime. QED64 owns the bake, the snapshot probe and the
+index format, final under the architecture review's D4 (a) (2026-11-01;
+`js/formats/snapshot-index.md` points to QED64's `docs/SNAPSHOT-INDEX.md`).
 
 ## Cutting a release
 

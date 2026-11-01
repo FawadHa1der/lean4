@@ -257,7 +257,7 @@ renderer's one pointer-compression cage (§6).
 - **Gauges** [RT]: `_lean_wasm_task_manager_stat(key)` (§2), lock-free. Emscripten's own
   `PThread.unusedWorkers` (idle pool Workers) and `PThread.pthreads` (Workers running a thread)
   [GLUE] count the Workers.
-- **Node**: `node-runner.mjs`, `persistent-probe.mjs` and `snapshot-probe.mjs` take
+- **Node**: `node-runner.mjs` and `persistent-probe.mjs` take
   `LEAN4_WASM64_PTHREAD_POOL=<n>` for `Module.pthreadPoolSize` and copy `LEAN_WASM_PARKED_DEDICATED`,
   `LEAN_WASM_PARKED_IDLE_MS`, `LEAN_WASM_STD_SURPLUS_EXIT`, `LEAN_WASM_STACK_PROBE_SLOTS` and (0039)
   `LEAN_WASM_SYMTAB_TRACE` into `Module.ENV`; with `LEAN4_WASM64_RTSTATS=1`, node-runner answers a printed line containing
