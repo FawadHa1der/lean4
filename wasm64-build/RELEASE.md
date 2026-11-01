@@ -304,6 +304,26 @@ it (its by-reference fetches read the assets, and `publish` copies from the
 prefix); a release by reference's own R2 prefix is a full copy, independent of
 the base's once published.
 
+Never delete a published `lean4-wasm64/<id>/` R2 prefix or GitHub release (a
+by-reference base included) except as the user's own operation, after reading
+the four consumers' tracked release records on each deployed branch and its
+previous commit, plus rollback-target Worker versions and gated candidate pins.
+The records are:
+- QED64 `toolchain/lean4-wasm64-release.json`;
+- lean4game `wasm/lean4-wasm64-release.json`;
+- proof sheets `website/site/edge/lean4-wasm64-release.json` and `website/sources.json`;
+- the showcase's `pins/<id>/`.
+
+An unlisted prefix is never automatically deletable. App-private prefixes
+(`lean4game/`, `qed64-showcase/`, `proof-sheets/`, QED64's root keys) stay with
+their owners.
+
+One more reader, outside those records: the showcase's own
+`scripts/fetch-artifacts.mjs` (not QED64's tool of that name) bootstraps pins
+from QED64's live origin through `--qed64-origin` (its lines 26-34); the
+2026-10-23 clean-up, a reviewed precedent, did not list it. No R2 delete has
+caused an outage.
+
 Reclaiming the build dir of a runtime released by reference has one cost.
 Re-releasing that same build with new tools (a tools-only fix) would be an
 `-r<N>` runtime release by reference of the same base, since a release by
