@@ -7,7 +7,7 @@
 // a second compile reuses the environment (much faster), and a broken proof
 // surfaces an error diagnostic without killing the runtime.
 //
-// Usage: node persistent-probe.mjs --artifact <dir>   (or $LEAN4_WASM64_ARTIFACT)
+// Usage: node persistent-probe.mjs --artifact <dir> [--lib <dir>] [--snapshot <file>]   (or $LEAN4_WASM64_ARTIFACT)
 // Started without --stack-size, it re-execs itself with --stack-size=8192 (same PID).
 
 import fs from "node:fs";
@@ -28,11 +28,11 @@ ensureStackSize("persistent-probe");
 // argument <tok> ignored`; a repeated flag keeps its first value and an empty one is ignored
 // (a WARNING each). Values come from the contract's result, not an indexOf over argv, so a
 // value spelled like a flag (`--cases --artifact`) is never read as that flag.
-const USAGE = "persistent-probe.mjs --artifact <dir> [--cases <a.lean,b.lean,…> [--passes <n>]]";
+const USAGE = "persistent-probe.mjs --artifact <dir> [--lib <dir>] [--snapshot <file>] [--cases <a.lean,b.lean,…> [--passes <n>]]";
 const cli = applyCliContract({
   tool: "persistent-probe",
   usage: USAGE,
-  flags: { artifact: 1, cases: 1, passes: 1 },
+  flags: { artifact: 1, lib: 1, snapshot: 1, cases: 1, passes: 1 },
   required: [],
   passthrough: null,
   passthroughRequired: false,
@@ -43,6 +43,10 @@ const cli = applyCliContract({
     "",
     "flags:",
     "  --artifact <dir>  bin/lean.js + bin/lean.wasm and lib/lean (mounted at /lib/lean); or $LEAN4_WASM64_ARTIFACT",
+    "  --lib <dir>       the olean tree mounted at /lib/lean instead, the only library Lean sees (as node-runner's --lib)",
+    "  --snapshot <file> a raw .snap baked by this runtime, loaded after init and before any compile through",
+    "                    lean_wasm_load_snapshot_mem (the browser's loader: a _malloc'd copy, flags 1); prints",
+    "                    `SNAPSHOT {json}` (bytes, tag, scalar, loadMs, key: the env-cache key its `cached env for` line names)",
     "  --cases <files>   comma-separated .lean files: compile each n times, one `CASE {json}` line per compile, then `CASES DONE` (the gate's 0037 checks)",
     "  --passes <n>      passes over --cases (default 2)",
     "  -h, --help        print this help and exit 0, before any side effect",
@@ -54,7 +58,7 @@ const cli = applyCliContract({
     "output: the default run prints `SYMTAB {json}` before PASS on a runtime with the native-symbol table (kernel",
     "     patch 0039): a fresh self-check (status 0 = intact), the entries by kind, the FNV, the lookups made",
     "",
-    "exit codes: 0 PERSISTENT PROBE PASS (or CASES DONE), 1 PERSISTENT PROBE FAIL or an unreadable --cases file, 2 no artifact, 3 the runtime aborted",
+    "exit codes: 0 PERSISTENT PROBE PASS (or CASES DONE), 1 PERSISTENT PROBE FAIL (a failed --snapshot load included) or an unreadable --cases file, 2 no artifact, or a --lib or --snapshot that does not exist, 3 the runtime aborted",
   ].join("\n"),
 });
 const artifactArg = cli.values.artifact || process.env.LEAN4_WASM64_ARTIFACT || process.env.QED64_LEAN_ARTIFACT;
@@ -64,7 +68,17 @@ if (!artifactArg) {
 }
 const artifactDir = path.resolve(artifactArg);
 const leanJs = path.join(artifactDir, "bin/lean.js");
-const libLean = path.join(artifactDir, "lib/lean");
+// --lib replaces the library tree, as node-runner's does (the gate's Mathlib cell mounts a complete tree
+// paired with the artifact, its snapshot cell an empty one). No main runs here, so no other library is
+// reachable: node-runner's shadowing of <artifact>/lib/lean is for lean_main's prologue.
+const libLean = cli.values.lib ? path.resolve(cli.values.lib) : path.join(artifactDir, "lib/lean");
+const snapshotFile = cli.values.snapshot ? path.resolve(cli.values.snapshot) : null;
+for (const [flag, file] of [["--lib", cli.values.lib ? libLean : null], ["--snapshot", snapshotFile]]) {
+  if (file && !fs.existsSync(file)) {
+    console.error(`error: ${flag} ${file} not found`);
+    process.exit(2);
+  }
+}
 
 // --cases a.lean,b.lean [--passes n] (patch 0037): after init, compile each file n times (default
 // 2) in this one resident runtime and print one `CASE {json}` line per compile, then two plain
@@ -142,7 +156,8 @@ globalThis.Module = {
           try { FS.mkdir(cur); } catch {}
         }
       }
-      FS.mount(NODEFS, { root: libLean }, "/lib/lean");
+      // by its real path: a NODEFS root that is a symbolic link cannot be walked (node-runner mounts so too)
+      FS.mount(NODEFS, { root: (() => { try { return fs.realpathSync(libLean); } catch { return libLean; } })() }, "/lib/lean");
       globalThis.Module.ENV.LEAN_PATH = "/lib/lean";
       forwardWasmEnv(globalThis.Module.ENV); // the runtime's LEAN_WASM_* knobs (runtime-knobs.mjs)
       FS.chdir("/workspace");
@@ -163,6 +178,39 @@ globalThis.Module = {
         throw new Error("lean_init_search_path failed");
       }
       console.log("init OK");
+
+      // --snapshot (the gate's R10 snapshot cell): the browser worker's loader, before any compile, so the
+      // snapshot's environment is the cache's entry for its key (getOrCreateWasmEnvFor takes the first
+      // match). The bytes go straight into a _malloc'd buffer, which becomes the region's memory and is
+      // never freed (EMBED-RUNTIME.md §2); the glue's top-level wasmMemory (S6) is re-read per chunk, as a
+      // growth of the shared memory replaces its buffer. Flags 1: replay the [init] attributes.
+      if (snapshotFile) {
+        const total = fs.statSync(snapshotFile).size;
+        const ptr = Number(M._malloc(asPtr(total)));
+        if (!ptr) throw new Error(`_malloc(${total}) for the snapshot failed`);
+        const fd = fs.openSync(snapshotFile, "r");
+        try {
+          const chunk = new Uint8Array(64 * 1024 * 1024);
+          for (let at = 0; at < total;) {
+            const n = fs.readSync(fd, chunk, 0, Math.min(chunk.length, total - at), at);
+            if (n <= 0) throw new Error(`${snapshotFile}: short read at byte ${at} of ${total}`);
+            new Uint8Array((M.wasmMemory ?? globalThis.wasmMemory).buffer, ptr + at, n).set(chunk.subarray(0, n));
+            at += n;
+          }
+        } finally {
+          fs.closeSync(fd);
+        }
+        captured.length = 0;
+        const t0 = performance.now();
+        const lr = M._lean_wasm_load_snapshot_mem(asPtr(ptr), asPtr(total), 1n);
+        const loadMs = Math.round(performance.now() - t0);
+        const tag = ioTag(lr), value = ioValue(lr);
+        const scalar = (value & 1n) === 1n ? Number(value >> 1n) : null;
+        // the frozen line (QED64 docs/CLI-CONTRACT.md): `[WASM DEBUG] wasmLoadSnapshotMem: cached env for #[…]`
+        const key = captured.map((l) => /cached env for (#\[[^\]]*\])/.exec(l.text)?.[1]).find(Boolean) ?? null;
+        console.log("SNAPSHOT " + JSON.stringify({ file: path.basename(snapshotFile), bytes: total, tag, scalar, loadMs, key }));
+        if (tag !== 0 || scalar !== 0) throw new Error("the --snapshot load failed (lean_wasm_load_snapshot_mem)");
+      }
 
       if (caseSources.length) {
         const emit = (name, pass, fileName, r) => console.log("CASE " + JSON.stringify({

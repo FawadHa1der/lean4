@@ -180,6 +180,8 @@ interface changes: 0042's `Environment.lean` change, private bodies only, rebuil
 of 5,116 steps in 5 min; a changed exported signature still re-elaborates its
 dependents, up to ~1 h), gated
 (`import-release.sh gate-dir <K'>`, which writes `GATE-PASSED`; the gate also
+checks fixed stock-parity facts since R10 (its exact and snapshot cells and, from optional
+inputs, its Mathlib-header, resident FileWorker and covered cells) and
 asks the environment for its own facts: `isModule`, default privacy, meta
 attributes), released by value (RELEASE.md: by value only since 2026-11-01;
 `import-release.sh release vX.Y.Z --runtime <K'> --packs-from <dir of the kept

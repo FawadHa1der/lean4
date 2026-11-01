@@ -204,6 +204,21 @@ test("persistent-probe: --help/-h anywhere, a value position included, prints th
   }
 });
 
+test("persistent-probe: --lib and --snapshot must exist (exit 2, before the runtime starts)", () => {
+  const a = echoArtifact("A");
+  const d = tmp();
+  for (const [flag, missing] of [["--lib", path.join(d, "no-lib")], ["--snapshot", path.join(d, "no.snap")]]) {
+    const r = run("persistent-probe.mjs", ["--artifact", a, flag, missing]);
+    assert.equal(r.status, 2, flag);
+    assert.equal(r.stderr, lines(`error: ${flag} ${missing} not found`));
+    assert.equal(r.stdout, "");
+  }
+  fs.writeFileSync(path.join(d, "x.snap"), "x");
+  const r = run("persistent-probe.mjs", ["--artifact", a, "--lib", d, "--snapshot", path.join(d, "x.snap")]);
+  assert.equal(echoed(r).mark, "A");
+  assert.equal(r.stderr, "");
+});
+
 // ---------- --stack-size ----------
 
 for (const script of ["node-runner.mjs", "persistent-probe.mjs"]) {

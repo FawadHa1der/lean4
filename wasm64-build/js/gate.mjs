@@ -11,6 +11,12 @@
 //  5. THE PARSE GATE     — garbage input must produce >=1 error diagnostic
 //  6. module files on a shared environment through lean_wasm_compile (0042: the public constant
 //     map setIsModule builds), and imported docstrings/ranges (the `.server` import level)
+//  7. R10, stock parity (kernel review §5 #3): environment facts against FIXED native stock v4.35.0
+//     values with an explicit allowlist, in the exact cell (block 6's run) and the snapshot cell (an
+//     init.snap this gate bakes itself and loads as the browser does); with the optional inputs below,
+//     the Mathlib-header cell, the resident FileWorker and the covered cell (with their facts when the
+//     resident probe has --probe-file). An input left out prints a note: `gate --artifact <dir>` alone
+//     can still pass.
 //  0038 (folded into the runs above, no runtime of its own): the glue's pool size from
 //     Module.pthreadPoolSize, the opt-in exits of surplus standard workers and idle parked
 //     threads, the engine-guard counters. Skipped, with a note, on a runtime before 0038.
@@ -21,9 +27,18 @@
 //     lost (G7). Skipped, with a note, on a runtime before 0039.
 // Every check prints ok or FAIL; exits nonzero if any failed.
 //
-// Usage: node gate.mjs --artifact <dir>
+// Usage: node gate.mjs --artifact <dir> [--mathlib-lib <olean tree>]
+//          [--resident-probe <QED64 checkout>/pipeline/snapshot/resident-probe.mjs [--resident-snap-dir <dir>]]
+//   --mathlib-lib: a complete olean tree paired with the artifact (Init through Mathlib: QED64's
+//   lib-tree-slim), mounted as the only library of block 7's Mathlib-header cell.
+//   --resident-probe: QED64's resident FileWorker driver (tier 3; it runs from QED64's checkout, as it
+//   imports public/workers/worker-constants.js, the page's argv), run on the gate's own init.snap.
+//   --resident-snap-dir: a dir holding init.snap and mathlib.snap baked for this artifact (QED64's
+//   adoption $W/snapshot): the same driver with --mathlib, block 7's covered cell. Needs --resident-probe.
+//   The caller pairs them with --artifact: a snapshot records only its olean header, so the gate cannot.
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -37,16 +52,16 @@ function arg(name, fallback) {
   return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
 }
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
-  console.log("usage: gate.mjs --artifact <dir>\nThe release gate: every check must print ok. run as: lean4-wasm64 gate   (or: node --stack-size=8192 gate.mjs)\nexit codes: 0 GATE PASSED, 1 a check failed, 2 usage");
+  console.log("usage: gate.mjs --artifact <dir> [--mathlib-lib <olean tree>] [--resident-probe <resident-probe.mjs> [--resident-snap-dir <dir>]]\nThe release gate: every check must print ok. run as: lean4-wasm64 gate   (or: node --stack-size=8192 gate.mjs)\n--mathlib-lib: a complete olean tree paired with --artifact (Init through Mathlib; QED64's lib-tree-slim): block 7's Mathlib-header cell\n--resident-probe: QED64's pipeline/snapshot/resident-probe.mjs, run from its checkout: block 7's resident FileWorker check on the gate's own init.snap\n--resident-snap-dir: a dir with init.snap and mathlib.snap baked for --artifact (the caller pairs them; a snapshot of another runtime fails or crashes the cell): block 7's covered cell (needs --resident-probe)\nwithout them those cells print a note and the gate can still pass\nexit codes: 0 GATE PASSED, 1 a check failed, 2 usage");
   process.exit(0);
 }
 // Every option takes a value; an unknown one is refused, so a removed or misspelt input never
 // skips a check silently (--baseline-exports went 2026-11-01).
-const FLAGS = new Set(["artifact"]);
+const FLAGS = new Set(["artifact", "mathlib-lib", "resident-probe", "resident-snap-dir"]);
 for (let i = 2; i < process.argv.length; i += 2) {
   const a = process.argv[i];
   if (!a.startsWith("--") || !FLAGS.has(a.slice(2))) {
-    console.error(`gate: unknown argument ${a}\nusage: gate.mjs --artifact <dir>`);
+    console.error(`gate: unknown argument ${a}\nusage: gate.mjs --artifact <dir> [--mathlib-lib <dir>] [--resident-probe <file> [--resident-snap-dir <dir>]]`);
     process.exit(2);
   }
 }
@@ -58,6 +73,25 @@ const artifact = path.resolve(arg("artifact"));
 if (!fs.existsSync(path.join(artifact, "bin/lean.js"))) {
   console.error(`gate: ${artifact}/bin/lean.js not found`);
   process.exit(2);
+}
+// R10's optional inputs (block 7), refused (exit 2) before any child starts when given but unusable.
+const R10_MATHLIB_OLEAN = "Mathlib/Basic/Real/Basic.olean"; // probes/parity-*-mathlib.lean's header: check its name at each Lean import
+const mathlibLib = arg("mathlib-lib") ? path.resolve(arg("mathlib-lib")) : null;
+const residentProbe = arg("resident-probe") ? path.resolve(arg("resident-probe")) : null;
+const residentSnapDir = arg("resident-snap-dir") ? path.resolve(arg("resident-snap-dir")) : null;
+const refuse = (why) => { console.error(`gate: ${why}`); process.exit(2); };
+const sha256Of = (file) => { try { return createHash("sha256").update(fs.readFileSync(file)).digest("hex"); } catch { return null; } };
+if (mathlibLib) {
+  if (!fs.existsSync(path.join(mathlibLib, R10_MATHLIB_OLEAN))) refuse(`--mathlib-lib ${mathlibLib} has no ${R10_MATHLIB_OLEAN} (a complete olean tree: Init through Mathlib)`);
+  if (!fs.existsSync(path.join(mathlibLib, `${R10_MATHLIB_OLEAN}.server`))) refuse(`--mathlib-lib ${mathlibLib} has no ${R10_MATHLIB_OLEAN}.server: imports read the .server facets (0042), so a tree without them fails the docs facts`);
+  // paired: the packs of one release share the build's Init/Prelude.olean with the artifact's lib/lean
+  const own = path.join(artifact, "lib/lean/Init/Prelude.olean"), given = sha256Of(path.join(mathlibLib, "Init/Prelude.olean"));
+  if (!given || given !== sha256Of(own)) refuse(`--mathlib-lib ${mathlibLib} is not paired with --artifact: its Init/Prelude.olean ${given ? "differs from" : "is missing, unlike"} ${own}`);
+}
+if (residentProbe && !fs.existsSync(residentProbe)) refuse(`--resident-probe ${residentProbe} not found`);
+if (residentSnapDir) {
+  if (!residentProbe) refuse("--resident-snap-dir needs --resident-probe (the covered cell runs it with --mathlib)");
+  for (const f of ["init.snap", "mathlib.snap"]) if (!fs.existsSync(path.join(residentSnapDir, f))) refuse(`--resident-snap-dir ${residentSnapDir} has no ${f}`);
 }
 const runner = path.join(root, "node-runner.mjs");
 const probes = path.join(root, "probes");
@@ -101,26 +135,33 @@ const symtabLines = (stderr) => String(stderr).split("\n").flatMap((l) => {
 });
 const missedLean = []; // [run, name]: G7
 const noteMisses = (label, stderr) => { for (const t of symtabLines(stderr)) if (!t.hit && t.name.startsWith("lean_")) missedLean.push([label, t.name]); };
-function runChild(args, timeoutMs, env = {}) {
+// `stopWhen(quietMs)`, polled every 250 ms with how long the child has printed nothing: true SIGKILLs
+// the child, which resolves with `stopped: true` (block 7's bake: the one-shot CLI never exits, so a
+// run that writes a file is stopped once that file is complete; stableFile below).
+function runChild(args, timeoutMs, env = {}, stopWhen = null) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, args, { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...PINNED, ...env } });
     current = child;
-    let stdout = "", stderr = "", timedOut = false;
-    child.stdout.on("data", (d) => (stdout += d));
-    child.stderr.on("data", (d) => (stderr += d));
+    let stdout = "", stderr = "", timedOut = false, stopped = false, lastOutput = Date.now();
+    child.stdout.on("data", (d) => { stdout += d; lastOutput = Date.now(); });
+    child.stderr.on("data", (d) => { stderr += d; lastOutput = Date.now(); });
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill("SIGTERM");
       setTimeout(() => child.kill("SIGKILL"), 5000).unref();
     }, timeoutMs);
+    const poll = stopWhen && setInterval(() => {
+      if (!stopped && !timedOut && stopWhen(Date.now() - lastOutput)) { stopped = true; child.kill("SIGKILL"); }
+    }, 250);
     child.on("close", (code) => {
       clearTimeout(timer);
+      if (poll) clearInterval(poll);
       current = null;
       // stderr always reaches the gate's log (ABORT, panics, probe diagnostics); a clean
       // exit is judged by stdout, anything else by both streams
       process.stderr.write(stderr);
-      if (code === 0) resolve({ stdout, stderr, status: 0, timedOut });
-      else resolve({ stdout: `${stdout}\n${stderr}`, stderr, status: code ?? (timedOut ? 124 : 1), timedOut });
+      if (code === 0) resolve({ stdout, stderr, status: 0, timedOut, stopped });
+      else resolve({ stdout: `${stdout}\n${stderr}`, stderr, status: code ?? (timedOut ? 124 : 1), timedOut, stopped });
     });
   });
 }
@@ -609,11 +650,15 @@ gate(parseFixed, "THE PARSE GATE: lean_wasm_compile reports parser diagnostics",
 // alone, the legacy probes (a legacy file after module files), and a legacy file's imported docs.
 const PUB = /isModule=(\w+) publicScope=(\d+) importedDocs=(\w+) importedRanges=(\w+)/;
 const MOD_CASES = ["module-private-import", "module-meta", "module-file", "module-no-import", "legacy-after-module", "legacy-docs"];
+// R10's exact cell (block 7) rides on this run: its parity probes come after the 0042 cases, so each is
+// served a cache entry another file's import created (#[Init] by module-no-import, #[Init, Lean] by
+// module-private-import)
+const PARITY_EXACT = ["parity-legacy-init", "parity-module-init", "parity-legacy-lean", "parity-module-lean", "parity-module-private-lean"];
 const modDir = mkTemp("lean4-wasm64-gate-0042-");
 let modRun;
 try {
   fs.writeFileSync(path.join(modDir, "legacy-after-module.lean"), legacySrc);
-  const files = MOD_CASES.map((n) => path.join(n === "legacy-after-module" ? modDir : probes, `${n}.lean`));
+  const files = [...MOD_CASES, ...PARITY_EXACT].map((n) => path.join(n === "legacy-after-module" ? modDir : probes, `${n}.lean`));
   modRun = await runChild([STACK, path.join(root, "persistent-probe.mjs"), "--artifact", artifact,
     "--cases", files.join(","), "--passes", "2"], 900_000, TRACE_LEAN);
   noteMisses("0042 cases", modRun.stderr);
@@ -624,7 +669,7 @@ const modCases = [...modRun.stdout.matchAll(/^CASE (\{.*\})$/gm)].flatMap((m) =>
 const modCase = (name, pass = 1) => modCases.find((c) => c.name === name && c.pass === pass);
 const errorsOf = (c) => (c ? c.diags.filter((d) => d.severity === "error") : []);
 const textOf = (c) => (c ? c.diags.map((d) => String(d.data)).join("\n") : "");
-const modCount = MOD_CASES.length * 2 + 2;
+const modCount = (MOD_CASES.length + PARITY_EXACT.length) * 2 + 2;
 gate(modRun.status === 0 && /^CASES DONE$/m.test(modRun.stdout) && modCases.length === modCount,
   "[0042] module cases: every lean_wasm_compile returned", `${modCases.length}/${modCount} compiles${modRun.timedOut ? ", killed by the timeout" : ""}`);
 const modClean = ["module-private-import", "module-meta", "module-file", "module-no-import"]
@@ -650,6 +695,224 @@ if (fs.existsSync(path.join(artifact, "lib/lean/Init/Prelude.olean.server"))) {
   console.log(`note  [0042] the artifact's tree has no .olean.server facets: imported docs not judged (${docsVerdict})`);
 }
 console.log(`note  [0042] legacy \`decide\` on Nat.toDigits (stock passes at .private; a known deviation): ${errorsOf(modCase("legacy-docs")).length ? "fails" : "passes"}`);
+
+// R10: STOCK PARITY, AND THE PATHS EVERY BROWSER APP RUNS (kernel review §5 #3; QED64 review R10).
+// HARDENING #51 and #80 shipped because no check asked a SHARED environment (wasmCompile's cache, a
+// snapshot, the resident FileWorker's registry) for its own facts when it served a file of another
+// module-ness. Each fact is asserted against a FIXED value of native stock v4.35.0 (eb6cafb729),
+// computed on 2026-11-01 from these probe files (`lean <file>`, the editor level with
+// -DElab.inServer=true, Mathlib 56a00585 from stock-built oleans), never against this runtime's CLI,
+// which shares the fork's import level. A fact passes on its stock value unless R10_ALLOW names the
+// deviation; then only the listed value passes, so a deviation that disappears fails until its entry
+// goes. The cells: exact (block 6's run: an environment of wasmCompile's cache imported for another
+// file), snapshot (an init.snap this gate bakes itself and loads as the browser does, an EMPTY library
+// mounted, so every compile is served by the snapshot), and from the optional inputs Mathlib
+// (--mathlib-lib: a real `import Mathlib.…` header through lean_wasm_compile), resident
+// (--resident-probe: QED64's FileWorker driver on the gate's init.snap) and covered
+// (--resident-snap-dir: the same driver on QED64's init + umbrella snapshots). An input left out
+// prints a note, never a FAIL.
+const r10Start = Date.now(), r10Times = [];
+const r10Timed = async (label, f) => { const t = Date.now(); try { return await f(); } finally { r10Times.push(`${label} ${Math.round((Date.now() - t) / 1000)} s`); } };
+const R10_ALLOW = {
+  superset: "a `module` file served a shared environment sees every loaded module as public, a superset of stock (0042; the user, 2026-10-22)",
+  unexposed: "every file imports at `.server`, where stock reads a legacy file's imports at `.private`: bodies a module does not expose stay closed (PATCHES.md 0042, \"Unchanged on purpose\")",
+  serverDocs: "every file imports at `.server`, stock's editor level for a `module` file, whose command line (`.exported`) loads no docstrings (0042)",
+  covered: "the umbrella's environment serves any header it covers, with every module of the umbrella in scope (0032; QED64 HARDENING #80)",
+};
+for (const [k, why] of Object.entries(R10_ALLOW)) console.log(`note  [R10] allowlist ${k}: ${why}`);
+const atLeast = (n) => Object.assign((v) => typeof v === "number" && v >= n, { shown: `>= ${n}` });
+// probe → fact → [stock v4.35.0, allowlist key, what passes in its place]
+const R10_FACTS = {
+  "parity-legacy-init": { plainPrivate: [false], importedDocs: [true], attrUse: [true], decide: [true, "unexposed", false] },
+  "parity-module-init": { plainPrivate: [true], publicUse: [true], attrUse: [false] },
+  "parity-legacy-lean": { isModule: [false], plainPrivate: [false], importedDocs: [true], decide: [true, "unexposed", false] },
+  "parity-module-lean": { isModule: [true], plainPrivate: [true], publicUse: [true], importedDocs: [false, "serverDocs", true],
+    publicScope: [127639, "superset", atLeast(127639)] },
+  "parity-module-private-lean": { publicUse: [false, "superset", true] },
+  "parity-legacy-mathlib": { isModule: [false], plainPrivate: [false], importedDocs: [true], realDocs: [true], mathlibUse: [true],
+    decide: [true, "unexposed", false] },
+  "parity-module-mathlib": { isModule: [true], plainPrivate: [true], publicUse: [true], importedDocs: [false, "serverDocs", true],
+    realDocs: [false, "serverDocs", true], publicScope: [153957, "superset", atLeast(153957)] },
+  "parity-module-private-mathlib": { publicUse: [false, "superset", true] },
+};
+for (const [probe, fs_] of Object.entries(R10_FACTS)) for (const [fact, [, allow]] of Object.entries(fs_))
+  if (allow && !(allow in R10_ALLOW)) throw new Error(`R10_FACTS ${probe}.${fact}: allowlist ${allow} is not in R10_ALLOW`);
+const R10_SNAPSHOT = ["parity-legacy-init", "parity-module-init"];
+const R10_MATHLIB = ["parity-legacy-mathlib", "parity-module-mathlib", "parity-module-private-mathlib"];
+/** A compile's facts: its `PARITY k=v …` line, and each line its probe marks `-- R10:<fact>`: `print`,
+ *  the privacy its `#print plainDef` shows; `doc`, no "does not have a doc string" warning there (the
+ *  check `@[inherit_doc]` runs in a legacy file); any other fact, no error on that line. */
+function r10FactsOf(name, c) {
+  if (!c) return null;
+  const facts = {};
+  for (const [, k, v] of (/PARITY ([^\n]*)/.exec(textOf(c))?.[1] ?? "").matchAll(/(\w+)=(\S+)/g))
+    facts[k] = /^\d+$/.test(v) ? Number(v) : v === "true" ? true : v === "false" ? false : v;
+  readProbe(`${name}.lean`).split("\n").forEach((l, i) => {
+    const mark = /-- R10:(\w+)\s*$/.exec(l)?.[1];
+    if (!mark) return;
+    const on = c.diags.filter((d) => d.pos?.line === i + 1);
+    if (mark === "print") {
+      const p = on.find((d) => d.severity === "information");
+      if (p) facts.plainPrivate = String(p.data).startsWith("private ");
+    } else if (mark === "doc") facts.importedDocs = !on.some((d) => /does not have a doc string/.test(String(d.data)));
+    else facts[mark] = !on.some((d) => d.severity === "error");
+  });
+  return facts;
+}
+// Stock at the editor level (-DElab.inServer=true) where it differs from the command line's: the
+// resident FileWorker runs in the server, where a `module` file's imports carry their docstrings.
+const R10_EDITOR = { "parity-module-lean": { importedDocs: true }, "parity-module-mathlib": { importedDocs: true, realDocs: true } };
+// The covered cell's environment is the umbrella's, with more modules than the header imports.
+const R10_COVERED = { modules: [2388, "covered", atLeast(2388)] };
+/** One gate line per fact of probe `name` in `cell`; every pass of its compile must hold it.
+ *  `editor`: judge against stock's editor level; `extra`: facts this cell adds. */
+function judgeR10(cell, name, caseOf, { passes = [1, 2], editor = false, extra = {} } = {}) {
+  const fsOf = passes.map((p) => r10FactsOf(name, caseOf(name, p)));
+  for (const [fact, entry] of Object.entries({ ...R10_FACTS[name], ...extra })) {
+    let [stock, allow, instead] = entry;
+    const ed = editor ? R10_EDITOR[name]?.[fact] : undefined;
+    if (ed !== undefined) { stock = ed; if (ed === instead) allow = instead = undefined; }
+    const want = allow ? instead : stock;
+    const holds = (v) => (typeof want === "function" ? want(v) : v === want);
+    const vs = fsOf.map((f) => f?.[fact]);
+    const ok = fsOf.every(Boolean) && vs.every(holds);
+    gate(ok, `[R10] ${cell} · ${name} · ${fact} ${typeof want === "function" ? want.shown : `= ${want}`} (stock${editor ? ", editor level" : ""} ${stock}${allow ? `; allowlist ${allow}` : ""})`,
+      !fsOf.every(Boolean) ? "no result" : !ok && allow && vs[0] === stock ? `${vs[0]}, the stock value: the deviation is gone, or the runtime lost the superset (see the other ${fact} facts); remove the entry only if that was deliberate`
+        : vs.every((v) => v === vs[0]) ? String(vs[0]) : vs.map((v, i) => `pass ${passes[i]} ${v}`).join(", "));
+  }
+}
+/** persistent-probe over parity probes, two passes each, in one runtime. */
+async function r10Run(cell, names, extra, timeoutMs) {
+  const r = await runChild([STACK, path.join(root, "persistent-probe.mjs"), "--artifact", artifact, ...extra,
+    "--cases", names.map((n) => path.join(probes, `${n}.lean`)).join(","), "--passes", "2"], timeoutMs, TRACE_LEAN);
+  noteMisses(`R10 ${cell}`, r.stderr);
+  const cs = [...r.stdout.matchAll(/^CASE (\{.*\})$/gm)].flatMap((m) => { try { return [JSON.parse(m[1])]; } catch { return []; } });
+  const want = names.length * 2 + 2;
+  gate(r.status === 0 && /^CASES DONE$/m.test(r.stdout) && cs.length === want, `[R10] ${cell} cell: every lean_wasm_compile returned`,
+    `${cs.length}/${want} compiles${r.timedOut ? ", killed by the timeout" : ""}`);
+  return { r, caseOf: (n, p = 1) => cs.find((c) => c.name === n && c.pass === p) };
+}
+/** runChild's stopWhen for a CLI writing `file`: true once it exists, has kept its size for stableMs and the child has been silent for quietMs. */
+const stableFile = (file, stableMs, quietMs) => {
+  let size = -1, since = Date.now();
+  return (quietFor) => {
+    let now = -1;
+    try { now = fs.statSync(file).size; } catch { /* not yet */ }
+    if (now !== size) { size = now; since = Date.now(); }
+    return size > 0 && Date.now() - since >= stableMs && quietFor >= quietMs;
+  };
+};
+// QED64's resident FileWorker driver (tier 3, run from QED64's checkout): the page's argv, thread budget
+// and parking from its public/workers/worker-constants.js; its experiment switches (environment) off.
+const RESIDENT_ENV = { PROBE_HEADER: "", PROBE_MINIMAL: "", SKIP_TASK_MANAGER: "", DUMP_MSGS: "", RAW_TAP: "" };
+async function residentRun(args, timeoutMs) {
+  const r = await runChild([STACK, residentProbe, "--artifact", artifact, ...args], timeoutMs, RESIDENT_ENV);
+  let v = null;
+  try { v = JSON.parse(/^RESIDENT PROBE (?:PASS|FAIL) (\{.*\})$/m.exec(r.stdout)?.[1] ?? "null"); } catch { v = null; }
+  const header = /\[WASM LSP\] header (\w+): key=(#\[[^\]]*\])/.exec(r.stdout);
+  return { pass: r.status === 0 && /^RESIDENT PROBE PASS /m.test(r.stdout), v, header,
+    shown: v ? `${v.why}; ${v.diagnostics} diagnostics, ${v.frames} frames, ${v.nonFrameStdoutBytes} non-frame stdout bytes, ${v.wallMs} ms${header ? `; header ${header[1]} ${header[2]}` : ""}`
+      : `no verdict (exit ${r.status}${r.timedOut ? ", killed by the timeout" : ""})` };
+}
+
+// The same driver's file mode (--probe-file, QED64 review R4; tier 3, detected by its text): one probe
+// as the page runs a document, act 1 only; its final diagnostics, one {"caption":"",severity,pos,endPos,
+// data} line each, are judged at the editor level, one pass.
+const residentFiles = !!residentProbe && fs.readFileSync(residentProbe, "utf8").includes("--probe-file");
+async function residentFacts(cell, names, args, timeoutMs, extraOf = () => ({})) {
+  for (const n of names) {
+    const r = await runChild([STACK, residentProbe, "--artifact", artifact, ...args, "--probe-file", path.join(probes, `${n}.lean`), "--dump-messages"],
+      timeoutMs, RESIDENT_ENV);
+    const diags = [...r.stdout.matchAll(/^(\{"caption":.*\})$/gm)].flatMap((m) => { try { return [JSON.parse(m[1])]; } catch { return []; } });
+    const settled = r.status === 0 && /^compile: tag=0 /m.test(r.stdout);
+    gate(settled, `[R10] ${cell} cell · ${n}: the resident FileWorker settled`,
+      settled ? `${diags.length} diagnostics` : `exit ${r.status}${r.timedOut ? ", killed by the timeout" : ""}`);
+    judgeR10(cell, n, (_, p) => (settled && p === 1 ? { diags } : null), { passes: [1], editor: true, extra: extraOf(n) });
+  }
+}
+
+// THE EXACT CELL: block 6's run
+for (const n of PARITY_EXACT) judgeR10("exact", n, modCase);
+
+const r10Dir = mkTemp("lean4-wasm64-gate-r10-");
+try {
+  // THE GATE'S OWN init.snap (D4 (a): no bake tool, no index, no gzip, nothing of QED64's): node-runner
+  // with --incr-header-save at the VFS root. The one-shot CLI never exits, so it is stopped once
+  // init.snap has kept its size for 3 s with the runner silent for 3 s: the save writes
+  // <file>.tmp.<pid> and renames it, after the frontend's last message (src/library/module.cpp
+  // lean_compacted_region_save; src/Lean/Elab/Frontend.lean), so a stable init.snap is a whole one.
+  const initSnap = path.join(r10Dir, "init.snap");
+  // node-runner forwards these from the shell (node-runner.mjs); the gate's bake takes their defaults
+  const BAKE_PINNED = { LEAN_COMPACTOR_RESERVE: "", QED64_ALLOW_LEGACY_IMPORTS: "", QED64_PROFILE_INIT: "" };
+  fs.writeFileSync(path.join(r10Dir, "probe.lean"), "#check (2 + 2 : Nat)\n");
+  const bake = await r10Timed("bake", () => runChild([STACK, runner, "--artifact", artifact, "--work", r10Dir, "--",
+    "--incr-header-save=/work/init.snap", "/work/probe.lean"], 600_000, { ...TRACE_LEAN, ...BAKE_PINNED }, stableFile(initSnap, 3000, 3000)));
+  noteMisses("R10 bake", bake.stderr);
+  let snapBytes = 0;
+  try { snapBytes = fs.statSync(initSnap).size; } catch { /* none */ }
+  const baked = snapBytes > 0 && (bake.stopped || bake.status === 0);
+  gate(baked && /^2 \+ 2 : Nat$/m.test(bake.stdout), "[R10] the gate bakes its own init.snap (node-runner --incr-header-save=/work/init.snap, stopped once stable)",
+    `${snapBytes} bytes${bake.stopped || bake.status === 0 ? "" : bake.timedOut ? "; killed by the timeout before init.snap was stable" : `; the runner exited ${bake.status} first`}`);
+
+  // THE SNAPSHOT CELL: init.snap through lean_wasm_load_snapshot_mem (the browser's loader) before any
+  // compile, an empty directory as the library: no olean could have served these compiles
+  if (baked) {
+    const emptyLib = mkTemp("lean4-wasm64-gate-r10-lib-");
+    try {
+      const snap = await r10Timed("snapshot cell", () => r10Run("snapshot", R10_SNAPSHOT, ["--lib", emptyLib, "--snapshot", initSnap], 600_000));
+      let s = null;
+      try { s = JSON.parse(/^SNAPSHOT (\{.*\})$/m.exec(snap.r.stdout)?.[1] ?? "null"); } catch { s = null; }
+      gate(!!s && s.tag === 0 && s.scalar === 0 && s.key === "#[Init]",
+        "[R10] snapshot cell: init.snap loads through lean_wasm_load_snapshot_mem and is cached under #[Init]",
+        s ? `${s.bytes} bytes in ${s.loadMs} ms, key ${s.key ?? "not printed"}${s.tag !== 0 || s.scalar !== 0 ? `, tag ${s.tag} result ${s.scalar}` : ""}` : "no SNAPSHOT line");
+      for (const n of R10_SNAPSHOT) judgeR10("snapshot", n, snap.caseOf);
+    } finally {
+      rmTemp(emptyLib);
+    }
+  } else {
+    gate(false, "[R10] snapshot cell", "not run: no init.snap (the bake above)");
+  }
+
+  // THE RESIDENT FILEWORKER: QED64's Init probe on the gate's init.snap (its --snap-dir names init.snap)
+  if (!residentProbe) {
+    console.log("note  [R10] resident FileWorker: skipped (no --resident-probe <QED64 checkout>/pipeline/snapshot/resident-probe.mjs; QED64's adopt-release passes it)");
+  } else if (!baked) {
+    gate(false, "[R10] resident FileWorker", "not run: no init.snap (the bake above)");
+  } else {
+    const x = await r10Timed("resident", () => residentRun(["--snap-dir", r10Dir, "--budget-ms", "180000"], 300_000));
+    gate(x.pass && x.v?.nonFrameStdoutBytes === 0,
+      "[R10] resident FileWorker on the gate's init.snap (QED64's resident-probe, the page's argv): the document's error published, progress drained, a clean shutdown, only LSP frames on stdout",
+      x.shown);
+    if (x.v?.argv) console.log(`note  [R10] resident FileWorker argv ${JSON.stringify(x.v.argv)}`);
+    if (residentFiles) await r10Timed("resident facts", () => residentFacts("resident", R10_SNAPSHOT, ["--snap-dir", r10Dir, "--snapshots", "init", "--budget-ms", "180000"], 300_000));
+    else console.log("note  [R10] resident facts: skipped (this resident-probe has no --probe-file, QED64 review R4)");
+  }
+
+  // THE MATHLIB-HEADER CELL: a real `import Mathlib.…` header through lean_wasm_compile, --mathlib-lib the only library
+  if (!mathlibLib) {
+    console.log("note  [R10] Mathlib-header cell: skipped (no --mathlib-lib <a complete olean tree paired with --artifact>; QED64's adopt-release passes $W/lib-tree-slim)");
+  } else {
+    const ml = await r10Timed("Mathlib cell", () => r10Run("Mathlib", R10_MATHLIB, ["--lib", mathlibLib], 1_200_000));
+    for (const n of R10_MATHLIB) judgeR10("Mathlib", n, ml.caseOf);
+    const mods = (n) => r10FactsOf(n, ml.caseOf(n))?.modules ?? "?";
+    console.log(`note  [R10] Mathlib: ${mods("parity-legacy-mathlib")} modules for the legacy file, ${mods("parity-module-mathlib")} for the \`module\` file (stock: 2388; a \`module\` file 2380 at the command line's .exported, 2388 at the editor's .server)`);
+  }
+
+  // THE COVERED CELL: the same driver with --mathlib on QED64's init + umbrella snapshots: a legacy
+  // `import Mathlib.Data.Real.Basic` served by the umbrella's environment, which covers it
+  if (!residentSnapDir) {
+    console.log("note  [R10] covered cell: skipped (no --resident-snap-dir <dir with init.snap and mathlib.snap baked for --artifact>)");
+  } else {
+    const x = await r10Timed("covered cell", () => residentRun(["--snap-dir", residentSnapDir, "--mathlib", "--budget-ms", "600000"], 900_000));
+    gate(x.pass, "[R10] covered cell: the resident FileWorker serves `import Mathlib.Data.Real.Basic` from the umbrella snapshot with no error at drain (allowlist covered)", x.shown);
+    if (residentFiles) await r10Timed("covered facts", () => residentFacts("covered", R10_MATHLIB, ["--snap-dir", residentSnapDir, "--budget-ms", "600000"], 900_000,
+      (n) => (n === "parity-module-private-mathlib" ? {} : R10_COVERED)));
+    else console.log("note  [R10] covered facts: skipped (this resident-probe has no --probe-file, QED64 review R4)");
+  }
+} finally {
+  rmTemp(r10Dir);
+}
+console.log(`note  [R10] block 7: ${Math.round((Date.now() - r10Start) / 1000)} s (${r10Times.join(", ")})`);
 
 // G7 (0039), over every run: no lookup missed a `lean_*` name. The interpreter's keys are Lean
 // names (boxed wrappers, @[export] names, cells, initializers); the C runtime's lean_* functions

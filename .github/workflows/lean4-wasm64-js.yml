@@ -55,7 +55,7 @@ jobs:
           node -e '
             const files = JSON.parse(require("fs").readFileSync("/tmp/pack.json", "utf8"))[0].files.map((f) => f.path);
             const need = ["cli.mjs", "node-runner.mjs", "gate.mjs", "fetch-release.mjs", "verify-release.mjs", "release.mjs", "pack-set.mjs", "packs.json", "formats/README.md", "formats/HOSTING.md", "probes/task-storm.lean", "probes/thread-knobs.lean", "runtime-knobs.mjs",
-              "probes/symtab.lean", "runtime-contract.mjs", "exports-audit.mjs",
+              "probes/symtab.lean", "probes/parity-legacy-init.lean", "probes/parity-module-mathlib.lean", "runtime-contract.mjs", "exports-audit.mjs",
               "formats/snapshot-index.md", "LICENSE"];
             const missing = need.filter((n) => !files.includes(n));
             const tests = files.filter((f) => f.startsWith("test/"));

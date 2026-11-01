@@ -445,10 +445,120 @@ test("the gate boots its children on this Node with --stack-size=8192, whatever 
   assert.equal(r.status, 1, r.stdout + r.stderr); // a fake runtime fails the checks, but every child ran
   const children = fs.readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l));
   // 9 one-shot runs (3 of them deep-recursion probes) + the persistent probe + the 0037 async-cases and 0042 module-cases
-  // persistent probes
-  assert.equal(children.length, 12);
+  // persistent probes + block 7's bake (its snapshot cell needs the init.snap a fake runtime never writes)
+  assert.equal(children.length, 13);
   for (const c of children) {
     assert.equal(c.execPath, process.execPath);
     assert.ok(c.execArgv.includes("--stack-size=8192"), JSON.stringify(c.execArgv));
+  }
+});
+
+test("gate: block 7's inputs are refused before any child runs when given but unusable (exit 2)", () => {
+  const log = path.join(tmp(), "children.jsonl");
+  const a = fakeArtifact('require("node:fs").appendFileSync(process.env.L4W_TEST_LOG, "child\\n");\nprocess.exit(0);\n');
+  write(path.join(a, "lib", "lean", "Init", "Prelude.olean"), Buffer.from("the artifact's prelude"));
+  const resident = path.join(tmp(), "resident-probe.mjs");
+  write(resident, "process.exit(0);\n");
+  const snaps = tmp();
+  write(path.join(snaps, "init.snap"), Buffer.alloc(8));
+  const lib = tmp();
+  const refused = (args, re) => {
+    const r = run("gate.mjs", ["--artifact", a, ...args], { env: { ...process.env, L4W_TEST_LOG: log }, timeout: 60_000 });
+    assert.equal(r.status, 2, `${args.join(" ")}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, re);
+    assert.equal(fs.existsSync(log), false, `${args.join(" ")}: a child ran`);
+  };
+  refused(["--resident-probe", path.join(snaps, "nope.mjs")], /^gate: --resident-probe \S+nope\.mjs not found$/m);
+  refused(["--resident-snap-dir", snaps], /^gate: --resident-snap-dir needs --resident-probe/m);
+  refused(["--resident-probe", resident, "--resident-snap-dir", snaps], /^gate: --resident-snap-dir \S+ has no mathlib\.snap$/m);
+  refused(["--mathlib-lib", lib], /^gate: --mathlib-lib \S+ has no Mathlib\/Basic\/Real\/Basic\.olean/m);
+  write(path.join(lib, "Mathlib", "Basic", "Real", "Basic.olean"), Buffer.alloc(8));
+  refused(["--mathlib-lib", lib], /^gate: --mathlib-lib \S+ has no Mathlib\/Basic\/Real\/Basic\.olean\.server/m);
+  write(path.join(lib, "Mathlib", "Basic", "Real", "Basic.olean.server"), Buffer.alloc(8));
+  refused(["--mathlib-lib", lib], /is not paired with --artifact: its Init\/Prelude\.olean is missing/);
+  refused(["--mathlib-lib", lib, "--resident-snapdir", snaps], /^gate: unknown argument --resident-snapdir$/m);
+  write(path.join(lib, "Init", "Prelude.olean"), Buffer.from("another build's prelude"));
+  refused(["--mathlib-lib", lib], /is not paired with --artifact: its Init\/Prelude\.olean differs/);
+});
+
+test("gate: block 7 stops its bake once init.snap is stable and runs the resident probe on the gate's snapshot dir", () => {
+  const log = path.join(tmp(), "children.jsonl");
+  // a CLI that writes the file its --incr-header-save names into --work, prints, and, like the real one, never exits
+  const a = fakeArtifact([
+    'const fs = require("node:fs"), path = require("node:path");',
+    'const save = (globalThis.Module.arguments ?? []).find((x) => x.startsWith("--incr-header-save="));',
+    "if (!save) process.exit(0);",
+    'fs.writeFileSync(path.join(process.argv[process.argv.indexOf("--work") + 1], path.basename(save)), Buffer.alloc(64));',
+    'fs.appendFileSync(process.env.L4W_TEST_LOG, JSON.stringify({ bake: globalThis.Module.arguments }) + "\\n");',
+    'console.log("2 + 2 : Nat");',
+    "setInterval(() => {}, 1000);",
+  ].join("\n"));
+  const resident = path.join(tmp(), "resident-probe.mjs");
+  write(resident, [
+    'import fs from "node:fs"; import path from "node:path";',
+    'const args = process.argv.slice(2), dir = args[args.indexOf("--snap-dir") + 1];',
+    'fs.appendFileSync(process.env.L4W_TEST_LOG, JSON.stringify({ resident: args, snap: fs.statSync(path.join(dir, "init.snap")).size }) + "\\n");',
+    'console.log("RESIDENT PROBE PASS " + JSON.stringify({ ok: true, why: "fake", diagnostics: 1, frames: 2, nonFrameStdoutBytes: 0, wallMs: 3, argv: ["--worker"] }));',
+  ].join("\n"));
+  const r = run("gate.mjs", ["--artifact", a, "--resident-probe", resident], { env: { ...process.env, L4W_TEST_LOG: log }, timeout: 120_000 });
+  assert.equal(r.status, 1, r.stdout + r.stderr); // a fake runtime fails the other checks
+  assert.match(r.stdout, /^ ok {3}\[R10\] the gate bakes its own init\.snap .* — 64 bytes$/m);
+  assert.match(r.stdout, /^ ok {3}\[R10\] resident FileWorker on the gate's init\.snap/m);
+  assert.match(r.stdout, /^note {2}\[R10\] Mathlib-header cell: skipped/m);
+  assert.match(r.stdout, /^note {2}\[R10\] covered cell: skipped/m);
+  const lines = fs.readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.deepEqual(lines.filter((l) => l.bake).map((l) => l.bake), [["--incr-header-save=/work/init.snap", "/work/probe.lean"]]);
+  const res = lines.filter((l) => l.resident);
+  assert.equal(res.length, 1);
+  assert.equal(res[0].snap, 64);
+  const [f0, v0, f1, dir, f2, v2] = res[0].resident;
+  assert.deepEqual([f0, v0, f1, f2, v2], ["--artifact", a, "--snap-dir", "--budget-ms", "180000"]);
+  assert.equal(fs.existsSync(dir), false, "the gate's snapshot dir outlived the gate");
+});
+
+test("gate: block 7's resident facts read the FileWorker's dump lines (resident-probe --probe-file) at the probes' own lines", () => {
+  const log = path.join(tmp(), "children.jsonl");
+  const a = fakeArtifact([
+    'const fs = require("node:fs"), path = require("node:path");',
+    'const save = (globalThis.Module.arguments ?? []).find((x) => x.startsWith("--incr-header-save="));',
+    "if (!save) process.exit(0);",
+    'fs.writeFileSync(path.join(process.argv[process.argv.indexOf("--work") + 1], path.basename(save)), Buffer.alloc(64));',
+    'console.log("2 + 2 : Nat");',
+    "setInterval(() => {}, 1000);",
+  ].join("\n"));
+  // a resident-probe with a file mode: #print's privacy and the module file's refused attribute, at their lines
+  const resident = path.join(tmp(), "resident-probe.mjs");
+  write(resident, [
+    'import fs from "node:fs";',
+    'const args = process.argv.slice(2), at = args.indexOf("--probe-file");',
+    'fs.appendFileSync(process.env.L4W_TEST_LOG, JSON.stringify(args) + "\\n");',
+    "if (at >= 0) {",
+    '  const lines = fs.readFileSync(args[at + 1], "utf8").split("\\n"), mod = lines[0] === "module";',
+    '  const line = (re) => lines.findIndex((l) => re.test(l)) + 1;',
+    '  const d = (severity, l, data) => console.log(JSON.stringify({ caption: "", severity, pos: { line: l, column: 0 }, endPos: { line: l, column: 1 }, data }));',
+    '  d("information", line(/^#print plainDef/), `${mod ? "private " : ""}def plainDef : Nat :=\\n1`);',
+    '  if (mod) d("error", line(/^@\\[app_unexpander/), "Cannot add attribute: must be marked as `meta`");',
+    '  console.log(`compile: tag=0 elapsed=1ms errors=${mod ? 1 : 0}`);',
+    "}",
+    'console.log("RESIDENT PROBE PASS " + JSON.stringify({ ok: true, why: "fake", diagnostics: 1, frames: 2, nonFrameStdoutBytes: 0, wallMs: 3, argv: ["--worker"] }));',
+  ].join("\n"));
+  const r = run("gate.mjs", ["--artifact", a, "--resident-probe", resident], { env: { ...process.env, L4W_TEST_LOG: log }, timeout: 120_000 });
+  assert.equal(r.status, 1, r.stdout + r.stderr); // a fake runtime fails the other checks
+  for (const re of [
+    /^ ok {3}\[R10\] resident cell · parity-legacy-init: the resident FileWorker settled — 1 diagnostics$/m,
+    /^ ok {3}\[R10\] resident · parity-legacy-init · plainPrivate = false \(stock, editor level false\) — false$/m,
+    /^ ok {3}\[R10\] resident · parity-legacy-init · importedDocs = true /m,
+    /^ ok {3}\[R10\] resident · parity-legacy-init · attrUse = true /m,
+    /^ ok {3}\[R10\] resident · parity-module-init · plainPrivate = true /m,
+    /^ ok {3}\[R10\] resident · parity-module-init · publicUse = true /m,
+    /^ ok {3}\[R10\] resident · parity-module-init · attrUse = false \(stock, editor level false\) — false$/m,
+    // no error on the `decide` line: the stock value, so the allowlisted deviation is reported gone
+    /^FAIL {2}\[R10\] resident · parity-legacy-init · decide = false \(stock, editor level true; allowlist unexposed\) — true, the stock value: the deviation is gone/m,
+  ]) assert.match(r.stdout, re);
+  const calls = fs.readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((c) => c.includes("--probe-file"));
+  assert.deepEqual(calls.map((c) => path.basename(c[c.indexOf("--probe-file") + 1])), ["parity-legacy-init.lean", "parity-module-init.lean"]);
+  for (const c of calls) {
+    assert.equal(c[c.indexOf("--snapshots") + 1], "init");
+    assert.ok(c.includes("--dump-messages"));
   }
 });

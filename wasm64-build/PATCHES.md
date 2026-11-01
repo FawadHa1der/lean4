@@ -1129,6 +1129,12 @@ The legacy `decide` gap prints as a note. Calibrated on 0041:
 - the public scope is 0 against the CLI's 133,315;
 - no docs load.
 
-The resident FileWorker and snapshot-loaded paths are not in this gate (no snapshot bake). Natively,
-a legacy environment saved and read back self-contained keeps `header.modules`/`moduleData` and
-rebuilds the same map. QED64 adds module cases to its corpus at the [Q] re-pair.
+The resident FileWorker and snapshot-loaded paths were not in this gate (no snapshot bake) until
+block 7 (R10, 2026-11-01): an `init.snap` the gate bakes itself and loads through
+`lean_wasm_load_snapshot_mem`, a real Mathlib header (`--mathlib-lib`), and QED64's resident FileWorker
+driver when its adoption passes it in (`--resident-probe`, `--resident-snap-dir`; the facts through the
+FileWorker need its `--probe-file`), each fact against a
+fixed stock v4.35.0 value with an explicit allowlist (the superset public scope, `decide` on unexposed
+bodies, `.server` docs, the covered superset). Natively, a legacy environment saved and read back
+self-contained keeps `header.modules`/`moduleData` and rebuilds the same map. QED64 adds module cases
+to its corpus at the [Q] re-pair.
