@@ -312,8 +312,19 @@ recorded in the release notes.
 
 ## Retention
 
-Releases are kept. A build directory can be reclaimed once its runtime is
-either released or superseded and no app pins it; R2 objects of a release are
+Releases are kept. Releases are cut by value only, so staging reads build
+dirs, and two kinds are kept:
+- a tag's import build dir (`../wasm64-lean-kernel-build-<tag>`: `native/`,
+  `mathlib/`, `build/stage1`, `BUILT-COMMIT`), while an app pins any release of
+  that tag or a kernel-only fix of it may still be cut: every by-value release of
+  the tag, a tools re-cut included, takes native64, the lists and the pack
+  commit check from it (consumers also build against its `native/` and
+  `mathlib/` trees);
+- a released runtime's build dir, while an app pins it (a tools re-cut takes
+  `--runtime` it).
+
+Any other build directory can be reclaimed once its runtime is either released
+or superseded and no app pins it; R2 objects of a release are
 never garbage-collected while any app's pin names the release. A first cut's
 tag, GitHub assets and R2 prefix are kept while any release by reference names
 it (its by-reference fetches read the assets, and `publish` copies from the
@@ -328,7 +339,9 @@ The records are:
 - QED64 `toolchain/lean4-wasm64-release.json`;
 - lean4game `wasm/lean4-wasm64-release.json`;
 - proof sheets `website/site/edge/lean4-wasm64-release.json` and `website/sources.json`;
-- the showcase's `pins/<id>/`.
+- the showcase's `pins/<QED64 commit>/` (`pin.json`, `QED64.lock.json`). A pin names its
+  runtime by `buildId` and `qed64.kernel`, not always by release id, so match each
+  release's `runtime.buildId` against every pin.
 
 An unlisted prefix is never automatically deletable. App-private prefixes
 (`lean4game/`, `qed64-showcase/`, `proof-sheets/`, QED64's root keys) stay with
@@ -340,10 +353,9 @@ from QED64's live origin through `--qed64-origin` (its lines 26-34); the
 2026-10-23 clean-up, a reviewed precedent, did not list it. No R2 delete has
 caused an outage.
 
-Reclaiming the build dir of a runtime released by reference has one cost.
-Re-releasing that same build with new tools (a tools-only fix) would be an
-`-r<N>` runtime release by reference of the same base, since a release by
-reference never names another one as its base. The record rules refuse that
-today, so it is not supported yet. Once the dir is gone, such a fix can only be
-a new runtime: a rebuild, with a new build id that apps re-pair against.
-Keeping the dir (several GB) for this is optional.
+Reclaiming a released runtime's build dir has one cost: a tools-only fix of
+that runtime is then a rebuild, with a new build id that apps re-pair against,
+not a re-cut by value. Reclaiming a tag's import build dir ends every by-value
+release of that tag; the fallback is a full import. The two runtimes released by
+reference cannot be re-cut by reference either (the record rules refuse an
+`-r<N>` of a runtime release by reference).

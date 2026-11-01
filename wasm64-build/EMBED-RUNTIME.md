@@ -341,7 +341,8 @@ told. Lean prints the first four with `IO.eprintln` (stderr; in a browser, `Modu
 | `[WASM DEBUG] wasmLoadSnapshotMem: cached env for #[<imports>]`, and `[WASM DEBUG] wasmLoadSnapshot: cached env for #[<imports>]` | `src/Lean/Shell.lean`: `s!"[WASM DEBUG] wasmLoadSnapshotMem: cached env for {key}"` (0013) and `s!"[WASM DEBUG] wasmLoadSnapshot: cached env for {key}"` (the base) | at the end of each successful snapshot load | the showcase's `scripts/headless/exact-header.mjs` (`/cached env for #\[([^\]]*)\]/` on the log of QED64's `snapshot-probe.mjs`, which echoes `[WASM DEBUG]` lines: the key the snapshot seeded) and `scripts/headless/wasm-lsp.mjs` |
 | `object compactor: out of memory growing the region buffer to …`, inside the save's IO error `failed to write '<file>': …` | `src/runtime/compact.cpp`, `object_compactor::alloc` (0011): `"object compactor: out of memory growing the region buffer to " << … << " MB (" << … << " MB used); " << "set LEAN_COMPACTOR_RESERVE to reserve the buffer up front"`; the IO error is `lean_compacted_region_save`'s (`src/library/module.cpp`) | when a snapshot save outgrows its region buffer | the showcase's `scripts/bake.sh` (on that substring it rebakes once with 512 MiB more `--reserve`) and `judge-bake.mjs` J1 (any `object compactor:` line fails a bake) |
 
-QED64 freezes the same list (its `docs/CLI-CONTRACT.md`, "Toolchain lines consumers parse"). The
+QED64 freezes the same lines except `[WASM INIT]`, which its worker parses too (its `docs/CLI-CONTRACT.md`,
+"Toolchain lines consumers parse"). The
 `[WASM DEBUG]` prefix does not make the cached-env line removable. Every other `[WASM DEBUG]`,
 `[WASM PROFILE]` and `[WASM LSP]` line is a diagnostic: consumers only filter or log them (the gate
 strips them, with these, before it judges Lean's output), and they may change or go.
@@ -409,8 +410,9 @@ with a `PATCHES.md` entry. Two changes are parked until an embedder other than Q
 a new alias is requested: taking the alias list as data, and renaming `$/qed64/headerStatus` (its
 readers bind to the method name, so a rename needs a window that serves both names). The next
 runtime release makes the refused-header text generic, no longer naming "Load exact imports" but
-keeping the substring "are not loaded in this session", which consumers match, and fixes
-`headerStatus.version`. Neither needs a protocol bump.
+keeping the substring "are not loaded in this session", which QED64's e2e matches (the showcase's C7,
+`tests/ux/specs/30-robustness.spec.mjs`, compares the whole current text and loosens to that substring in
+the same adoption), and fixes `headerStatus.version`. Neither needs a protocol bump.
 
 ## Compatibility
 

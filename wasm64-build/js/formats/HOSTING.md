@@ -194,7 +194,7 @@ its served index publishes a copy derived from the merged index instead.
   1. reads the mutable `index.json` (revalidating: `cache: "no-cache"` in a
      browser) and checks it: the `schema`, a `snapshots` array, every entry
      well formed (`name` and `url` strings, `imports` an array, `runtime` a
-     string when present, the page fields as QED64's `docs/SNAPSHOT-INDEX.md`
+     string when present, the page fields as QED64's `docs/EMBEDDING.md` §8
      defines them) and every `url` on the page's origin;
   2. only when B has the runtime/v1 shape `^wasm64-[0-9a-f]{16}$` (any other
      paired id is ignored, and then no copy is ever read) and an entry's
