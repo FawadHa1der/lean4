@@ -68,6 +68,10 @@ is placed on that commit — the pinned tree contains its own digest root.
 
 ## Release by reference
 
+No release has been cut by reference since 2026-11-01 (by value only:
+[`../../RELEASE.md`](../../RELEASE.md)); this section stays so that the two that were
+(`lean-v4.34.0-e1a79c1-r3`, `lean-v4.34.0-53cb11e`) can be read and verified.
+
 A release may be cut **by reference**. Its record names a first cut of the
 same upstream tag in `base` and shares that release's files, except the ones it
 owns. The record stays complete: `files[]` lists every file of the release, the

@@ -48,20 +48,36 @@ wasm64-build/import-release.sh release v4.34.0                      # the import
 #     --packs-from wasm64-lean-fable/qed64/public/profiles \
 #     --match-runtime wasm64-lean-fable/qed64/public/runtime/runtime-manifest.json --note …
 # a kernel-only fix: build it (build.sh records BUILT-COMMIT for a clean tree), gate it, release it
-# by reference of the release whose packs, native64 and lists it keeps (below)
+# by value (below): native64 and the lists from the tag's import build dir, the kept browser packs copied
 QED64_BUILD_DIR=<K'> wasm64-build/build.sh && wasm64-build/import-release.sh gate-dir <K'>
-wasm64-build/import-release.sh release v4.34.0 --runtime <K'> --base <mirror of that release> --note …
+wasm64-build/import-release.sh release v4.34.0 --runtime <K'> --packs-from <dir of the kept browser packs> --note …
 ```
 
 Options: `--packs-from <dir>` copies packs a site already serves (their
 transport bytes stay valid in every cache) instead of re-packing them;
 `--match-runtime <manifest>` makes staging stop unless the release's runtime
 manifest is byte-identical to one a site serves (so nothing baked against it
-unpairs); `--note <text>` adds a release note; `--recut <n>` a tools re-cut:
-**by reference** with `--base <mirror of the base>` (below), or by value with
-`--match-runtime` (only when staging it by reference is refused, e.g. a
-`hosting` change); `--base <mirror>` with `--runtime <build dir>` a runtime
-release by reference (below). Relative paths are the caller's.
+unpairs); `--note <text>` adds a release note; `--recut <n>` a tools re-cut, by
+value with `--match-runtime` (below). `--base <mirror>` (a release by
+reference, below) is not used for new releases. Relative paths are the caller's.
+
+**By value only, since 2026-11-01** (the user's decision, architecture review
+D3 (a)): every new release is complete on its own. A kernel-only fix is a
+runtime-only release by value, as `lean-v4.34.0-41ec565` and
+`lean-v4.34.0-e1a79c1` were: `--runtime <K'>`, with the tag's import build dir
+(`QED64_BUILD_DIR`, default `../wasm64-lean-kernel-build-<tag>`) for native64
+and the lists, and `--packs-from` a dir holding only the kept browser packs
+(`lean-core`, `mathlib-essential`, `mathlib-game-extra`: their transport bytes
+copied, not re-packed). `lean-lib` is always packed from `<K'>`: staging
+refuses a copied one whose `gitRevision` is not that build's. A tools-only fix
+is a re-cut by value (below). The release id (`lean-<tag>-<kernel7>[-rN]`) and
+the patch id (`kernel.patch`, `NNNN[a-z]`, which consumers compare) keep their
+formats. Nothing new is cut by reference: the next section stays so that the
+two releases cut that way (`lean-v4.34.0-e1a79c1-r3`, `lean-v4.34.0-53cb11e`)
+can still be read, verified and kept. `lean-v4.34.0-53cb11e` is still a
+rollback target (2026-11-01: QED64's one-step revert and the showcase's pin N),
+so it and its base `lean-v4.34.0-e1a79c1` stay (Retention). The by-reference
+code goes with the next tools release.
 
 ### Cutting a release by reference
 
@@ -148,7 +164,7 @@ The recipe, olean-format and ancestry guards have no override: their fallback
 is a full import (RELEASE-PIPELINE.md). `--packs-from`, `--match-runtime` and
 `--revision` are by-value options and refused with `--base`.
 
-A re-cut by value (the fallback; every file uploaded again): `--runtime` the
+A re-cut by value (since 2026-11-01 the only kind; every file uploaded again): `--runtime` the
 base's build dir, `--match-runtime <base>/runtime/runtime-manifest.json`,
 `--packs-from <base>/profiles`; pre-seed `<id>/native64/native64.tar.gz` and
 `<id>.native64.stamp` from the base when the stamp still matches; pass the
@@ -233,10 +249,10 @@ published by `publish` only.
 Only `publish` pushes, uploads or publishes, and only the repository owner runs it. A release is immutable
 once tagged: the tag, the GitHub assets and the R2 prefix are never rewritten
 (until the tag exists, re-running the staging replaces the staged dir). A
-mistake is fixed by a new release; a change to the tools alone (same runtime,
-same packs) is a tools re-cut `<id>-r<n>` (`--recut <n> --base <mirror>`), and a
-new runtime of the same tag a runtime release by reference (`--runtime <build
-dir> --base <mirror>`).
+mistake is fixed by a new release, by value: a change to the tools alone (same
+runtime, same packs) is a tools re-cut `<id>-r<n>` (`--recut <n> --match-runtime
+…`), and a new runtime of the same tag a runtime-only release (`--runtime <build
+dir> --packs-from …`).
 
 ## Consuming a release
 

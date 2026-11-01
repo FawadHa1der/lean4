@@ -181,25 +181,26 @@ of 5,116 steps in 5 min; a changed exported signature still re-elaborates its
 dependents, up to ~1 h), gated
 (`import-release.sh gate-dir <K'>`, which writes `GATE-PASSED`; the gate also
 asks the environment for its own facts: `isModule`, default privacy, meta
-attributes), released by reference of the release whose packs it keeps
-(`import-release.sh release vX.Y.Z --runtime <K'> --base <mirror of that
-release> --note …`: its runtime and its `lean-lib` from K', the browser packs,
-native64 and lists the base's, by reference — RELEASE.md, "Cutting a release
-by reference"; the import build dir is not needed), and handed to QED64 as a
+attributes), released by value (RELEASE.md: by value only since 2026-11-01;
+`import-release.sh release vX.Y.Z --runtime <K'> --packs-from <dir of the kept
+browser packs> --note …`: its runtime and its `lean-lib` from K', native64 and
+the lists from the tag's import build dir, which must still exist, the browser
+packs copied byte for byte), and handed to QED64 as a
 KERNEL-ONLY bump: `adopt-release.sh` in its runtime-only mode (every served
 pack's raw digest is in the release's `packs`) with `--umbrella` (oleans and
 umbrella are reused), rebake, pyramid, promote (~500 MB upload: runtime chunks
 + two snapshots). lean4game re-pairs its game snapshots the same way.
 
-A change since the base's kernel to the stdlib's sources (`src/Init`,
+A change since the import to the stdlib's sources (`src/Init`,
 `src/Std`, `src/Lean`, `src/lake`; `stage0`, the compiler that compiles them)
-makes the shared packs' oleans of those modules lag the compiled code until the
-next full import: staging refuses it unless `--stdlib-drift <why it is
-harmless>` says why (the runtime runs its own compiled code for them; the note
-is recorded). When the olean-format guard (`lean.h`, `object.h`,
-`compact.{h,cpp}`, `module.cpp`), the Docker recipe guard or the ancestry guard
-refuses (staging, and `publish` again on the record), the fix needs a full
-import: the shared packs would no longer pair with the runtime.
+makes the kept packs' oleans of those modules lag the compiled code until the
+next full import: say in a `--note` why that is harmless (the runtime runs its
+own compiled code for them), as `lean-v4.34.0-41ec565` and
+`lean-v4.34.0-e1a79c1` do. A change to the olean format's C++ (`lean.h`,
+`object.h`, `compact.{h,cpp}`, `module.cpp`) needs a full import: the kept
+packs would no longer pair with the runtime. (Staging by reference refused the
+first without `--stdlib-drift <note>` and the second always, as it did a Docker
+recipe change and a kernel that does not descend from the base's: RELEASE.md.)
 
 ## Ship gate (repository owner)
 

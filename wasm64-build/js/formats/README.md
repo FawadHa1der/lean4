@@ -53,7 +53,8 @@ ring) is [`../../EMBED-RUNTIME.md`](../../EMBED-RUNTIME.md); the release process
    A new runtime of the same tag may be released by reference too: id
    `lean-<tag>-<kernel7>` (a first cut of its own kernel commit), `base` an
    earlier first cut whose packs, native64 and lists it shares; it owns
-   `runtime/`, its `lean-lib` and `tools/`.
+   `runtime/`, its `lean-lib` and `tools/`. None has been cut by reference
+   since 2026-11-01 (by value only, `../../RELEASE.md`).
 
 ## Pairing rules (what must match, and what is only recorded)
 
