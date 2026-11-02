@@ -349,9 +349,8 @@ their owners.
 
 One more reader, outside those records: the showcase's own
 `scripts/fetch-artifacts.mjs` (not QED64's tool of that name) bootstraps pins
-from QED64's live origin through `--qed64-origin` (its lines 26-34); the
-2026-10-23 clean-up, a reviewed precedent, did not list it. No R2 delete has
-caused an outage.
+from QED64's live origin through `--qed64-origin`; the 2026-10-23 clean-up, a
+reviewed precedent, did not list it. No R2 delete has caused an outage.
 
 Reclaiming a released runtime's build dir has one cost: a tools-only fix of
 that runtime is then a rebuild, with a new build id that apps re-pair against,
