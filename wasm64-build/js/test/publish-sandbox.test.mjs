@@ -356,7 +356,8 @@ const norm = (w, s) => s.split(w.root).join("<world>").replace(/publish-release-
 describe("publish-release.mjs on a tools re-cut, against fake git, gh and rclone", { concurrency: true, skip }, () => {
   test("the sandbox: fakes first on PATH, a synthetic first cut published in them, its -r3 by reference staged", () => {
     const w = world();
-    const which = sh("/bin/sh", ["-c", "command -v git gh rclone node"], { env: env(w) }).stdout.trim().split("\n");
+    // one name per `command -v`: dash (Linux's /bin/sh) looks up only the first of several
+    const which = sh("/bin/sh", ["-c", "for t in git gh rclone node; do command -v \"$t\"; done"], { env: env(w) }).stdout.trim().split("\n");
     assert.deepEqual(which, [...["git", "gh", "rclone"].map((t) => path.join(BIN, t)), path.join(NODE_BIN, "node")]);
     const base = readJson(path.join(w.stage, BASE_ID, "release.json")), r3 = readJson(path.join(w.rel, "release.json"));
     assert.deepEqual(checkReleaseRecord(r3), []);
