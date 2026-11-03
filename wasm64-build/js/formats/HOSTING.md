@@ -27,16 +27,20 @@ showcase); a host that breaks one gets a refusal, not a slow page.
    root-absolute: runtime chunks `/runtime/chunks/<file>`, pack parts
    `/profiles/<file>`. A site serves a release by mapping its files under
    `/runtime/` and `/profiles/` onto the release's `runtime/` and `profiles/`.
-   No manifest is rewritten. The **site's own mutable pointers stay the site's**
-   and are never in a release: `/profiles/index.json` (which packs the page
-   offers — QED64 lists lean-core + mathlib-essential, lean4game lean-core only)
-   and `/snapshots/*` — the snapshot index, its `.snapz` files and the per-build
-   index copies `/snapshots/index.<buildId>.json` and
+   No manifest is rewritten. The **site's own mutable pointers stay the site's**,
+   wherever it stores them, and are never in a release: `/profiles/index.json`
+   (the packs the site lists — QED64 lean-core + mathlib-essential, lean4game
+   lean-core only — read by a site's tools and by shells on a QED64 from before
+   2026-11, however recently deployed; QED64's own pages stopped then) and
+   `/snapshots/*` — the snapshot index, its `.snapz` files and,
+   for a site that publishes them, the per-build index copies
+   `/snapshots/index.<buildId>.json` and
    `/snapshots/profiles-index.<buildId>.json` ([snapshot-index.md](snapshot-index.md);
    the profile index's copy lives under `/snapshots/` too, because every other
    `/profiles/*` path is the release's). So a Worker routes `/profiles/index.json`
-   to the site's prefix and the rest of `/profiles/*` and `/runtime/*` to the
-   release (or tries the site first and falls back to the release).
+   to the site's own copy (in its prefix or its deploy: "Snapshot indexes" below)
+   and the rest of `/profiles/*` and `/runtime/*` to the release (or tries the
+   site first and falls back to the release).
 5. **Bytes are served exactly.** No `Content-Encoding` and no transformation on
    `*.part-NNN` (runtime chunks, pack parts) or `*.snapz`: they are verified at
    their served length and SHA-256, and a chunk that arrives encoded is refused.
@@ -116,7 +120,7 @@ indexed as QED64's `docs/SNAPSHOT-INDEX.md` specifies;
 The R2 prefix holds only immutable names (the release's own files; the mutable
 per-site pointers — `profiles/index.json`, `snapshots/index.json`, the per-build
 copies `snapshots/index.<buildId>.json` and `snapshots/profiles-index.<buildId>.json`,
-the site's choice of runtime — stay in the site's prefix), so it is uploaded with
+the site's choice of runtime — stay with the site), so it is uploaded with
 `rclone copy --immutable --s3-no-check-bucket --checksum`, never `sync`, digest-named objects first
 and `release.json` last:
 
@@ -177,18 +181,69 @@ would even block its own). `publish` checks the copy against the staged clones
 
 A site whose Worker serves one R2 prefix today needs a per-route prefix to
 serve `/runtime/*` and `/profiles/*` from `lean4-wasm64/<id>/` while its
-snapshots and its `profiles/index.json` stay in its own prefix.
+`.snapz` files stay in its own prefix, and each of its indexes there or in its
+deploy.
 
-## Snapshot indexes: the pinned copies
+## Snapshot indexes: served from the deploy, or pinned by copies
 
 A site's snapshot index names the runtime its entries were baked for, and a
-shell built for another runtime refuses them. So the index is pinned like the
-runtime manifest: beside the mutable `/snapshots/index.json` the site serves
+shell running another runtime refuses them. So a shell and the index it reads
+have to switch together: a site serves its index from its deploy, or pins it with
+copies. A site that does neither has a window at every runtime change: between
+the index's upload and the deploy, a live shell refuses every entry. A rebake for
+the same runtime has no such window.
+
+### Served from the site's own deploy: no copies
+
+A site whose deploy switches in one step (Workers static assets are versioned
+with the Worker) and also carries its shell and its route to the release may
+serve its mutable indexes, `/snapshots/index.json` and `/profiles/index.json`, as
+static assets of that deploy. A deploy and a rollback then switch all of them
+together, and a shell reads the index deployed with it, so the site needs no
+per-build copies. Each index is judged alone: a snapshot index left in storage
+still needs its copies.
+
+- **Uploading:** a new release first, then the `.snapz` files, then the one
+  deploy. Use `copy`, never `sync`: a rollback uploads nothing, so a `.snapz`
+  stays while a rollback target's index or an open tab may still name it.
+- **Routing:** exactly those two paths go to the assets, ahead of the routes to
+  storage. Rules 5 to 8 still apply: an `index.json` revalidates, and a missing
+  one is a `404`.
+- **Deploying:** being in one deploy does not pair them. Refuse a build whose
+  snapshot index is missing or names another runtime: each fails every boot, and
+  only another deploy repairs it. Refuse one that names a `.snapz` that is not up
+  yet: every boot that needs it fails until the upload. A missing
+  `/profiles/index.json` fails only what still reads it.
+- **Old pages:** a shell from an earlier deploy that pins its build id and boots
+  after a runtime deploy (a page restored from a cache) falls back to the new
+  runtime, reads the new index and asks for its own runtime's copy. The `404` (a
+  failed load in the console) keeps the new index, which pairs with the new
+  runtime. A shell that pins nothing reads the new manifest and index and asks for
+  no copy.
+- **Moving from copies:** stop writing the two indexes and the copies to storage,
+  and keep those there, frozen, while a version of the site that reads them is a
+  rollback target. That version reads the mutable index first, so copies alone do
+  not keep it bootable. While a copy stays, it answers the old page above, which
+  is then refused until a reload.
+- **Overlays:** an overlay's own index (QED64's `?snapshots=snapshots/<dir>`,
+  `/snapshots/<dir>/index.json`) is neither path. It stays in storage, switches at
+  its upload, and a shell reads no copy for it, so give each runtime's overlay its
+  own directory.
+
+QED64 has done this since 2026-11: its `docs/DEPLOY.md`, "Atomic deploys" and
+"Serving a site's own indexes from the deploy".
+
+### Kept in storage: pinned by copies
+
+An upload to storage and a deploy are two steps, and a shell can read an index of
+another runtime between them. So the index is pinned like the runtime manifest:
+beside the mutable `/snapshots/index.json` the site serves
 `/snapshots/index.<buildId>.json`, the same bytes, for every runtime a deployed
-shell may be paired with (and, for a site that pins its profile index the same
-way, `/snapshots/profiles-index.<buildId>.json`). QED64's bake writes the
-copy beside the `index.json` it upserts; a site that merges baked entries into
-its served index publishes a copy derived from the merged index instead.
+shell may be paired with (and, for shells that read a pinned profile index,
+`/snapshots/profiles-index.<buildId>.json`; QED64's pages stopped reading it in
+2026-11). QED64's bake writes the copy beside the `index.json` it upserts; a
+site that merges baked entries into its served index publishes a copy derived
+from the merged index instead.
 
 - **Reading.** A shell paired with build id B:
   1. reads the mutable `index.json` (revalidating: `cache: "no-cache"` in a
@@ -203,7 +258,9 @@ its served index publishes a copy derived from the merged index instead.
      step 1's checks, and **uses it only if it has entries and every one names
      B**; a `404`, HTML, a network error, a malformed body, an empty copy or a
      copy naming any other runtime keeps the mutable index;
-  3. loads only entries whose `runtime` is B (formats/README.md, pairing).
+  3. loads only entries whose `runtime` is the build id it booted: B, unless its
+     pinned manifest is gone and it fell back to the mutable one ("Old pages"
+     above; formats/README.md, pairing).
 
   Mutable first, not copy first: an index paired with the shell costs no
   second request, so a site that publishes no copies never logs a `404` for
@@ -213,7 +270,7 @@ its served index publishes a copy derived from the merged index instead.
 - **Uploading, an invariant:** the copy for runtime R reaches the server before
   any mutable index that names R, and before a shell paired to R is deployed;
   the outgoing index's copy is pinned first if it is missing. The order
-  `.snapz` files, copies, mutable indexes, deploy (QED64's) meets it and keeps
+  `.snapz` files, copies, mutable indexes, deploy meets it and keeps
   every shell that reads the copies on its pairing. The stricter order
   `.snapz` files, copies, deploy, `index.json` last also keeps a deployed shell
   that reads only the mutable index (one older than the copies) clear of the

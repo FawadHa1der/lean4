@@ -6,14 +6,13 @@ bake `pipeline/snapshot/bake-snapshot.mjs`) and the snapshot probe
 2026-11-01). This package writes no `.snapz` and no index (the gate's R10 cell
 bakes a raw `.snap` for its own use only).
 
-The specification is QED64's `docs/SNAPSHOT-INDEX.md`, which will hold the
-writer rules (the entry keys and their order, the upsert, the locks, the
-per-build copy). Until it lands there, the previous full specification is this
-path at kernel commit `66e4f0c431` (last changed in `271abbf1ef`).
+The specification is QED64's `docs/SNAPSHOT-INDEX.md`, with the writer rules
+(the entry keys and their order, the upsert, the locks, the per-build copy).
 
 What stays in this package: the pairing rule (an entry's `runtime` is the
 runtime manifest's `buildId`: [README.md](README.md), pairing rules) and how a
-site serves the index, its `.snapz` files and the per-build copies
-([HOSTING.md](HOSTING.md), "Snapshot indexes: the pinned copies"). Snapshots
+site serves the index, its `.snapz` files and any per-build copies
+([HOSTING.md](HOSTING.md), "Snapshot indexes: served from the deploy, or pinned
+by copies"). Snapshots
 and their index are a site's product, never part of a toolchain release
 ([`../../RELEASE.md`](../../RELEASE.md)).
