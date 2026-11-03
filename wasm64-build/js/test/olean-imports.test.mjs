@@ -324,7 +324,7 @@ test("a forwarding script re-exports the readers and runs the same CLI through m
   const olean = path.join(tmp, "M.olean");
   write(olean, makeOlean([{ module: "Init" }], DATA));
   const url = JSON.stringify(pathToFileURL(script).href);
-  // QED64's shim pattern (tests/adversarial/preflight.mjs there): export *, then main() when it is the entry point
+  // the forwarding shape: export *, then main() when it is the entry point
   const shim = path.join(tmp, "olean-imports.mjs");
   fs.writeFileSync(shim, [
     `export * from ${url};`,
