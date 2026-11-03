@@ -31,7 +31,7 @@
 //          [--resident-probe <QED64 checkout>/pipeline/snapshot/resident-probe.mjs [--resident-snap-dir <dir>]]
 //   --mathlib-lib: a complete olean tree paired with the artifact (Init through Mathlib: QED64's
 //   lib-tree-slim), mounted as the only library of block 7's Mathlib-header cell.
-//   --resident-probe: QED64's resident FileWorker driver (tier 3; it runs from QED64's checkout, as it
+//   --resident-probe: QED64's resident FileWorker driver (QED64's CLI-CONTRACT sets its tier; it runs from QED64's checkout, as it
 //   imports public/workers/worker-constants.js, the page's argv), run on the gate's own init.snap.
 //   --resident-snap-dir: a dir holding init.snap and mathlib.snap baked for this artifact (QED64's
 //   adoption $W/snapshot): the same driver with --mathlib, block 7's covered cell. Needs --resident-probe.
@@ -813,7 +813,7 @@ const stableFile = (file, stableMs, quietMs) => {
     return size > 0 && Date.now() - since >= stableMs && quietFor >= quietMs;
   };
 };
-// QED64's resident FileWorker driver (tier 3, run from QED64's checkout): the page's argv, thread budget
+// QED64's resident FileWorker driver (run from QED64's checkout): the page's argv, thread budget
 // and parking from its public/workers/worker-constants.js; its experiment switches (environment) off.
 const RESIDENT_ENV = { PROBE_HEADER: "", PROBE_MINIMAL: "", SKIP_TASK_MANAGER: "", DUMP_MSGS: "", RAW_TAP: "" };
 async function residentRun(args, timeoutMs) {
@@ -826,7 +826,7 @@ async function residentRun(args, timeoutMs) {
       : `no verdict (exit ${r.status}${r.timedOut ? ", killed by the timeout" : ""})` };
 }
 
-// The same driver's file mode (--probe-file, QED64 review R4; tier 3, detected by its text): one probe
+// The same driver's file mode (--probe-file, QED64 review R4; detected by its text): one probe
 // as the page runs a document, act 1 only; its final diagnostics, one {"caption":"",severity,pos,endPos,
 // data} line each, are judged at the editor level, one pass.
 const residentFiles = !!residentProbe && fs.readFileSync(residentProbe, "utf8").includes("--probe-file");
