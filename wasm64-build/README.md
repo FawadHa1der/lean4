@@ -1,20 +1,21 @@
 # wasm64 kernel build (branch `qed64-wasm64`)
 
 This branch is Lean 4 (base: cauli/lean4 `reinstate-wasm` @ 5732b84 — the
-original Emscripten/Memory64 enablement) plus the QED64 patch series that
+original Emscripten/Memory64 enablement; upstream stable releases are merged
+in, v4.35.0 the latest) plus the QED64 patch series that
 makes the compiler + language server run **inside a browser tab**: the
 resident language server over a shared-memory stdin ring,
 compacted-environment snapshot save/load, covering-environment header
 resolution, legacy-olean tolerance for the lean4game ecosystem, and the
 Emscripten survival fixes underneath them (`EMBED-RUNTIME.md` is the
 embedding contract).
-`PATCHES.md` documents every commit; the git history of this branch IS the
+`PATCHES.md` documents every patch; the git history of this branch IS the
 series (the former mail-patch files are retired).
 
 ## Build
 
 Requires Docker (image builds from `../docker-wasm64`, emsdk 6.0.5) and
-~10 GB in the Docker VM. Since patch 0039 the host writes into the build tree
+at least 10 GB of memory in the Docker VM. Since patch 0039 the host writes into the build tree
 the container made (the native-symbol table, `lib/temp`): Docker Desktop and
 rootless Docker map it to the host user; under rootful Docker on Linux it is
 root's, and `build.sh` stops before writing, saying so.
@@ -48,7 +49,7 @@ through all of it: `RELEASE-PIPELINE.md`.
 ## Releases
 
 Gated builds are published as versioned, checksummed releases
-(`lean-v4.34.0-a8817d0`): runtime, library packs, the native compiler, module
+(`lean-v4.35.0-b081e7c`): runtime, library packs, the native compiler, module
 lists and the `lean4-wasm64` tools, as a GitHub Release and an R2 prefix.
 Apps pin a release instead of a build directory. `RELEASE.md` is the process;
 `js/formats/` the specification; `EMBED-RUNTIME.md` the runtime's embedding
@@ -57,10 +58,12 @@ ABI; `js/` the tools (installed from a release's `tools/` tarball: `npx lean4-wa
 ## Consumers
 
 - **QED64 / Lean playground** (`wasm64-lean-fable/qed64`): serves the runtime
-  and the lean-core + mathlib-essential packs, bakes environment snapshots
-  (binary-paired to the exact runtime — rebake after every runtime change).
+  and environment snapshots it bakes from the lean-core + mathlib-essential
+  packs (binary-paired to the exact runtime — rebake after every runtime
+  change). Its pages read no pack since 2026-11.
 - **wasm64-lean4game**: game snapshots on the line's runtime (the release it
-  pins: its `wasm/lean4-wasm64-release.json`) and the mathlib-game-extra pack.
+  pins: its `wasm/lean4-wasm64-release.json`), compiled and baked against the
+  packs, mathlib-game-extra included.
 - **widgets showcase**: QED64's runtime and packs under its own origin.
 
 One branch serves every app deliberately: app-specific behavior is gated at

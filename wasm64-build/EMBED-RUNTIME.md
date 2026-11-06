@@ -160,8 +160,10 @@ The three task-manager variables take decimal digits only (since 0038): anything
 - `IO.appPath` is `/bin/lean.wasm` in the browser, so the built-in library dir
   is `/lib/lean`; `/bin` must exist (`lean_init_search_path` stats it).
 - Each `LEAN_PATH` dir holds `<Module path>.olean` with its `.ir`,
-  `.olean.server`, `.olean.private` facets. QED64 mounts each pack read-only
-  (WORKERFS, by the manifest's byte-range table) at its own dir.
+  `.olean.server`, `.olean.private` facets. A host that mounts packs mounts
+  each read-only (WORKERFS, by the manifest's byte-range table) at its own
+  dir. QED64's pages mount none since 2026-11: every environment they load is
+  a snapshot.
 - WORKERFS works only in a worker, and reads from Lean pthreads are proxied to
   the main runtime thread — olean imports on elaboration threads stall there.
   The resident language server therefore never imports oleans: header

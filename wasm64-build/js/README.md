@@ -29,6 +29,12 @@ echo 'theorem t : 2 + 2 = 4 := rfl' > t.lean
 npx lean4-wasm64 run --artifact toolchain --work . -- /work/t.lean   # library: toolchain/lib/lean; --work is /work, Lean's cwd is /
 ```
 
+That file has no messages, so Lean prints nothing; add `#print axioms t` to
+see output. The process does not exit when Lean is done (EMBED-RUNTIME.md
+§3.5): read the output, then stop it (Ctrl-C). The repository's top-level
+README covers Mathlib under Node (`lean-core` + `mathlib-essential` unpacked
+into one tree, passed with `--lib`).
+
 `fetch` reads `release.json` first and checks it whole (self-digest, the id
 rule, safe paths, …) before writing anything; with `--id` and `--digest` it is
 pinned. It then streams every file it selects through SHA-256, keeps a file

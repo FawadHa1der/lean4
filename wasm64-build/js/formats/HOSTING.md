@@ -351,4 +351,5 @@ in every `location` that adds one), `gzip off` for octet-stream, `try_files $uri
 - The one-shot CLI does not exit on its own (patches 0020/0031): judge a job by
   its output and reap the process, as `gate.mjs` does.
 - Browsers, for completeness: desktop Chrome/Edge 133+ or Firefox 134+; Safari
-  has no Memory64. A tab with Mathlib loaded needs about 8–9 GB.
+  has no Memory64. A QED64 tab with Mathlib loaded needs about 2.5 GB
+  (QED64's measurement of 2026-11-02, on runtime wasm64-36d7f415).

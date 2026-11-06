@@ -20,7 +20,7 @@ directory.
 | Path | What | From |
 |---|---|---|
 | `runtime/` | the runtime manifest (twice: mutable name and `runtime-manifest.<buildId>.json`), `lean.js` + `lean.wasm` as 16 MiB chunks, the other files of the build's `bin/` (`leanmake`) | the gated runtime build (`build/stage1/bin`), `chunk-runtime.mjs` |
-| `profiles/` | the library packs, manifests + gzip transport parts (`pack-set.mjs` per `js/packs.json`): for browsers `lean-core` (Init) and `mathlib-essential` (Lean, Std, the Mathlib closure), for the games `mathlib-game-extra`; for Node `lean-lib`, the runtime build's own whole `lib/lean` (Init, Std, Lean, Lake, …) — the tree the gate ran on | the import build; `lean-lib` from the runtime build |
+| `profiles/` | the library packs, manifests + gzip transport parts (`pack-set.mjs` per `js/packs.json`): `lean-core` (Init) and `mathlib-essential` (Lean, Std, the Mathlib closure), from which the sites compile and bake (browsers load snapshots; QED64's pages read no pack since 2026-11), for the games `mathlib-game-extra`; for Node `lean-lib`, the runtime build's own whole `lib/lean` (Init, Std, Lean, Lake, …) — the tree the gate ran on | the import build; `lean-lib` from the runtime build |
 | `native64/native64.tar.gz` | the native linux/aarch64 compiler of the same line (`bin/`, `include/`, `share/`, `lib/lean/`) — the compiler that writes every shipped Mathlib olean; it runs in the toolchain image (a native link needs `LEAN_CC=gcc`: the shipped `leanc` defaults to emcc) | `native64.sh` |
 | `lists/` | module lists and selection records of the Mathlib packs | `mathlib-tree.sh` |
 | `tools/` | the `lean4-wasm64` package tarball | `npm pack` of `wasm64-build/js` at a committed tree |
