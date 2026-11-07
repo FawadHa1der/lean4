@@ -352,6 +352,14 @@ One more reader, outside those records: the showcase's own
 from QED64's live origin through `--qed64-origin`; the 2026-10-23 clean-up, a
 reviewed precedent, did not list it. No R2 delete has caused an outage.
 
+The showcase's live site also reads a release prefix in place. Since 2026-11-05 its
+Worker (pin O: QED64 521cf3f, runtime `wasm64-36d7f415704473d9`; deployed from
+showcase b24587d) serves `/runtime/*` and `/profiles/*`, except
+`/profiles/index.json`, straight from `qed64-artifacts/lean4-wasm64/lean-v4.35.0-b081e7c/`
+and keeps no copies. Moving, deleting or rewriting any object under that prefix
+breaks its live boots, as it would QED64's. Its previous pin H used its own copies
+and reads no release prefix. A new release reaches the showcase only when it re-pins.
+
 Reclaiming a released runtime's build dir has one cost: a tools-only fix of
 that runtime is then a rebuild, with a new build id that apps re-pair against,
 not a re-cut by value. Reclaiming a tag's import build dir ends every by-value
