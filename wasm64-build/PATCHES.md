@@ -467,6 +467,17 @@ Meta-heavy (`decide`, `simp`, `omega`) and Mathlib-tactic (`ring`, `linarith`,
 and against `LEAN_WASM_STACK_PROBE_SLOTS=0`). Of the stdlib's generated C only
 `Lean/CoreM.c` changed (names added, none removed or renumbered).
 
+Consumers match the two messages' text. Since QED64 f89b3e2 (2026-11-08, its
+HARDENING #92), QED64 explains to visitors any message that contains
+"the WebAssembly runtime's stack is exhausted" (CoreM.lean) or "the WebAssembly
+engine's stack is exhausted" (interrupt.cpp) (`GUARD_PHRASES`, lib/stack-limit.ts).
+Its integration test `stack-guard-phrases.test.ts` fails a candidate `lean.wasm`
+that lacks either phrase. Rewording either phrase needs a matching QED64 change,
+and the release notes must say so. The rest of each message may change freely.
+QED64 deliberately does not treat the kernel's "(kernel) deep recursion detected"
+or the interpreter's deep-recursion message as the browser's stack, because they
+come from the depth counter and the shadow stack.
+
 ## 0037 — wasm: lean_wasm_compile reports the messages of elaboration tasks (c8db69fdd3)
 
 A false proof compiled with errors=0 through `lean_wasm_compile` whenever it
