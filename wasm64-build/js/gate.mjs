@@ -470,17 +470,23 @@ const overflowed = (out) => /Maximum call stack size exceeded|too much recursion
 // G3's third pool size, abc (the default, 24: no change for this run).
 const GUARD = '#eval IO.println "GUARD [rtstats?]"\n';
 const guardOf = (out) => askedStats(out, "GUARD")?.guard ?? null;
+// 0036's two messages in full: consumers recognise the guard by these words (QED64's lib/stack-limit.ts,
+// PATCHES.md 0036), so a reword has to stop here, not reach a release. Each is checked whole: the Meta one's
+// first words are also plain maxRecDepth's.
+const GUARD_TEXT_META = "maximum recursion depth has been reached: the WebAssembly runtime's stack is exhausted (a browser gives it far less stack than native Lean has; raising maxRecDepth does not help, and the same code may succeed natively)";
+const GUARD_TEXT_KERNEL = "the WebAssembly engine's stack is exhausted: this proof recurses deeper than a browser allows (the same proof may check natively)";
+const GUARD_REWORDED = "not 0036's exact words: consumers match them, so a reword needs a matching QED64 change and a release-notes line (PATCHES.md 0036)";
 const deepMetaRun = await runLean(readProbe("deep-recursion.lean") + GUARD, "deep", { ...CHROME, LEAN4_WASM64_PTHREAD_POOL: "abc", ...RTSTATS });
 poolTargets.push(["abc", 24, askedStats(deepMetaRun.stdout, "GUARD")]);
 const deepMeta = stripDebug(deepMetaRun.stdout);
-gate(/maximum recursion depth has been reached/.test(deepMeta) && /DEEP SURVIVED/.test(deepMeta) && !overflowed(deepMeta),
-  "deep recursion at Chrome's stack (Meta): Lean's max-recursion error, the thread survives",
-  overflowed(deepMeta) ? "the engine's stack overflowed (RangeError)" : /DEEP SURVIVED/.test(deepMeta) ? "" : "no result");
+gate(deepMeta.includes(GUARD_TEXT_META) && /DEEP SURVIVED/.test(deepMeta) && !overflowed(deepMeta),
+  "deep recursion at Chrome's stack (Meta): 0036's message in full, the thread survives",
+  overflowed(deepMeta) ? "the engine's stack overflowed (RangeError)" : !/DEEP SURVIVED/.test(deepMeta) ? "no result" : deepMeta.includes(GUARD_TEXT_META) ? "" : GUARD_REWORDED);
 const deepKernelRun = await runLean(readProbe("deep-recursion-kernel.lean") + GUARD, "deep-kernel", { ...CHROME, ...RTSTATS });
 const deepKernel = stripDebug(deepKernelRun.stdout);
-gate(/engine's stack is exhausted/.test(deepKernel) && /DEEP SURVIVED/.test(deepKernel) && !overflowed(deepKernel),
-  "deep recursion at Chrome's stack (kernel): the kernel's error, the thread survives",
-  overflowed(deepKernel) ? "the engine's stack overflowed (RangeError)" : /DEEP SURVIVED/.test(deepKernel) ? "" : "no result");
+gate(deepKernel.includes(GUARD_TEXT_KERNEL) && /DEEP SURVIVED/.test(deepKernel) && !overflowed(deepKernel),
+  "deep recursion at Chrome's stack (kernel): 0036's message in full, the thread survives",
+  overflowed(deepKernel) ? "the engine's stack overflowed (RangeError)" : !/DEEP SURVIVED/.test(deepKernel) ? "no result" : deepKernel.includes(GUARD_TEXT_KERNEL) ? "" : GUARD_REWORDED);
 const deepRoomyRun = await runLean(readProbe("deep-recursion.lean") + GUARD, "deep-roomy", RTSTATS);
 const deepRoomy = stripDebug(deepRoomyRun.stdout);
 gate(/DEEP SURVIVED/.test(deepRoomy) && !/error/i.test(deepRoomy),
