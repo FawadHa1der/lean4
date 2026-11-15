@@ -476,7 +476,9 @@ that lacks either phrase. Rewording either phrase needs a matching QED64 change,
 and the release notes must say so. The rest of each message may change freely.
 QED64 deliberately does not treat the kernel's "(kernel) deep recursion detected"
 or the interpreter's deep-recursion message as the browser's stack, because they
-come from the depth counter and the shadow stack.
+come from the depth counter and the shadow stack. Since 0044 interrupt.cpp throws a
+key and the kernel's words live in `KernelException.toMessageData` (Message.lean),
+and both errors also carry the LSP code `wasm.stackExhausted`.
 
 ## 0037 — wasm: lean_wasm_compile reports the messages of elaboration tasks (c8db69fdd3)
 
@@ -1149,3 +1151,121 @@ fixed stock v4.35.0 value with an explicit allowlist (the superset public scope,
 bodies, `.server` docs, the covered superset). Natively, a legacy environment saved and read back
 self-contained keeps `header.modules`/`moduleData` and rebuilds the same map. QED64 adds module cases
 to its corpus at the [Q] re-pair.
+
+## 0043 — wasm: the runtime allocates with Emscripten's mimalloc (`-sMALLOC=mimalloc`) (d3ba1a49ef)
+
+**The problem.** Emscripten's default allocator, dlmalloc, serializes every allocation behind one
+global lock. Lean 4.35 has no small-object allocator of its own here (`USE_MIMALLOC` is off under
+Emscripten), so every Lean object goes through that lock, and Lean's worker threads queue on it.
+QED64's first `exact?` builds the library-search index (the profiler's "lazy discriminator import
+initialization", ~99% of that call) on all of its Lean workers, and it got slower with each worker:
+x2.1 per doubling, 56.6 s with QED64's eight against 5.9 s with one. Natively the same index takes
+1.8 s on 14 threads.
+
+**The change.** `-sMALLOC=mimalloc` in `EMSCRIPTEN_LINK_SETTINGS` links Emscripten's mimalloc port
+in place of dlmalloc. It takes its memory from emmalloc, which grows the wasm memory as before
+(`ALLOW_MEMORY_GROWTH`). Link-only: no compiled object changes except `util/ffi.cpp`, which embeds
+the link flags, and no `.olean` changes (every `.olean`, `.olean.server`, `.olean.private` and
+`.ilean` of the A/B build was byte-identical to b081e7c's). Lean's own mimalloc (`USE_MIMALLOC`)
+stays off and untried: the comment that said mimalloc cannot grow wasm memory (122ffe73dd, wasm32)
+was retracted by 01a8cc1e65, whose author found the real cause in stale-extern stubs (b6b649fe64),
+and 9fed1e0ea3 restored it verbatim for an unrelated test. It is rewritten.
+
+**Measured** (QED64's A/B, 2026-11-14: b081e7c041 against b081e7c041 plus this flag alone; kernel
+control A' byte-identical to the served `wasm64-36d7f415704473d9`; Chrome headless, two runs per arm,
+ABBA order; report `qed64/work/mimalloc-ab-2026-11-14/REPORT.md`):
+- index build at 1/2/4/8 workers: 5.90/12.3/25.5/56.6 s with dlmalloc, 5.0/3.3/2.65/2.44 s with
+  mimalloc (x0.79 per doubling); a 29-tactic document that builds its own indexes cold at 8
+  workers: 75-80 s against 6.5-6.8 s;
+- committed wasm memory: +148 to +328 MiB after the first `exact?`, +212 to +264 MiB after QED64's
+  heavy sequence, highest 3.29 GiB against 3.04 GiB; mimalloc grows it in 128 MiB arena steps at
+  that size, coarser in longer sessions. Renderer memory (phys_footprint): +5 to +21 MiB idle, equal to
+  0.2 GiB lower after work;
+- the same Lean answers: covered facts, 353,960 constants with an identical name-hash sum, all 38
+  steps of the heavy sequence, 28 browser runs with no death. Snapshots baked on it have the same
+  sizes; their bytes differ only where nothing reads them after load (closure padding bytes 20..23,
+  which `lean_alloc_closure` never writes and the compactor copies, and `CompactedRegion.bufferOffset`
+  of 96-byte header-only `.olean.server` parts, a distance between two of the bake's malloc blocks).
+
+**The module.** `lean.wasm` +71,902 B. Three new imports (`_emscripten_date_now`,
+`_emscripten_err`, `_random_get`: mimalloc's clock, error output and seed) and 20 new exports, all
+malloc-family (`operator new`/`delete` variants, `___libc_{malloc,calloc,realloc,free}`,
+`_emscripten_builtin_{malloc,calloc,realloc,free}`, `_malloc_size`, `_malloc_usable_size`,
+`_reallocf`, `_strndup`). The glue items hosts reach into are unchanged (gate S6). A host that
+pins the export list exactly sees the new names.
+
+**Known limits (emsdk 6.0.5: emscripten#28028, fixed in emsdk 7.0.0 by #28035).** mimalloc takes
+its memory from emmalloc, and hands it blocks over 512 MiB directly. emmalloc's region sizes are
+32-bit there, which fails in two ways:
+- A single allocation of about 4 GiB or more returns NULL (reported in #28028 on emsdk 6.0.12:
+  4032 MiB succeeds, 4096 MiB fails). A snapshot bake whose compactor reserve is 4 GiB or more stops
+  at "failed to reserve the initial region buffer", so bakes on this runtime keep reserves below
+  4 GiB. Without a reserve, the compactor's buffer grows by `realloc`, which mimalloc does not extend
+  in place for a block that no longer fits. Such a buffer therefore tops out at 2 GiB, because the
+  next doubling is a 4 GiB allocation, and the error names `LEAN_COMPACTOR_RESERVE`. The Mathlib
+  snapshot is about 1.1 GB raw. The comment above that `realloc` (compact.cpp) predates this.
+- A free emmalloc region of 4 GiB or more has its size decoded wrongly (the 32-bit `FREE_REGION_FLAG`
+  mask, emmalloc.c), and a later free corrupts the heap silently. That needs a wasm heap that has
+  grown past 4 GiB. This was read in source, not reproduced. No run reached it (QED64's pages peaked
+  at 3.29 GiB), and heaps past 4 GiB are untested on this runtime. The runtime's maximum is 16 GiB,
+  so a host that lets the heap pass 4 GiB carries this risk until the move to emsdk 7.
+
+**A failed C++ `new` aborts.** emsdk 6.0.5 builds mimalloc as C, and its `operator new` calls
+`abort()` when an allocation fails and no new-handler is installed (the fork installs none). So
+the runtime ends with "Aborted()" (onAbort with an empty reason) instead of throwing
+`std::bad_alloc`. On task threads nothing changes: a `bad_alloc` there already ended in
+`std::terminate`, because the runtime catches nothing on those paths. Two places see the change:
+- the shell's main-thread handler (shell.cpp), which printed "out of memory" and exited 1;
+- the olean and snapshot save boundary (module.cpp), which returned an IO error.
+A failed Lean-object allocation is unchanged: malloc returns NULL and Lean panics with "out of
+memory".
+
+**Gate.** No check of its own: the A/B build passed the gate at bf81e60eee (111 ok, 0 FAIL;
+check-link and the 5b funclet guard too), and the release build carries it together with 0044.
+
+## 0044 — wasm: the stack-guard errors carry the LSP code `wasm.stackExhausted` (0bf1fb2f79)
+
+**The problem.** Consumers recognised 0036's two errors by their English (QED64's `GUARD_PHRASES`,
+since f89b3e2). A reword made the match miss silently, and text cannot tell a quoted phrase, or a
+`[Error pretty printing: …]` fallback, from the guard itself.
+
+**The change.** Both errors carry the tag `wasm.stackExhausted`, which the server turns into the
+diagnostic's `code`, so a client can match a stable key. Five sites (design and review:
+`work/stack-error-code-2026-11-08/DESIGN.md`, kernel-local):
+- `CoreM.checkNativeStack`: an inner tag under `runtime.maxRecDepth`. The outer tag stays first:
+  `Exception.isMaxRecDepth` reads only the outermost kind, and `try`/`first` must still treat the
+  guard as a runtime error;
+- `interrupt.cpp` (`scope_rec_depth`): the kernel guard throws the key `"wasm.stackExhausted"` and
+  stays `KernelException.other`, so AddDecl's `addAsAxiom` recovery still runs;
+- `Message.lean`: `KernelException.toMessageData` matches the key, renders 0036's English
+  unchanged ("(kernel) the WebAssembly engine's stack is exhausted: …", which now lives here) and
+  adds the tag inside the `m!`, so the message's kind stays anonymous;
+- `Elab/Tactic/Decide.lean`: `decide +kernel` rethrows an exception with the tag, since its lazy
+  diagnosis (`ofLazyM`) would hide the tag from `hasTag`. That error loses its "Tactic `decide`
+  failed" wrapper, and `whnf` is not re-run at render time;
+- `Widget/InteractiveDiagnostic.lean`: an error whose data has the tag gets `code`
+  `"wasm.stackExhausted"`; every other message keeps stock's named-error code. It reaches
+  `publishDiagnostics` and the interactive-diagnostics RPC. `lean_wasm_compile`'s JSON has no
+  `code`.
+
+Three stock files (Message, Decide, InteractiveDiagnostic) become fork-patched. Private bodies only:
+the `.olean` of the four Lean files is byte-identical to the v4.35.0 import build's (a compile check
+on 2026-11-08, then `cmp` on the 0bf1fb2f79 build), so Mathlib's oleans pair unchanged. A runtime-only release pairs this runtime with the
+v4.35.0 import's packs, whose copies of these four files hold the old bodies until the next full
+import. Harmless as for 0036: only compiled code runs them (native dispatch wins), and no proof
+unfolds them.
+
+**What it cannot do.** A tactic that catches the guard's error and reports its own loses both words
+and tag (HARDENING #71, #92). A rethrow that flattens to text loses the tag (core's internal-error paths, e.g.
+`Replay.lean`'s `throwKernelException`). Engine deaths are still recognised by the browser's
+own words.
+
+**Consumers.** QED64 accepts the code or the phrase (its feature/stack-guard-code, 6cbe20f) and
+drops its phrases only when every runtime its helper callers pin carries the code. The gate still
+pins both phrases whole (bf81e60eee).
+
+**Gate** (`js/gate.mjs`, after the 0036 checks; probe `js/probes/stack-guard-code.lean`, at
+Chrome's stack). `#lsp_code` elaborates one command and prints the `code` that
+`msgToInteractiveDiagnostic` gives each of its errors: the Meta probe's and the kernel probe's
+theorems must get `wasm.stackExhausted`, and an ordinary `decide` failure must not. The tag is
+spelt out at each site, so this run is what catches a typo in one copy.
