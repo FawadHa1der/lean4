@@ -1187,6 +1187,12 @@ ABBA order; report `qed64/work/mimalloc-ab-2026-11-14/REPORT.md`):
   which `lean_alloc_closure` never writes and the compactor copies, and `CompactedRegion.bufferOffset`
   of 96-byte header-only `.olean.server` parts, a distance between two of the bake's malloc blocks).
 
+QED64's adoption of the release build (2026-11-15, its HARDENING #93) adds a session that imports
+only `Init`. It starts with 256 MiB of wasm memory and has grown it to about 871 MiB when ready,
+against 369-443 MiB with dlmalloc. QED64 attributes the difference to mimalloc's arena
+reservations. A Mathlib session does not show it, because it starts at 2 GiB, which already holds
+them. That session's RAM was not measured.
+
 **The module.** `lean.wasm` +71,902 B. Three new imports (`_emscripten_date_now`,
 `_emscripten_err`, `_random_get`: mimalloc's clock, error output and seed) and 20 new exports, all
 malloc-family (`operator new`/`delete` variants, `___libc_{malloc,calloc,realloc,free}`,
