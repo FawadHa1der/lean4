@@ -113,11 +113,11 @@ option(FORCE_GMP "Build against the available GMP even if older than the require
 option(USE_MIMALLOC "use mimalloc" ON)
 set(LEAN_MI_SECURE 0 CACHE STRING "Configure mimalloc memory safety mitigations (https://github.com/microsoft/mimalloc/blob/v2.2.7/include/mimalloc/types.h#L56-L60)")
 
-# mimalloc's OS layer can't grow memory under Emscripten: mi_malloc_small
-# returns null once its initial reserve is exhausted (even a 24-byte request
-# fails with GBs of wasm heap free), aborting olean import via
-# lean_internal_panic_out_of_memory. Fall back to Emscripten's own allocator,
-# which grows the wasm memory correctly (ALLOW_MEMORY_GROWTH).
+# Lean's own mimalloc (USE_MIMALLOC) stays off under Emscripten. The runtime's
+# allocator is Emscripten's mimalloc port instead, chosen at link time by
+# -sMALLOC=mimalloc in EMSCRIPTEN_LINK_SETTINGS below (PATCHES.md 0043). The reason
+# once given here, that mimalloc cannot grow wasm memory, was a wasm32
+# misdiagnosis that 01a8cc1e65 retracted; Lean's own mimalloc has not been tried since.
 if(CMAKE_SYSTEM_NAME MATCHES "Emscripten")
   set(USE_MIMALLOC OFF)
 endif()
@@ -231,7 +231,7 @@ if(CMAKE_SYSTEM_NAME MATCHES "Emscripten")
       # ensures generated Lean C, runtime C++, and the final link all agree.
       string(APPEND EMSCRIPTEN_SETTINGS " -m64")
     endif()
-    set(EMSCRIPTEN_LINK_SETTINGS "-sALLOW_MEMORY_GROWTH=1 -sINCOMING_MODULE_JS_API=print,printErr,setStatus,locateFile,mainScriptUrlOrBlob,INITIAL_MEMORY,wasmMemory,noInitialRun,preRun,onRuntimeInitialized,onAbort,onExit,arguments,ENV")
+    set(EMSCRIPTEN_LINK_SETTINGS "-sALLOW_MEMORY_GROWTH=1 -sINCOMING_MODULE_JS_API=print,printErr,setStatus,locateFile,mainScriptUrlOrBlob,INITIAL_MEMORY,wasmMemory,noInitialRun,preRun,onRuntimeInitialized,onAbort,onExit,arguments,ENV -sMALLOC=mimalloc")
 
   # EMSCRIPTEN_DEBUG: Enable readable function names and assertions for debugging
   # This makes the WASM larger and slower but shows actual function names in stack traces
