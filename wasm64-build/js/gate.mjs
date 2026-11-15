@@ -6,7 +6,7 @@
 //  2. proof smoke        — a kernel-checked rfl example, exit 0
 //  3. error smoke        — a false proof must produce a positioned error
 //  4. the persistent path, module semantics (0034), the task-manager storm (0035),
-//     deep recursion at a browser's stack (0036), and async elaboration through
+//     deep recursion at a browser's stack (0036; its errors' LSP code, 0044), and async elaboration through
 //     lean_wasm_compile (0037: every message of an Elab.async declaration reported once)
 //  5. THE PARSE GATE     — garbage input must produce >=1 error diagnostic
 //  6. module files on a shared environment through lean_wasm_compile (0042: the public constant
@@ -472,7 +472,8 @@ const GUARD = '#eval IO.println "GUARD [rtstats?]"\n';
 const guardOf = (out) => askedStats(out, "GUARD")?.guard ?? null;
 // 0036's two messages in full: consumers recognise the guard by these words (QED64's lib/stack-limit.ts,
 // PATCHES.md 0036), so a reword has to stop here, not reach a release. Each is checked whole: the Meta one's
-// first words are also plain maxRecDepth's.
+// first words are also plain maxRecDepth's. Since 0044 both errors also carry an LSP code (checked below);
+// the words stay pinned while any consumer's pinned runtime predates it.
 const GUARD_TEXT_META = "maximum recursion depth has been reached: the WebAssembly runtime's stack is exhausted (a browser gives it far less stack than native Lean has; raising maxRecDepth does not help, and the same code may succeed natively)";
 const GUARD_TEXT_KERNEL = "the WebAssembly engine's stack is exhausted: this proof recurses deeper than a browser allows (the same proof may check natively)";
 const GUARD_REWORDED = "not 0036's exact words: consumers match them, so a reword needs a matching QED64 change and a release-notes line (PATCHES.md 0036)";
@@ -492,6 +493,22 @@ const deepRoomy = stripDebug(deepRoomyRun.stdout);
 gate(/DEEP SURVIVED/.test(deepRoomy) && !/error/i.test(deepRoomy),
   "the same Meta proof at the default stack still checks (the probe does not cost valid proofs)",
   /error/i.test(deepRoomy) ? deepRoomy.split("\n").find((l) => /error/i.test(l))?.slice(0, 160) : "");
+// PATCH 0044: both guard errors carry the LSP code `wasm.stackExhausted`, so a client can match a key
+// instead of the words above. The tag is spelt out at each site (CoreM, interrupt.cpp's key, Message,
+// Decide, InteractiveDiagnostic), so this run is what catches a typo in one copy. It reads the code
+// msgToInteractiveDiagnostic builds, as the server sends it; an ordinary error must not get it.
+const GUARD_CODE = "wasm.stackExhausted";
+const codeRun = await runLean(readProbe("stack-guard-code.lean"), "stack-guard-code", CHROME);
+const codeOut = stripDebug(codeRun.stdout);
+const codesOf = (site) => [...codeOut.matchAll(new RegExp(`^LSP CODE ${site} (\\S+)$`, "gm"))].map((m) => m[1]);
+const shownCodes = (site) => { const c = codesOf(site); return c.length ? `codes: ${c.join(", ")}` : "no error reported"; };
+const codeTail = overflowed(codeOut) ? "the engine's stack overflowed (RangeError)" : !/CODES DONE/.test(codeOut) ? "no result" : "";
+gate(codesOf("metaSite").includes(GUARD_CODE) && !codeTail,
+  `[0044] the Meta guard's error has the LSP code ${GUARD_CODE}`, codeTail || shownCodes("metaSite"));
+gate(codesOf("kernelSite").includes(GUARD_CODE) && !codeTail,
+  `[0044] the kernel guard's error has the LSP code ${GUARD_CODE}`, codeTail || shownCodes("kernelSite"));
+gate(codesOf("plain").length > 0 && !codesOf("plain").includes(GUARD_CODE) && !codeTail,
+  `[0044] an ordinary error does not get ${GUARD_CODE}`, codeTail || shownCodes("plain"));
 // G7: counters only (the guard itself is 0036's): a question is counted at each probe point of
 // the two guard sites, a refusal by site (0 the kernel's depth guard, 1 Core.checkSystem)
 if (is0038) {
