@@ -90,15 +90,15 @@ LEAN_EXPORT scope_rec_depth::scope_rec_depth() {
     }
 #if defined(LEAN_EMSCRIPTEN)
     // A normal C++ exception here unwinds through every landing pad, where running out kills the
-    // thread. Plain `exception`: the kernel reports it as `other` ("(kernel) " + this text), not
-    // as `deepRecursion`, whose advice (raise maxRecDepth) would not help.
+    // thread. Plain `exception`: the kernel reports it as `other`, not as `deepRecursion`, whose
+    // advice (raise maxRecDepth) would not help. The string is a key, not prose:
+    // KernelException.toMessageData matches it, owns the English and adds the tag.
     if (g_rec_depth == 1 || g_rec_depth >= g_engine_probe_depth) {
         note_engine_probe(); // 0038: counted for lean_wasm_engine_probes; the guard is unchanged
         if (!engine_stack_has_headroom()) {
             note_engine_guard_trip(0);
             g_rec_depth--;
-            throw exception("the WebAssembly engine's stack is exhausted: this proof recurses deeper "
-                            "than a browser allows (the same proof may check natively)");
+            throw exception("wasm.stackExhausted");
         }
         g_engine_probe_depth = g_rec_depth + g_engine_probe_levels;
     }

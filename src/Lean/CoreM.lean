@@ -523,7 +523,7 @@ error's advice: raising `maxRecDepth` does not give the engine more stack.
 -/
 def checkNativeStack : CoreM Unit := do
   unless (← nativeStackOk) do
-    throw <| Exception.error (← getRef) <| .tagged `runtime.maxRecDepth <| MessageData.ofFormat <| Std.Format.text <|
+    throw <| Exception.error (← getRef) <| .tagged `runtime.maxRecDepth <| .tagged `wasm.stackExhausted <| MessageData.ofFormat <| Std.Format.text <|
       "maximum recursion depth has been reached: the WebAssembly runtime's stack is exhausted \
         (a browser gives it far less stack than native Lean has; raising maxRecDepth does not help, \
         and the same code may succeed natively)"

@@ -886,6 +886,8 @@ def toMessageData (e : Kernel.Exception) (opts : Options) : MessageData :=
     mkCtx env lctx opts m!"(kernel) application type mismatch{indentExpr e}\nargument has type{indentExpr argType}\nbut function has type{indentExpr fnType}"
   | invalidProj env lctx e              => mkCtx env lctx opts m!"(kernel) invalid projection{indentExpr e}"
   | thmTypeIsNotProp env constName type => mkCtx env {} opts m!"(kernel) type of theorem '{.ofConstName constName true}' is not a proposition{indentExpr type}"
+  | other "wasm.stackExhausted"         =>
+    m!"(kernel) {MessageData.tagged `wasm.stackExhausted "the WebAssembly engine's stack is exhausted: this proof recurses deeper than a browser allows (the same proof may check natively)"}"
   | other msg                           => m!"(kernel) {msg}"
   | deterministicTimeout                => "(kernel) deterministic timeout"
   | excessiveMemory                     => "(kernel) excessive memory consumption detected"

@@ -259,7 +259,11 @@ def msgToInteractiveDiagnostic (text : FileMap) (m : Message) (hasWidgets : Bool
   let message := match (← msgToInteractive m.data hasWidgets |>.toBaseIO) with
     | .ok msg => msg
     | .error ex => TaggedText.text s!"[error when printing message: {ex.toString}]"
-  let code? := (errorNameOfKind? m.kind).map (.string ·.toString)
+  let code? :=
+    if m.severity == .error && m.data.hasTag (· == `wasm.stackExhausted) then
+      some (.string "wasm.stackExhausted")
+    else
+      (errorNameOfKind? m.kind).map (.string ·.toString)
   pure { range, fullRange? := some fullRange, severity?, source?, message, tags?, leanTags?, isSilent?, code? }
 
 end Lean.Widget
