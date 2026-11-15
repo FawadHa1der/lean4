@@ -198,6 +198,10 @@ gate_build_dir() {
 cmd_gate() {
   need_tag "$1"; local bd; bd="$(build_dir "$1")"
   built_from_head "$1" || die "sources changed since the artifact was built — rebuild" 31
+  # the gate runs from the working tree: HEAD's gate checks HEAD's patches (0044's code, for one),
+  # so gating an older tag's build from a later line would fail and remove that build's GATE-PASSED
+  git diff --quiet "$(cat "$bd/BUILT-COMMIT")" HEAD -- "${SRC_PATHS[@]}" \
+    || die "the sources at HEAD differ from $bd's build: gate it from import/$1, or gate-dir a build of HEAD" 31
   gate_build_dir "$bd"
 }
 
