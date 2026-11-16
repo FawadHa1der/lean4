@@ -74,10 +74,11 @@ is a re-cut by value (below). The release id (`lean-<tag>-<kernel7>[-rN]`) and
 the patch id (`kernel.patch`, `NNNN[a-z]`, which consumers compare) keep their
 formats. Nothing new is cut by reference: the next section stays so that the
 two releases cut that way (`lean-v4.34.0-e1a79c1-r3`, `lean-v4.34.0-53cb11e`)
-can still be read, verified and kept. `lean-v4.34.0-53cb11e` is still a
-rollback target (2026-11-01: QED64's one-step revert and the showcase's pin N),
-so it and its base `lean-v4.34.0-e1a79c1` stay (Retention). The by-reference
-code goes with the next tools release.
+can still be read, verified and kept. `lean-v4.34.0-53cb11e` is still named by
+the showcase's pin N, a local fallback that was never deployed. It was also
+QED64's one-step revert until QED64 moved to `lean-v4.35.0-0bf1fb2` on
+2026-11-16. So it and its base `lean-v4.34.0-e1a79c1` stay (Retention). The
+by-reference code goes with the next tools release.
 
 ### Cutting a release by reference
 
@@ -352,13 +353,23 @@ One more reader, outside those records: the showcase's own
 from QED64's live origin through `--qed64-origin`; the 2026-10-23 clean-up, a
 reviewed precedent, did not list it. No R2 delete has caused an outage.
 
-The showcase's live site also reads a release prefix in place. Since 2026-11-05 its
-Worker (pin O: QED64 521cf3f, runtime `wasm64-36d7f415704473d9`; deployed from
-showcase b24587d) serves `/runtime/*` and `/profiles/*`, except
-`/profiles/index.json`, straight from `qed64-artifacts/lean4-wasm64/lean-v4.35.0-b081e7c/`
-and keeps no copies. Moving, deleting or rewriting any object under that prefix
-breaks its live boots, as it would QED64's. Its previous pin H used its own copies
-and reads no release prefix. A new release reaches the showcase only when it re-pins.
+The showcase's live site also reads a release prefix in place. Its Worker serves
+`/runtime/*` and `/profiles/*`, except `/profiles/index.json`, straight from
+`qed64-artifacts/lean4-wasm64/lean-v4.35.0-b081e7c/` and keeps no copies. Moving,
+deleting or rewriting any object under that prefix breaks its live boots, and
+QED64's rollback too. QED64 itself has read `lean-v4.35.0-0bf1fb2/` in place since
+2026-11-16. The showcase's pins, as of its P1+P2 (live 2026-11-10):
+- pin O (QED64 521cf3f, runtime `wasm64-36d7f415704473d9`): `lean-v4.35.0-b081e7c`,
+  read in place since 2026-11-05 (first deployed from showcase b24587d). The live
+  Worker version is 7a4bb96e (showcase 6370564); its rollback, 476d6c11, reads the
+  same prefix;
+- pin N (QED64 58ebbad): `lean-v4.34.0-53cb11e`, a local fallback, never deployed;
+- pin H (Worker 29176b6f, a rollback target): only its own copies under
+  `qed64-showcase/{runtime,profiles}`, no release prefix.
+
+Its retired pins I-L, whose descriptors are kept at showcase b24587d, were the only
+readers of `lean-v4.34.0-e1a79c1`, which stays as 53cb11e's base. A new release
+reaches the showcase only when it re-pins.
 
 Reclaiming a released runtime's build dir has one cost: a tools-only fix of
 that runtime is then a rebuild, with a new build id that apps re-pair against,
