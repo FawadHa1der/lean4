@@ -21,8 +21,11 @@
 #                                                    # the owner's step: record + tag, push, GitHub release,
 #                                                    # R2, each verified; resumable (--dry-run to preview)
 #   wasm64-build/import-release.sh status  [<tag>]   # where an import stands
-#   wasm64-build/import-release.sh run     <tag>     # import -> build -> gate, stopping at the first thing
-#                                                    # that needs judgment (conflicts, build break, gate fail)
+#   wasm64-build/import-release.sh run     <tag>     # import, then stop before the build: on conflicts, or
+#                                                    # with drift's and delta's lists after a clean merge.
+#                                                    # Run again once they are accounted for: delta (prints)
+#                                                    # -> build -> gate, stopping on a build break or a gate
+#                                                    # failure
 #
 # Only `publish` pushes or uploads, and the repository owner runs it. Otherwise
 # nothing here pushes, uploads or deploys: `accept` prints the push command and
@@ -32,7 +35,8 @@
 #
 # Exit codes: 0 done / up to date; 10 a new release is ready to import;
 # 11 a new release exists but Mathlib/Batteries have not tagged it yet;
-# 20 merge conflicts left in the tree; 30 build failed; 31 gate failed; 2 usage.
+# 20 merge conflicts left in the tree; 21 run committed the merge and stopped
+# before the build, for drift and delta; 30 build failed; 31 gate failed; 2 usage.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -177,21 +181,38 @@ cmd_import() {
     die "$br exists without $tag merged — finish or delete it"
   fi
   git config rerere.enabled true        # remember resolutions across imports
+  local from; from="$(git symbolic-ref -q --short HEAD || git rev-parse HEAD)"   # where HEAD was
   git switch -c "$br" "$LINE"
   say "merging $tag ($(git rev-list --count "$LINE..$tag") upstream commits) into $br"
-  if git merge --no-ff --no-commit "$tag" >/dev/null 2>&1; then :; fi
+  # exit 1 = conflicts, left in the tree. Anything else (2: an untracked file in
+  # the way, say) means no merge started, and nothing below may commit: the
+  # stage0 step would stage the tag's stage0 and `git commit` would record it as
+  # a one-parent "Merge tag" commit. MERGE_HEAD holds what was merged (the tag
+  # object for an annotated tag: compare commits). The new branch is then all
+  # there is to undo: back to where HEAD was, and the branch goes, unless the
+  # merge left the tree changed.
+  local mrc=0; git merge --no-ff --no-commit "$tag" >/dev/null || mrc=$?
+  if [ "$mrc" -gt 1 ] || [ "$(git rev-parse -q --verify 'MERGE_HEAD^{commit}' || :)" != "$(git rev-parse "$tag^{commit}")" ]; then
+    [ -z "$(git status --porcelain --untracked-files=no)" ] \
+      && { git switch -q "$from" 2>/dev/null || git switch -q --detach "$from"; } && git branch -q -D "$br" \
+      && die "git merge $tag did not start (exit $mrc, git's message above): $br is deleted, HEAD is back where it was. Fix that and rerun"
+    die "git merge $tag did not start (exit $mrc, git's message above): nothing was committed. Fix that, leave $br (git switch --detach), delete it (git branch -D $br) and rerun"
+  fi
   # stage0/ is upstream's bootstrap compiler, built natively (64-bit): never
   # merge it, take the tag's tree whole (files it dropped go too). The line
   # keeps no edits there (v4.36.0's build confirmed upstream's stage0 builds it).
-  git restore --source="$tag" --staged --worktree -- stage0
+  # Out of the index and the tree first: restore refuses an unmerged path the tag
+  # does not have (modify/delete, the side files of a file/directory swap).
+  git rm -r -q -f --ignore-unmatch -- stage0 && git restore --source="$tag" --staged --worktree -- stage0 \
+    || die "could not take $tag's stage0 (above): the merge is left in the tree, nothing was committed"
   local unmerged; unmerged="$(git diff --name-only --diff-filter=U)"
   if [ -n "$unmerged" ]; then
-    say "CONFLICTS — resolve, 'git add', 'git commit', then: $0 build $tag"
+    say "CONFLICTS — resolve, 'git add', 'git commit', then: $0 drift $tag; $0 delta $tag; $0 build $tag"
     say "$unmerged" | sed 's/^/  U /'
     return 20
   fi
   git commit --quiet -m "Merge tag '$tag' into the wasm64 kernel line"
-  say "merged cleanly: $(git rev-parse --short HEAD). Review before trusting it: $0 drift $tag; $0 delta $tag"
+  say "merged cleanly: $(git rev-parse --short HEAD). Before the first build: $0 drift $tag; $0 delta $tag"
 }
 
 cmd_build() {
@@ -286,11 +307,29 @@ cmd_status() {
 }
 
 cmd_run() {
-  need_tag "$1"
-  cmd_import "$1" || return $?
-  cmd_build "$1"
-  cmd_gate "$1"
-  say "kernel side done. Next: review '$0 drift $1' and '$0 delta $1', then the downstream lanes in wasm64-build/RELEASE-PIPELINE.md"
+  need_tag "$1"; local tag="$1" self="$REPO/wasm64-build/import-release.sh" made=1
+  git rev-parse -q --verify "import/$tag" >/dev/null && made=0   # merged before: by import, or an earlier run
+  # A plain call, so errexit stays on inside cmd_import: under `|| …` bash
+  # switches it off there, and a failed switch, restore or commit would run on
+  # into the build. Its return 20 still ends the script with 20.
+  cmd_import "$tag"
+  if git merge-base --is-ancestor "$tag" "$LINE"; then say "nothing to run"; return 0; fi
+  # drift and delta are quick and add nothing to the repository. Each runs as
+  # its own process, so that a failure there (the previous tag not fetched,
+  # say) stops only it, and errexit stays on inside it.
+  if [ "$made" = 1 ]; then
+    # This run made the merge: stop before the build, while a fix to what the
+    # build reads costs no rebuild and no re-gate.
+    bash "$self" drift "$tag" || say "note: drift failed (above)"
+    bash "$self" delta "$tag" || say "note: delta failed (above): fix that before the build"
+    say "run stops before the build: account for drift's and delta's lists. A fix to what the build reads (${SRC_PATHS[*]}) goes on import/$tag now, not after a build. Then: $0 run $tag"
+    return 21
+  fi
+  bash "$self" delta "$tag" \
+    || die "delta failed (above): fix that and run again, or build and gate by hand ($0 build $tag; $0 gate $tag)"
+  cmd_build "$tag"
+  cmd_gate "$tag"
+  say "kernel side done. Before accept: '$0 delta $tag' again, every entry with its reason (the merge message or a fix commit), and the drift review done; then the downstream lanes in wasm64-build/RELEASE-PIPELINE.md"
 }
 
 case "${1:-}" in
