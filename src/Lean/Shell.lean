@@ -47,10 +47,12 @@ These functions provide a WASM-friendly API that caches the environment
 between calls, avoiding the slow re-import of Init modules on each compile.
 -/
 
+-- Private by default (a `module` file with no `public section`): since v4.36 (#15553) the core
+-- build lints an explicit `private` here as redundant, and `--wfail` makes that an error.
 /-- Cache of import-set → environment. Each distinct set of header imports gets
 its own cached environment, so `import Std …` (or any imports) is slow only on
 its first compile and fast on every repeat, just like Init-only code. -/
-private initialize wasmEnvCache : IO.Ref (Array (Array Name × Environment)) ← IO.mkRef #[]
+initialize wasmEnvCache : IO.Ref (Array (Array Name × Environment)) ← IO.mkRef #[]
 
 /-- Patch 0032 (K1b): the environment cache IS the registry the resident
 resolver reads; registered once, at process initialization. -/
@@ -179,7 +181,8 @@ def wasmCompile (code : String) (fileName : String := "<input>") : IO UInt32 := 
       -- `snapshotTasks`: kept, they would pile up across commands, and a later
       -- `#guard_msgs` or async linter would take in an earlier command's tasks.
       modify fun s => { s with commandState :=
-        { s.commandState with messages := {}, traceState := {}, snapshotTasks := #[] } }
+        { s.commandState with
+          messages := {}, traceState := {}, snapshotTasks := #[], codeQualityEntryTasks := #[] } }
       Elab.Frontend.elabCommandAtFrontend cmd
       let st ← Elab.Frontend.getCommandState
       acc := acc ++ st.messages
