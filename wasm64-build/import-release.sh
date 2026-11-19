@@ -5,6 +5,8 @@
 #   wasm64-build/import-release.sh watch             # is there a release we have not imported?
 #   wasm64-build/import-release.sh import  <tag>     # branch import/<tag>, merge the tag (stops on conflicts)
 #   wasm64-build/import-release.sh drift   <tag>     # files BOTH sides changed: the semantic-drift review list
+#   wasm64-build/import-release.sh delta   <tag> [<rev>]
+#                                                    # files where the merge is not the tag + the line's own edits
 #   wasm64-build/import-release.sh build   <tag>     # Docker stage1 build into ../wasm64-lean-kernel-build-<tag>
 #   wasm64-build/import-release.sh gate    <tag>     # release gate on that artifact (writes GATE-PASSED)
 #   wasm64-build/import-release.sh gate-dir <build dir>
@@ -115,6 +117,55 @@ cmd_drift() {
   both_sides "$ours" "$1" | grep -v '^stage0/' || true
 }
 
+# Is the merge the tag plus the line's own edits? Stable tags sit on release
+# branches and the merge base is on master, so git's merge can keep the
+# previous tag's release-branch copies (v4.36.0: a module and three checker
+# pins that v4.35.0 had and v4.36.0 does not). This compares each file of
+# <rev> (default import/<tag>) with the tag's file where the line kept the
+# previous tag's, else with the tag's file plus the line's own edits on top of
+# the previous tag (git merge-file). Files only the line has are skipped (a merge
+# cannot get them wrong), and so is stage0 (taken whole). It lists; each entry
+# needs a reason (a recorded conflict resolution, a post-merge fix) or a fix.
+merge_of() { # the first-parent commit of <rev> whose second parent is <tag>
+  local t c; t="$(git rev-parse "$1^{commit}")"
+  for c in $(git rev-list --first-parent --merges "$2"); do
+    [ "$(git rev-parse "$c^2")" = "$t" ] && { printf '%s' "$c"; return 0; }
+  done
+  return 1
+}
+blob_of() { git cat-file -e "$1:$2" 2>/dev/null && git cat-file blob "$1:$2"; }
+
+cmd_delta() {
+  need_tag "$1"; local tag="$1" rev="${2:-import/$1}" merge ours prev tmp f rc n=0 edited
+  merge="$(merge_of "$tag" "$rev")" || die "no first-parent commit of $rev merges $tag"
+  ours="$merge^1"; prev="$(imported_tag "$ours")"
+  [ -n "$prev" ] || die "the line before the merge contains no stable tag"
+  tmp="$(mktemp -d)"
+  say "# $rev against $tag + the line's own edits on top of $prev (stage0 is taken whole, not checked)"
+  edited="$(git -c core.quotePath=false diff --name-only --no-renames "$prev" "$ours" -- . ':!stage0')"
+  while IFS= read -r f; do
+    [ -n "$f" ] && ! grep -qxF -- "$f" <<<"$edited" || continue
+    say "NOT-TAG   $f  (the line kept $prev's file, and it differs from $tag's)"; n=$((n + 1))
+  done < <(git -c core.quotePath=false diff --name-only --no-renames "$tag" "$rev" -- . ':!stage0')
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    git cat-file -e "$prev:$f" 2>/dev/null || git cat-file -e "$tag:$f" 2>/dev/null || continue
+    if ! git cat-file -e "$ours:$f" 2>/dev/null; then # the line deleted it
+      if git cat-file -e "$rev:$f" 2>/dev/null; then say "DEVIATES  $f  (the line deleted it)"; n=$((n + 1)); fi
+      continue
+    fi
+    blob_of "$tag" "$f" >"$tmp/tag" || :; blob_of "$prev" "$f" >"$tmp/prev" || :; blob_of "$ours" "$f" >"$tmp/ours"
+    rc=0; git merge-file -q -p "$tmp/tag" "$tmp/prev" "$tmp/ours" >"$tmp/want" 2>/dev/null || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      say "CONFLICT  $f  (the line's edits do not apply cleanly to $tag's file: review the resolution)"; n=$((n + 1))
+    elif ! blob_of "$rev" "$f" | cmp -s - "$tmp/want"; then
+      say "DEVIATES  $f  (not $tag's file + the line's edits on top of $prev)"; n=$((n + 1))
+    fi
+  done <<<"$edited"
+  rm -r "$tmp"
+  say "# $n file(s) to account for"
+}
+
 cmd_import() {
   need_tag "$1"; local tag="$1" br="import/$1"
   ensure_upstream
@@ -140,7 +191,7 @@ cmd_import() {
     return 20
   fi
   git commit --quiet -m "Merge tag '$tag' into the wasm64 kernel line"
-  say "merged cleanly: $(git rev-parse --short HEAD). Review the drift list before trusting it: $0 drift $tag"
+  say "merged cleanly: $(git rev-parse --short HEAD). Review before trusting it: $0 drift $tag; $0 delta $tag"
 }
 
 cmd_build() {
@@ -239,13 +290,14 @@ cmd_run() {
   cmd_import "$1" || return $?
   cmd_build "$1"
   cmd_gate "$1"
-  say "kernel side done. Next: review '$0 drift $1', then the downstream lanes in wasm64-build/RELEASE-PIPELINE.md"
+  say "kernel side done. Next: review '$0 drift $1' and '$0 delta $1', then the downstream lanes in wasm64-build/RELEASE-PIPELINE.md"
 }
 
 case "${1:-}" in
   watch)  cmd_watch ;;
   import) cmd_import "${2:-}" ;;
   drift)  cmd_drift "${2:-}" ;;
+  delta)  cmd_delta "${2:-}" "${3:-}" ;;
   build)  cmd_build "${2:-}" ;;
   gate)   cmd_gate "${2:-}" ;;
   gate-dir) cmd_gate_dir "${2:-}" ;;

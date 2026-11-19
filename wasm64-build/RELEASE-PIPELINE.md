@@ -10,6 +10,7 @@ owns the lanes inside its own repository. This file is the map and the order.
                        ▼
  [K1] import   merge the tag on import/vX.Y.Z            import-release.sh import   ── judgment: conflicts
  [K2] drift    review files both sides changed           import-release.sh drift    ── judgment: review
+      delta    merge = the tag + the line's own edits?   import-release.sh delta    ── judgment: account for each
  [K3] build    wasm64 stage1 in Docker (own build dir)   import-release.sh build    1.5–3 h cold
  [K4] gate     numBits / proof / error / PARSE / resident import-release.sh gate     ~8 min
  [K5] native64 same commit, native linux, wasm64 target  native64.sh                ~1 h
@@ -60,6 +61,20 @@ changed only a native 32-bit build.
    `Lean/Environment.lean` + `Lean/Elab/Import.lean` (legacy-import tolerance,
    `irPhases`), `library/module.cpp` (non-mmap read path), `runtime/io.cpp`
    (stdin ring), `util/shell.cpp` (no second thread under Emscripten).
+   **Delta check** — a clean merge can also keep stale files. Stable tags sit
+   on release branches and the merge base is on master, so git's merge keeps
+   the previous tag's release-branch copies wherever master's side looks
+   unchanged. v4.36.0's merge kept a module that v4.35.0's backport added
+   (`src/LeanExport/Json.lean`, still imported by the merged `Parse.lean`)
+   and v4.35.0's three checker pins in `src/CMakeLists.txt`. Neither build
+   nor gate noticed. `delta <tag>` compares every file with what it should
+   be: the tag's file where the line kept the previous tag's (`NOT-TAG`), else
+   the tag's file plus the line's own edits on top of the previous tag, by
+   `git merge-file` (`DEVIATES`, or `CONFLICT` where those edits do not apply
+   cleanly). Run it once the import branch builds, and account for each entry
+   in the merge message or a fix commit. For v4.36.0 that leaves the two CI
+   workflows (conflicts resolved in the merge) and `Lean/Shell.lean` (a
+   post-merge fix).
 3. **Build breaks / gate failures** — fix on the import branch as ordinary
    commits on top of the merge. Never amend the merge once anyone has seen it.
 4. **Exports** — what the IR interpreter resolves by name (every boxed wrapper,
@@ -94,6 +109,7 @@ changed only a native 32-bit build.
 wasm64-build/import-release.sh watch            # 0 up to date · 10 ready · 11 waiting for Mathlib/Batteries
 wasm64-build/import-release.sh run v4.34.0      # import → build → gate, stops at the first judgment point
 wasm64-build/import-release.sh drift v4.34.0
+wasm64-build/import-release.sh delta v4.34.0    # each listed file needs a reason or a fix
 wasm64-build/native64.sh v4.34.0                # after build: the compiler that writes every shipped olean
 wasm64-build/mathlib-tree.sh v4.34.0            # Mathlib@v4.34.0 → <build dir>/mathlib/{essential,extra}-tree
 wasm64-build/import-release.sh accept v4.34.0   # LOCAL fast-forward of qed64-wasm64; prints the push command
