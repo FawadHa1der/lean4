@@ -1,5 +1,5 @@
 #!/bin/sh
-# QED64 clean-room configure: identical to configure.sh except
+# QED64 clean-room configure: the spike's configure.sh (in git at eaf94493ba) except
 #  * EMSCRIPTEN_MAXIMUM_MEMORY=17179869184 (16 GiB) — the certified runtime's
 #    declared maximum; an embedder may import any memory whose maximum is <=
 #    this, so 16 GiB keeps every worker configuration type-compatible;

@@ -21,7 +21,7 @@ export const CONTRACT = Object.freeze([
   { name: "_lean_init_task_manager_using", patch: null }, { name: "_lean_enable_initializer_execution", patch: null },
   { name: "_lean_init_search_path", patch: null }, { name: "_lean_mk_string", patch: null },
   { name: "_lean_io_result_show_error", patch: null },
-  { name: "_lean_wasm_compile", patch: null }, { name: "_lean_wasm_reset", patch: null },
+  { name: "_lean_wasm_compile", patch: null },
   { name: "_lean_wasm_load_snapshot", patch: null }, { name: "_lean_wasm_load_snapshot_mem", patch: null },
   { name: "_lean_wasm_shell_mark_preinitialized", patch: null }, { name: "_lean_browser64_configure_input_ring", patch: null },
   { name: "_lean_wasm_task_manager_parked_threads", patch: null },

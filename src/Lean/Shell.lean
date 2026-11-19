@@ -65,14 +65,12 @@ def getOrCreateWasmEnvFor (imports : Array Import) : IO Environment := do
   let key := Language.Lean.qed64HeaderKey imports
   for (k, env) in (← wasmEnvCache.get) do
     if k == key then
-      IO.eprintln "[WASM DEBUG] getOrCreateWasmEnvFor: returning cached env"
       -- A cached env may predate extensions registered by a later snapshot's
       -- [init] replay; grow its extension array or generic extension access
       -- panics ("invalid environment extension has been accessed").
       let env ← env.ensureExtensionsSizeForWasm
       wasmEnvCache.modify (·.map fun (k', e) => if k' == key then (k', env) else (k', e))
       return env
-  IO.eprintln s!"[WASM DEBUG] getOrCreateWasmEnvFor: cache miss, importing {key}…"
   -- Mirror the frontend's header import (`processHeaderCore`, Elab/Import.lean):
   --  * `loadExts := true` loads the environment extensions — parser notation
   --    (e.g. `+`) and the instance database (e.g. `OfNat`). Without it (the
@@ -93,7 +91,6 @@ def getOrCreateWasmEnvFor (imports : Array Import) : IO Environment := do
   unsafe enableInitializersExecution
   let env ← importModules imports {} 0
     (level := .server) (loadExts := true) (leakEnv := true) (isModule := false)
-  IO.eprintln "[WASM DEBUG] getOrCreateWasmEnvFor: importModules completed"
   wasmEnvCache.modify (·.push (key, env))
   return env
 
@@ -110,8 +107,6 @@ Returns 0 on success, 1 on error. Output is written to stdout as JSON.
 -/
 @[export lean_wasm_compile]
 def wasmCompile (code : String) (fileName : String := "<input>") : IO UInt32 := do
-  IO.eprintln s!"[WASM DEBUG] wasmCompile called with code length={code.length}, fileName={fileName}"
-  IO.eprintln "[WASM DEBUG] Creating input context..."
   let inputCtx := Parser.mkInputContext code fileName
   -- Parse the file's header (its `import` lines) and import that closure into a
   -- per-import-set cached environment, then elaborate the body against it. This
@@ -119,11 +114,9 @@ def wasmCompile (code : String) (fileName : String := "<input>") : IO UInt32 := 
   -- repeat. `headerToImports` includes `Init` implicitly unless the file is
   -- `prelude`, matching the normal frontend.
   let (header, parserState, headerMessages) ← Parser.parseHeader inputCtx
-  IO.eprintln "[WASM DEBUG] Getting or creating environment for header imports..."
   let env ← getOrCreateWasmEnvFor (Elab.headerToImports header)
   -- the cached environment is shared between files; this file's header decides its semantics
   let env := env.setIsModule (Elab.HeaderSyntax.isModule header)
-  IO.eprintln "[WASM DEBUG] Environment ready"
 
   let opts : Options := {}
   let cmdState := Elab.Command.mkState env headerMessages opts
@@ -192,11 +185,7 @@ def wasmCompile (code : String) (fileName : String := "<input>") : IO UInt32 := 
       -- `#guard_msgs` collects them). Only UNREPORTED messages: a task starts
       -- from its parent's log marked reported, so `reported` repeats messages
       -- that are already in `acc`.
-      let mut announced := false
       for t in st.snapshotTasks do
-        if !announced && !(← IO.hasFinished t.task) then
-          announced := true
-          IO.eprintln s!"[WASM DEBUG] waiting on the tasks of the command at line {(inputCtx.fileMap.toPosition (cmd.getPos?.getD 0)).line}"
         let tree ← IO.wait t.task
         for snap in tree.getAll do
           for msg in snap.diagnostics.msgLog.toList do
@@ -209,7 +198,6 @@ def wasmCompile (code : String) (fileName : String := "<input>") : IO UInt32 := 
 
   -- Output messages as JSON
   let messages := msgLog.toList
-  IO.eprintln s!"[WASM DEBUG] Processing {messages.length} messages..."
   for msg in messages do
     -- Convert to interactive diagnostic, then to plain diagnostic for JSON
     let interactiveDiag ← Widget.msgToInteractiveDiagnostic inputCtx.fileMap msg false
@@ -233,17 +221,7 @@ def wasmCompile (code : String) (fileName : String := "<input>") : IO UInt32 := 
 
   -- Return success/failure
   let hasErrors := messages.any (·.severity == .error)
-  IO.eprintln s!"[WASM DEBUG] Done, hasErrors={hasErrors}"
   return if hasErrors then 1 else 0
-
-/--
-Reset the WASM environment cache.
-Call this if you need to re-import modules (e.g., after changing search paths).
--/
-@[export lean_wasm_reset]
-def wasmReset : IO Unit := do
-  wasmEnvCache.set #[]
-  IO.println "[WASM] Environment cache cleared"
 
 /--
 Seed the WASM environment cache from a `--incr-header-save` snapshot file,
@@ -261,7 +239,6 @@ a regular import.
 @[export lean_wasm_load_snapshot]
 def wasmLoadSnapshot (path : String) : IO UInt32 := do
   try
-    IO.eprintln s!"[WASM DEBUG] wasmLoadSnapshot: loading {path}"
     let (cmdState, initModIdxs) ← unsafe Elab.loadHeaderSnapshotCmdState ⟨path⟩
     -- shared environments are legacy imports; `setIsModule` gives each file its flag (0042)
     let env := cmdState.env.setMainModule .anonymous |>.setIsModule false
@@ -288,11 +265,12 @@ def wasmLoadSnapshot (path : String) : IO UInt32 := do
 `wasmLoadSnapshot` for a snapshot the host streamed straight into the wasm heap: `ptr` is a
 `malloc`-allocated buffer of `size` bytes holding the whole `.snap` file. Skips the MEMFS
 staging copy, which for a multi-GB region is a second multi-GB allocation in the host's JS heap.
+`_flags` is ignored: the `[init]` replay always runs. The export keeps its three-argument
+signature (wasm64-build/EMBED-RUNTIME.md §2).
 -/
 @[export lean_wasm_load_snapshot_mem]
-def wasmLoadSnapshotMem (ptr size flags : USize) : IO UInt32 := do
+def wasmLoadSnapshotMem (ptr size _flags : USize) : IO UInt32 := do
   try
-    IO.eprintln s!"[WASM DEBUG] wasmLoadSnapshotMem: loading {size} bytes (flags {flags})"
     let t0 ← IO.monoMsNow
     let (cmdState, initModIdxs) ← unsafe Elab.loadHeaderSnapshotCmdStateMem ptr size
     let t1 ← IO.monoMsNow
@@ -305,18 +283,11 @@ def wasmLoadSnapshotMem (ptr size flags : USize) : IO UInt32 := do
     -- replay dominates whole-Mathlib loads (measured 106 s of a 107 s load,
     -- versus 0.7 s for the 2.6 GB relocation walk), so name the offenders
     -- whenever it is slow enough to matter.
-    -- flags bit 0: run the [init] attribute replay. Extension states live in
-    -- the env and are restored by the region itself; the replay rebuilds
-    -- process-side registrations, and a host that knows its workload does not
-    -- need them can skip it.
-    let replayModIdxs := if flags &&& 1 == 1 then initModIdxs else #[]
-    if replayModIdxs.isEmpty && !initModIdxs.isEmpty then
-      IO.eprintln s!"[WASM PROFILE] init replay SKIPPED ({initModIdxs.size} modules)"
-    let total := replayModIdxs.size
+    let total := initModIdxs.size
     let initTimes ← withImporting do
       let mut slow : Array (Nat × Nat) := #[]
       let mut i := 0
-      for modIdx in replayModIdxs do
+      for modIdx in initModIdxs do
         i := i + 1
         -- Streamed through printErr DURING the otherwise-blocking load call, so
         -- the host can show real per-module progress for the ~2-minute replay.
@@ -341,7 +312,7 @@ def wasmLoadSnapshotMem (ptr size flags : USize) : IO UInt32 := do
     -- closure on the elaboration thread (629 Init modules ≈ 17 s per switch).
     -- The non-mem loader already published; the browser uses THIS path.
     let t4 ← IO.monoMsNow
-    IO.eprintln s!"[WASM PROFILE] snapshot load stages: region read+materialize {t1-t0} ms · setMainModule {t2-t1} ms · init replay ({replayModIdxs.size} modules) {t3-t2} ms · cache {t4-t3} ms"
+    IO.eprintln s!"[WASM PROFILE] snapshot load stages: region read+materialize {t1-t0} ms · setMainModule {t2-t1} ms · init replay ({initModIdxs.size} modules) {t3-t2} ms · cache {t4-t3} ms"
     IO.eprintln s!"[WASM DEBUG] wasmLoadSnapshotMem: cached env for {key}"
     return 0
   catch e =>

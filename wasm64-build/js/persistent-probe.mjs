@@ -183,7 +183,8 @@ globalThis.Module = {
       // snapshot's environment is the cache's entry for its key (getOrCreateWasmEnvFor takes the first
       // match). The bytes go straight into a _malloc'd buffer, which becomes the region's memory and is
       // never freed (EMBED-RUNTIME.md §2); the glue's top-level wasmMemory (S6) is re-read per chunk, as a
-      // growth of the shared memory replaces its buffer. Flags 1: replay the [init] attributes.
+      // growth of the shared memory replaces its buffer. Flags 1: before R11a, bit 0 ran the [init] attribute
+      // replay; since R11a every load runs it and the flags are ignored (EMBED-RUNTIME.md §2).
       if (snapshotFile) {
         const total = fs.statSync(snapshotFile).size;
         const ptr = Number(M._malloc(asPtr(total)));

@@ -59,10 +59,9 @@ may import any memory whose maximum is ≤ that.
 | `_lean_enable_initializer_execution` | `()` | `BaseIO Unit` (ignore) | upstream |
 | `_lean_init_search_path` | `()` | `IO Unit` — check the tag | upstream |
 | `_lean_mk_string(cstr)` | `(i64)` | a Lean `String` (owned) | upstream |
-| `_lean_wasm_load_snapshot_mem(ptr, size, flags)` | `(i64, i64, i64)` | `IO UInt32`: 0 loaded, 1 failed (diagnostic on stderr) | 0013/0014/0016 |
+| `_lean_wasm_load_snapshot_mem(ptr, size, flags)` | `(i64, i64, i64)` | `IO UInt32`: 0 loaded, 1 failed (diagnostic on stderr); `flags` is ignored since R11a, pass `1n` | 0013/0014/0016 |
 | `_lean_wasm_load_snapshot(path)` | `(i64 String)` | `IO UInt32` — a VFS path; Node tools only | 0013 |
 | `_lean_wasm_compile(code, fileName)` | `(i64 String, i64 String)` | `IO UInt32`: 0 no errors, 1 errors (not a count); messages as JSON lines on stdout, every message of the file once, in the native frontend's order — including those of tasks a command started (`Elab.async` proofs, kernel checks, linters); it returns after every task still recorded for a command has finished (one that elaboration discarded, e.g. by backtracking, may still be running), so call it only on a thread that can block (Node's main thread, a DedicatedWorker), never from a proxied or mailbox callback | 0010/0032/0034/0037 |
-| `_lean_wasm_reset()` | `()` | `IO Unit`: clears the environment cache (no current caller) | 0010 |
 | `_lean_wasm_shell_mark_preinitialized()` | `()` | — | 0031 |
 | `_lean_browser64_configure_input_ring(ptr, capacity)` | `(i64, u32)` | `u32`: 0, or `EINVAL` (28) | 0031 |
 | `_lean_wasm_task_manager_parked_threads()` | `()` | `u32`: pthreads parked by the task manager | 0035 |
@@ -84,12 +83,16 @@ Since 0039 the module also binds on `Module` the three Emscripten built-ins host
 
 `_mem` loads: `ptr` is a `_malloc`ed buffer holding a whole `.snap` file of
 `size` bytes; on success it becomes the loaded region's memory (never free or
-reuse it). `flags` bit 0 replays the `[init]` attributes of the snapshot's
-modules — set it. A snapshot is a memory image of one binary: its index
+reuse it). Every load replays the `[init]` attributes of the snapshot's
+modules. `flags` is ignored since the architecture review's R11a, which removed
+0016's switch; pass `1n`, which a runtime before R11a needs (its bit 0 ran that
+replay, which compiles need). The signature keeps its three arguments. QED64's
+`snapshot-probe --init-flags <n>` passes `n` as `flags`, so that flag does
+nothing since R11a. A snapshot is a memory image of one binary: its index
 entry's `runtime` must equal this build id, and the runtime itself checks only
 the olean header (`"olean"`, version 2/3, flags 0). Each load publishes its
-environment to the covering-environment registry the language server's
-header resolution consults (0031/0032).
+environment to the covering-environment registry the language server's header
+resolution consults (0031/0032).
 
 ## 3. Boot
 
@@ -136,7 +139,7 @@ mutating `Module.ENV` in `preRun`. Two readers see them:
 | `LEAN_NAT_MAX_SIZE`, `LEAN_STACK_SIZE_KB` | C | upstream semantics (the latter on the `main` path only) |
 | `LEAN_IMPORT_WORKERS` | Lean | parallel region reads of a snapshot with dependency files; not on the in-memory path |
 | `LEAN_NUM_THREADS`, `LEAN_MAIN_USE_THREAD`, `LEAN_ABORT_ON_PANIC`, `LEAN_BACKTRACE*` | C | **inert on Emscripten** — not knobs |
-| `QED64_ALLOW_LEGACY_IMPORTS` | Lean | inert here: legacy (non-`module`) imports are always tolerated on wasm targets; it matters for native64 |
+| `QED64_ALLOW_LEGACY_IMPORTS` | none since R11a | **no effect**: legacy (non-`module`) imports are always tolerated on wasm targets, and native64 keeps stock's guard (before R11a only native64 read it). QED64's `bake-snapshot --allow-legacy-imports`, which sets it, does nothing either |
 
 The three task-manager variables take decimal digits only (since 0038): anything else (`-1`, `1e3`,
 ` 1`, `true`) is off, with one line on stderr, as unset or empty is.
@@ -339,7 +342,7 @@ told. Lean prints the first four with `IO.eprintln` (stderr; in a browser, `Modu
 |---|---|---|---|
 | `[DEBUG:PROGRESS] Loading <n> modules...` | `src/Lean/Environment.lean`, `finalizeImport`: `s!"[DEBUG:PROGRESS] Loading {modules.size} modules..."` (the base's line, on stderr since 0031) | once per olean import | the showcase's `scripts/judge-bake.mjs` J2 (`Loading (\d+) modules`: exactly one, `n` the staged tree's module count) |
 | `[DEBUG:PROGRESS] <i>/<n>: <module>` | the same: `s!"[DEBUG:PROGRESS] {i + 1}/{modules.size}: {mod.module}"` | modules 1, 51, 101, … and the last | QED64's worker (`public/workers/lean.worker.js`, `/\[DEBUG:PROGRESS\]\s*(\d+)\/(\d+)/`: import progress); `judge-bake.mjs` J2 (an `n/n:` line) |
-| `[WASM INIT] <i>/<n> <module>` | `src/Lean/Shell.lean`, `wasmLoadSnapshotMem` (`lean_wasm_load_snapshot_mem`, 0014): `s!"[WASM INIT] {i}/{total} {env.header.modules[modIdx].module}"` | per module of the `[init]` replay (flags bit 0), during that blocking call | QED64's worker (`/^\[WASM INIT\] (\d+)\/(\d+) (.*)$/`: live progress of a snapshot load) |
+| `[WASM INIT] <i>/<n> <module>` | `src/Lean/Shell.lean`, `wasmLoadSnapshotMem` (`lean_wasm_load_snapshot_mem`, 0014): `s!"[WASM INIT] {i}/{total} {env.header.modules[modIdx].module}"` | per module of the `[init]` replay (every load since R11a; with `flags` bit 0 before), during that blocking call | QED64's worker (`/^\[WASM INIT\] (\d+)\/(\d+) (.*)$/`: live progress of a snapshot load) |
 | `[WASM DEBUG] wasmLoadSnapshotMem: cached env for #[<imports>]`, and `[WASM DEBUG] wasmLoadSnapshot: cached env for #[<imports>]` | `src/Lean/Shell.lean`: `s!"[WASM DEBUG] wasmLoadSnapshotMem: cached env for {key}"` (0013) and `s!"[WASM DEBUG] wasmLoadSnapshot: cached env for {key}"` (the base) | at the end of each successful snapshot load | the showcase's `scripts/headless/exact-header.mjs` (`/cached env for #\[([^\]]*)\]/` on the log of QED64's `snapshot-probe.mjs`, which echoes `[WASM DEBUG]` lines: the key the snapshot seeded) and `scripts/headless/wasm-lsp.mjs` |
 | `object compactor: out of memory growing the region buffer to …`, inside the save's IO error `failed to write '<file>': …` | `src/runtime/compact.cpp`, `object_compactor::alloc` (0011): `"object compactor: out of memory growing the region buffer to " << … << " MB (" << … << " MB used); " << "set LEAN_COMPACTOR_RESERVE to reserve the buffer up front"`; the IO error is `lean_compacted_region_save`'s (`src/library/module.cpp`) | when a snapshot save outgrows its region buffer | the showcase's `scripts/bake.sh` (on that substring it rebakes once with 512 MiB more `--reserve`) and `judge-bake.mjs` J1 (any `object compactor:` line fails a bake) |
 
@@ -347,7 +350,10 @@ QED64 freezes the same lines except `[WASM INIT]`, which its worker parses too (
 "Toolchain lines consumers parse"). The
 `[WASM DEBUG]` prefix does not make the cached-env line removable. Every other `[WASM DEBUG]`,
 `[WASM PROFILE]` and `[WASM LSP]` line is a diagnostic: consumers only filter or log them (the gate
-strips them, with these, before it judges Lean's output), and they may change or go.
+strips them, with these, before it judges Lean's output), and they may change or go. Since R11a the
+only other `[WASM DEBUG]` lines are those of a failed snapshot load,
+`[WASM DEBUG] wasmLoadSnapshot failed: <error>` and `[WASM DEBUG] wasmLoadSnapshotMem failed: <error>`:
+the one place the error's text appears (QED64's `snapshot-probe.mjs` prints a failed load's last lines).
 
 ## 6. Placement and engines
 
@@ -399,11 +405,11 @@ before (PATCHES.md 0040):
 
 ## 7. QED64 behaviour inside the runtime
 
-A toolchain-only embedder inherits four QED64-flavoured details: an
+A toolchain-only embedder inherits three QED64-flavoured details: an
 environment importing `QED64.Essential` covers `Mathlib`, `Mathlib.Tactic`,
 `Batteries` and `MIL.Common`; the refused-header diagnostic names QED64's
-"Load exact imports" action; the `$/qed64/headerStatus` notification name; and
-the `QED64_ALLOW_LEGACY_IMPORTS` variable name.
+"Load exact imports" action; and the `$/qed64/headerStatus` notification name.
+(The fourth, the `QED64_ALLOW_LEGACY_IMPORTS` variable, has no reader since R11a.)
 
 **Frozen since 2026-11-01** (architecture review K3). The umbrella's name and its four aliases
 (`src/Lean/Language/Lean.lean`, `lookupPrebuiltEnv`: an environment whose closure holds

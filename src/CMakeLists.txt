@@ -192,7 +192,8 @@ if(CMAKE_SYSTEM_NAME MATCHES "Emscripten")
   # > The simple and safe thing is to pass all -s flags at both compile and link time.
   # No -flto: it OOMs the CI runner during the LTO link. The maximum is
   # configured below: wasm32 uses 4GB, while wasm64 defaults to a 12GB
-  # operational ceiling. Current engines and Emscripten can grow shared memory;
+  # operational ceiling (released runtimes set 16 GiB: docker-wasm64/configure-qed64.sh).
+  # Current engines and Emscripten can grow shared memory;
   # keep INITIAL_MEMORY modest so startup does not commit the full working set.
   # INCOMING_MODULE_JS_API: emsdk 6 strictly validates Module keys supplied by
     # the embedder; the playground workers set all of these before load.
@@ -1023,7 +1024,8 @@ if(CMAKE_SYSTEM_NAME MATCHES "Emscripten")
   # static data + the 16MB stack + per-thread TLS; the pthread layout needs ~22MB
   # up front (the default 16MB fails to link). Memory growth is enabled;
   # MAXIMUM_MEMORY is an address-space ceiling, not an eager physical
-  # allocation. wasm64 uses 128MB initially and may grow to 12GB.
+  # allocation. wasm64 uses 128MB initially and may grow to EMSCRIPTEN_MAXIMUM_MEMORY
+  # (12GB by default; 16 GiB in released runtimes, docker-wasm64/configure-qed64.sh).
   string(
     APPEND LEAN_EXE_LINKER_FLAGS
     " ${LIB}/temp/libleanshell.a ${TOOLCHAIN_STATIC_LINKER_FLAGS} ${EMSCRIPTEN_SETTINGS} ${EMSCRIPTEN_LINK_SETTINGS} -lnodefs.js -lworkerfs.js -s EXIT_RUNTIME=1 -s ERROR_ON_UNDEFINED_SYMBOLS=0 -sALLOW_TABLE_GROWTH=1 --emit-symbol-map -sEXPORTED_FUNCTIONS=@${LEAN_SOURCE_DIR}/emscripten-exports.txt -sEXPORTED_RUNTIME_METHODS=ccall,callMain,FS,ENV,getValue,setValue,stringToNewUTF8,UTF8ToString -s STACK_SIZE=16777216 -sINITIAL_MEMORY=${EMSCRIPTEN_INITIAL_MEMORY} -sMAXIMUM_MEMORY=${EMSCRIPTEN_MAXIMUM_MEMORY} -sDEFAULT_PTHREAD_STACK_SIZE=8388608 -sPROXY_TO_PTHREAD=1"

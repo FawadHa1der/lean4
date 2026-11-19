@@ -2507,15 +2507,10 @@ partial def importModulesCore
     -- QED64 wasm runtime: game packages (lean4game's GameServer and every
     -- published game) are legacy non-`module` packages, and their oleans are
     -- self-contained — the base `.olean` carries ALL their data, so loading
-    -- them at `.exported` level loses nothing. The batch environment cache
-    -- doesn't rely on module-system visibility purity; gate the tolerance
-    -- behind an env var so stock behavior is untouched unless the host pump
-    -- opts in (node-runner and the game worker set it; the editor does not).
-    -- Under the wasm target the tolerance is unconditional: the browser env
-    -- cache exists to serve editors/games, never to enforce module-system
-    -- purity, and Emscripten's env plumbing is unreliable for a runtime gate.
-    let tolerateLegacy := System.Platform.target.startsWith "wasm" ||
-      (← IO.getEnv "QED64_ALLOW_LEGACY_IMPORTS").isSome
+    -- them below `.private` loses nothing. The wasm target tolerates them: its
+    -- environment cache serves editors and games, never module-system purity.
+    -- Native builds keep stock's guard.
+    let tolerateLegacy := System.Platform.target.startsWith "wasm"
     unless tolerateLegacy do
       for i in imports do
         if let some mod := (← get).moduleNameMap[i.module]?.bind (·.mainModule?) then

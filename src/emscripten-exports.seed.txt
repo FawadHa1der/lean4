@@ -12,8 +12,8 @@
 
 # libc and the entry point
 _main                                       # PROXY_TO_PTHREAD's _emscripten_proxy_main runs it; no JS reads Module._main
-_malloc                                     # W (input ring, snapshot region), snap; kernel js snapshot-probe
-_free                                       # W, snap, persistent; kernel js persistent-probe, snapshot-probe
+_malloc                                     # W (input ring, snapshot region), snap; kernel js persistent-probe (the gate's R10 snapshot cell)
+_free                                       # W, snap, persistent; kernel js persistent-probe
 
 # runtime initialization (upstream)
 _lean_initialize_runtime_module             # W, snap, persistent; kernel js probes
@@ -28,9 +28,8 @@ _lean_io_result_show_error                  # W, persistent; kernel js persisten
 
 # the wasm shell (0010, 0013, 0016, 0031)
 _lean_wasm_compile                          # W, snap, persistent; kernel js probes
-_lean_wasm_reset                            # documented [RT] (EMBED-RUNTIME §2); no current caller
-_lean_wasm_load_snapshot                    # snap (Node path loader); kernel js snapshot-probe
-_lean_wasm_load_snapshot_mem                # W (the browser's only loader), snap; kernel js snapshot-probe
+_lean_wasm_load_snapshot                    # snap (Node path loader)
+_lean_wasm_load_snapshot_mem                # W (the browser's only loader), snap; kernel js persistent-probe (the gate's R10 snapshot cell)
 _lean_wasm_shell_mark_preinitialized        # W, resident: before callMain('--worker')
 _lean_browser64_configure_input_ring        # W, resident: the stdin ring (0031)
 

@@ -23,7 +23,7 @@ follow below. Summary:
 | 0013 | **In-memory snapshot load** (`CompactedRegion.readMem`, `lean_wasm_load_snapshot_mem`): the host streams a region straight into a `malloc` buffer, skipping the MEMFS staging copy (a second multi-GB JS-heap allocation) | applies to any no-mmap host; the shared `finish_region_read` refactor is upstream-neutral |
 | 0014 | **Snapshot-load stage timings + streamed init progress**: every load reports region-read vs `[init]`-replay split (plus top-10 module timings when replay >5 s), and streams `[WASM INIT] i/n module` per module so hosts can render live progress through the blocking call | diagnostic; the numbers justify upstream work on initializer execution |
 | 0015 | Multi-arch emsdk base image (drops the -arm64 pin so amd64 hosts build natively) | build hygiene |
-| 0016 | **Replay-control flags on `lean_wasm_load_snapshot_mem`** (bit 0 = run the `[init]` replay; extension states come from the region, the replay rebuilds process-side registrations) | fork-shaped control surface; useful to any embedder |
+| 0016 | **Replay-control flags on `lean_wasm_load_snapshot_mem`** (bit 0 = run the `[init]` replay; extension states come from the region, the replay rebuilds process-side registrations) | **retired** by the architecture review's R11a (every caller passed 1): the replay always runs; `flags` stays in the export's signature, ignored |
 | 0017 | **Interpreter dlsym probes gated on the wasm export table**: `lookup_symbol_in_cur_exe` consults a one-time `Set` of export names before calling dlsym | **as-is** for the Emscripten target — turns a 173 s pathology into ~1 s (below). **Superseded by 0039** (an in-module table, no dlsym, no JS); a 2-line `#ifdef` skeleton remains |
 | 0018 | **Host-pumped LSP file worker** (`lean_wasm_lsp_init` / `lean_wasm_lsp_send`): drive a single-file server session one message at a time when a blocking stdin is impossible (WASM event-loop hosts); forces `server.reportDelayMs := 0` (timed sleeps on dedicated pthreads do not wake under this build) | **retired** by 0033: the resident transport (0031/0032) replaced it |
 | 0019 | **24 preallocated pthread workers, 8 MiB thread stacks**: every `ServerTask` is `prio := .dedicated`, and synchronous `pthread_create` under Emscripten can only claim preallocated workers | needed by any wasm host running the language server; no line of it is left, its settings live on rewritten: the pool of 24 in 0038's `src/emscripten-pthread-pool.js`, the 8 MiB stacks in `src/CMakeLists.txt` (`-sDEFAULT_PTHREAD_STACK_SIZE=8388608`) |
@@ -56,8 +56,8 @@ died precisely as the output crossed 2 GiB, where the buffer tried to double.
 A 128 MB main stack and a heap-stacked thread were both tried and discarded
 before the counters settled it.
 
-Build deviations from the evidence recipe (documented in
-`docker-wasm64/configure-qed64.sh`): declared memory maximum
+Build deviations from the evidence recipe (the spike's `docker-wasm64/configure.sh`, in git at
+eaf94493ba; documented in `docker-wasm64/configure-qed64.sh`): declared memory maximum
 raised to 16 GiB (embedder-import compatibility), and
 `CHECK_OLEAN_VERSION=OFF` (this clone embeds its real githash while the
 certified profile packs carry the producer's; compatibility is enforced at
@@ -216,10 +216,11 @@ Gate the rebuild on: garbage input → ≥1 error diagnostic; the defect test in
 ## 0030 — wasm: tolerate legacy (non-`module`) oleans in the shared env cache, imported below `.private` (`.server` since 0042) (2d75ec14cf)
 
 The lean4game ecosystem (GameServer + every published game) is legacy-mode
-Lean; its oleans are self-contained. Under the wasm target (or
-`QED64_ALLOW_LEGACY_IMPORTS` natively), `importModulesCore` skips the
-non-`module` guard, and admitted legacy modules get `irPhases := .all` so
-their parsers/initializers/tactics evaluate (the meta gate otherwise refuses).
+Lean; its oleans are self-contained. Under the wasm target (and natively under
+`QED64_ALLOW_LEGACY_IMPORTS`, until the architecture review's R11a removed that
+branch), `importModulesCore` skips the non-`module` guard, and admitted legacy
+modules get `irPhases := .all` so their parsers/initializers/tactics evaluate
+(the meta gate otherwise refuses).
 Both branches are unreachable in stock configurations. Enables the whole
 wasm64-lean4game port: game envs bake into snapshots and Runner-checked
 levels run in the browser.
@@ -688,7 +689,8 @@ through JavaScript (`Object.keys(…).indexOf` over the exports, under the dynam
   line with its callers (QED64's runtime-touch contract): the 17 Lean/C entry points QED64 calls,
   `_main`, `_lean_wasm_reset`, the 0038 and 0039 gauges, and the three Emscripten built-ins hosts
   reach (`__emscripten_proxy_main`, `__emscripten_check_mailbox`, `_pthread_self`, now also bound
-  on `Module`): 27 names. 749 names left it: 221 `@[export]` names (table entries now), 527 C++
+  on `Module`): 27 names (`_lean_wasm_reset`, which no host called, left it and the runtime with
+  the architecture review's R11a). 749 names left it: 221 `@[export]` names (table entries now), 527 C++
   `lean_*` functions no JavaScript calls (the interpreter's keys are never C names: an
   `@[extern]` decl is reached through its boxed wrapper), and `initialize_libuv`. The generator's
   "runtime API defined but not in the seed" report is retired: "every `lean_*` C symbol is
@@ -802,7 +804,8 @@ compiled function. On wasm none was ever exported (all ~119k plain `l_*` functio
 added ~18 MB of wasm), so interpreted code — package code, `#eval`, the `[init]` replay of
 package modules — interpreted every such core function it called, from the shipped `.ir`.
 
-- **The table holds them** (`gen-exports.py` `INCLUDE_PLAIN = True`), kind `plain`.
+- **The table holds them** (`gen-exports.py` `INCLUDE_PLAIN = True`), kind `plain`. That switch
+  and the gate's `EXPECT_PLAIN_NATIVE`, kept for an A/B against 0039, have since been removed.
   `requiresBoxedVersion` (LCNF `ExplicitBoxing`) is false exactly when a function has parameters
   none of which is scalar, borrowed or void, no scalar result, is not `extern` and has at most 16
   parameters: each plain function takes owned objects and returns one, the ABI `call` (`curry`),
@@ -853,8 +856,7 @@ What changes for interpreted code:
   `Lean/CoreM.c`; 0037 renumbered only private specializations of `Lean/Shell.c`). The rule now
   covers these functions too: before, a changed one ran from the oleans' IR.
 
-**Gate**: `EXPECT_PLAIN_NATIVE = true` in `js/gate.mjs` (the switch that goes with
-`INCLUDE_PLAIN`): G2 requires plain entries in the running table (and the build manifest's counts),
+**Gate**: G2 requires plain entries in the running table (and the build manifest's counts),
 G5 requires `[symtab] hit plain l_Lean_Name_append` and `x0.x1.x2` from `symtabProbe 3`; G6 times
 `symtabProbe 20000` (informational: r3 and 0039 interpret `Lean.Name.append`, 0039b calls it
 natively). Every other check must pass unchanged; a moved heartbeat limit in their output is a

@@ -239,10 +239,6 @@ for (const r of statics.results) {
   else gate(r.ok, r.label, r.extra);
 }
 const skip0039 = (label) => console.log(`note  [0039] ${label}: skipped (a runtime before 0039)`);
-// Patch 0039b put the plain functions into the table: G2 requires plain entries and G5 requires
-// Lean.Name.append to run native. False gates a table built without them (gen-exports.py
-// INCLUDE_PLAIN = False, 0039's, for an A/B): G5 then only reports which way the call went.
-const EXPECT_PLAIN_NATIVE = true;
 
 // The runtime's counters (LEAN4_WASM64_RTSTATS=1): node-runner answers a printed line containing
 // `[rtstats?]` with `[rtstats] <json>` right after it (runtime-knobs.mjs runtimeStats).
@@ -350,9 +346,7 @@ if (is0039) {
     const hits = Object.values(st.hits).reduce((a, n) => a + n, 0);
     if (st.status !== 0 || st.cachedStatus !== 0) problems.push(`self-check status ${st.status} (cached ${st.cachedStatus}), not 0`);
     if (sum !== st.count) problems.push(`its kinds add up to ${sum}, not its ${st.count} entries`);
-    for (const k of ["boxed", "export", "cell", "init", "init_rt", "init_meta"]) if (!(st.kinds[k] > 0)) problems.push(`no ${k} entry`);
-    if (EXPECT_PLAIN_NATIVE ? !(st.kinds.plain > 0) : st.kinds.plain !== 0)
-      problems.push(EXPECT_PLAIN_NATIVE ? "no plain entry (0039b: gen-exports.py INCLUDE_PLAIN)" : `${st.kinds.plain} plain entries, with EXPECT_PLAIN_NATIVE off`);
+    for (const k of ["boxed", "plain", "export", "cell", "init", "init_rt", "init_meta"]) if (!(st.kinds[k] > 0)) problems.push(`no ${k} entry`);
     if (manifest) {
       if (st.count !== manifest.count) problems.push(`${st.count} entries, the manifest ${manifest.count}`);
       for (const [k, n] of Object.entries(manifest.counts ?? {})) if (st.kinds[k] !== n) problems.push(`${k} ${st.kinds[k]}, the manifest ${n}`);
@@ -414,16 +408,11 @@ if (is0039) {
   const g4out = /^SYMTAB G4 versionString \S/m.test(legacyOut) && /^SYMTAB G4 simpExtension has Nat\.add_zero: true$/m.test(legacyOut);
   gate(cells.every(([, k]) => k === "cell") && g4out, "[0039] G4 interpreted code reads constants from their native cells (versionString, simpExtension)",
     cells.map(([n, k]) => `${n}: ${k ? `hit ${k}` : "not found"}`).join(", ") + (g4out ? "" : "; the probe's output is missing"));
-  // G5: an interpreted function calling plain (all-object, unboxed) core functions
+  // G5: an interpreted function calling plain (all-object, unboxed) core functions runs them natively (0039b)
   const append = hitAs("l_Lean_Name_append");
   const g5out = /^SYMTAB G5 x0\.x1\.x2$/m.test(legacyOut);
-  if (EXPECT_PLAIN_NATIVE) {
-    gate(append === "plain" && g5out, "[0039b] G5 interpreted code calls a plain core function natively (Lean.Name.append)",
-      `${append ? `hit ${append}` : "not found: interpreted"}${g5out ? "" : "; the probe's output is wrong"}`);
-  } else {
-    gate(g5out, "[0039] G5 interpreted code calling plain core functions computes the right value", g5out ? "" : "the probe's output is wrong");
-    console.log(`note  [0039] G5 Lean.Name.append ran ${append ? `native (hit ${append})` : "interpreted (plain functions are not in the table)"}`);
-  }
+  gate(append === "plain" && g5out, "[0039b] G5 interpreted code calls a plain core function natively (Lean.Name.append)",
+    `${append ? `hit ${append}` : "not found: interpreted"}${g5out ? "" : "; the probe's output is wrong"}`);
   // G6 (informational): the same function 20,000 times
   console.log(`note  [0039] G6 symtabProbe 20000: ${(/^SYMTAB G6 parts=(\d+) ms=(\d+)$/m.exec(legacyOut) ?? [, "?", "?"]).slice(1).join(" parts, ")} ms`);
   // G7 here is a count (its check, no lookup missed a `lean_*` name, is judged over every run, at the end)
@@ -877,7 +866,7 @@ try {
   // lean_compacted_region_save; src/Lean/Elab/Frontend.lean), so a stable init.snap is a whole one.
   const initSnap = path.join(r10Dir, "init.snap");
   // node-runner forwards these from the shell (node-runner.mjs); the gate's bake takes their defaults
-  const BAKE_PINNED = { LEAN_COMPACTOR_RESERVE: "", QED64_ALLOW_LEGACY_IMPORTS: "", QED64_PROFILE_INIT: "" };
+  const BAKE_PINNED = { LEAN_COMPACTOR_RESERVE: "", QED64_PROFILE_INIT: "" };
   fs.writeFileSync(path.join(r10Dir, "probe.lean"), "#check (2 + 2 : Nat)\n");
   const bake = await r10Timed("bake", () => runChild([STACK, runner, "--artifact", artifact, "--work", r10Dir, "--",
     "--incr-header-save=/work/init.snap", "/work/probe.lean"], 600_000, { ...TRACE_LEAN, ...BAKE_PINNED }, stableFile(initSnap, 3000, 3000)));

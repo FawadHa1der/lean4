@@ -28,7 +28,7 @@ Two outputs, both from the build's own compiled Init/Std/Lean (patch 0039):
              16 of them (requiresBoxedVersion is false), so the interpreter may call it as it
              calls a boxed wrapper. lookup_symbol's second probe; with it interpreted code calls
              every core function natively, as native `lean` (-rdynamic) does. In the table
-             since 0039b (INCLUDE_PLAIN, below); each prototype must show that shape, or nothing
+             since 0039b; each prototype must show that shape, or nothing
              is written (a misclassified name, like the `_00__boxed` ones once, is never called).
    l_* functions that HAVE a boxed wrapper are never asked for and stay out.
 
@@ -85,18 +85,12 @@ import subprocess
 import sys
 
 GENERATOR = "gen-exports/0039b"
-# Patch 0039 shipped the table without the plain functions (r3's resolvable set: boxed, init,
-# cell, export); 0039b adds them, its own measured step (stack margins, compile time). False
-# rebuilds 0039's table, for an A/B; the gate's EXPECT_PLAIN_NATIVE (js/gate.mjs) goes with it.
-INCLUDE_PLAIN = True
 BLOCK = 16             # front coding restarts every BLOCK names (a whole name heads each block)
 MAXLEN = 4096          # the longest name the runtime's decoder takes (wasm_symtab.cpp)
 KIND = {"boxed": 0, "plain": 1, "export": 2, "cell": 3, "init": 4, "init_rt": 5, "init_meta": 6}
 # B2: a scan that found far fewer names than v4.34.0 has is broken, not small
 # (v4.34.0: boxed 90,208, plain 29,538, export 228, cell 8,295, 2,356 modules)
 FLOORS = {"boxed": 80000, "plain": 25000, "export": 100, "cell": 7000}
-if not INCLUDE_PLAIN:
-    del FLOORS["plain"]
 MIN_MODULES = 2000
 # A plain function's prototype: owned objects in (1 to closureMaxArgs = 16 of them), an object
 # out, the shape the interpreter calls (`curry`, closures) and requiresBoxedVersion promises.
@@ -282,8 +276,6 @@ for name, kind in c_kind.items():
         if boxed_of(name) in functions:
             continue        # the interpreter asks for the wrapper, never for this
         plain_candidates += 1
-        if not INCLUDE_PLAIN:
-            continue
         kind = "plain"
     if c_decl[name] is None:
         fail(f"no one-line prototype for function {name} ({c_where[name]})")
@@ -336,7 +328,7 @@ manifest = {
     "blob_bytes": len(blob),
     "raw_name_bytes": sum(len(e[0]) + 1 for e in entries),
     "maxlen": maxlen,
-    "include_plain": INCLUDE_PLAIN,
+    "include_plain": True,  # always since 0039b; kept so --check still matches earlier builds' manifests
     "plain_candidates": plain_candidates,
     "modules": modules,
     "c_files": c_files,
@@ -416,7 +408,7 @@ exports_text = "\n".join(seed) + "\n"
 
 print(f"symtab: {len(entries)} entries = " + " + ".join(f"{k} {counts[k]}" for k in KIND)
       + f"; names {len(blob)} B front-coded (raw {manifest['raw_name_bytes']} B), longest {maxlen}, fnv {fnv:016x}"
-      + f"; plain functions {'in the table' if INCLUDE_PLAIN else 'left out'}: {plain_candidates}")
+      + f"; plain functions in the table: {plain_candidates}")
 print(f"exports: the JavaScript contract, {len(seed)} names (src/emscripten-exports.seed.txt)")
 if vanished:
     print(f"SEED NAMES NO LONGER DEFINED ANYWHERE IN src/ — dropped ({len(vanished)}):")

@@ -97,7 +97,7 @@ function fakeArtifact(body) {
 }
 const hermetic = (extra) => {
   const env = { ...process.env, LEAN4_WASM64_ARTIFACT: "", QED64_LEAN_ARTIFACT: "", QED64_COUNT_PTHREADS: "", QED64_PROFILE_INIT: "",
-    QED64_ALLOW_LEGACY_IMPORTS: "", LEAN_COMPACTOR_RESERVE: "", LEAN4_WASM64_CWD: "", LEAN4_WASM64_PTHREAD_STACK_MB: "" };
+    LEAN_COMPACTOR_RESERVE: "", LEAN4_WASM64_CWD: "", LEAN4_WASM64_PTHREAD_STACK_MB: "" };
   for (const k of [...FORWARDED_WASM_ENV, "LEAN4_WASM64_PTHREAD_POOL", "LEAN4_WASM64_RTSTATS"]) env[k] = "";
   return { ...env, ...extra };
 };
