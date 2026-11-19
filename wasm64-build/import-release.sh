@@ -287,7 +287,7 @@ gate_build_dir() {
   [ -f "$bd/build/stage1/bin/lean.wasm" ] || die "no artifact in $bd — build first" 31
   [ -f "$bd/BUILT-COMMIT" ] || die "$bd/BUILT-COMMIT missing: not a recorded build" 31
   rm -f "$bd/GATE-PASSED"
-  # ~8 min: the two one-shot CLI checks are judged by output and end in a bounded timeout
+  # ~35-45 min: the two one-shot CLI checks are judged by output and end in a bounded timeout
   if node --stack-size=8192 "$REPO/wasm64-build/js/gate.mjs" --artifact "$bd/build/stage1" >"$log" 2>&1 && grep -q "GATE PASSED" "$log"; then
     grep -E "^(FAIL| ok)" "$log" || true
     { tr -d ' \n\r' < "$bd/BUILT-COMMIT"; echo; shasum -a 256 "$bd/build/stage1/bin/lean.wasm" | cut -c1-64; } > "$bd/GATE-PASSED"

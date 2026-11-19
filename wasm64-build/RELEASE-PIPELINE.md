@@ -10,9 +10,9 @@ owns the lanes inside its own repository. This file is the map and the order.
                        ▼
  [K1] import   merge the tag on import/vX.Y.Z            import-release.sh import   ── judgment: conflicts
  [K2] drift    review files both sides changed           import-release.sh drift    ── judgment: review
-      delta    merge = the tag + the line's own edits?   import-release.sh delta    ── judgment: account for each
+      delta    merge = the tag + the line's own edits?   import-release.sh delta    ── judgment: account for each; again before accept
  [K3] build    wasm64 stage1 in Docker (own build dir)   import-release.sh build    ~15–30 min cold
- [K4] gate     numBits / proof / error / PARSE / resident import-release.sh gate     ~8 min
+ [K4] gate     numBits / proof / error / PARSE / resident import-release.sh gate     ~35–45 min
  [K5] native64 same commit, native linux, wasm64 target  native64.sh                ~1 h
  [K6] mathlib  Mathlib@vX.Y.Z with [K5], essential tree  mathlib-tree.sh            hours
  [K7] release  stage + record + verify lean-vX.Y.Z-<k7>  import-release.sh release  ~20 min (RELEASE.md)
@@ -34,9 +34,13 @@ The line is real git history on top of upstream, so an import is
 `git merge vX.Y.Z` on a branch `import/vX.Y.Z` cut from `qed64-wasm64`.
 Merging (not rebasing) keeps every published commit id valid — both apps pin
 the kernel by commit and refuse a pin that is not on `origin/qed64-wasm64`.
-Stable tags live on upstream's `releases/vX.Y.0` branches, not on `master`;
-merging consecutive tags re-merges the backports, which git resolves as
-identical changes. `rerere` is switched on so a resolution is remembered.
+Stable tags live on upstream's `releases/vX.Y.0` branches, not on `master`,
+and the merge base is on master. Merging the next tag therefore re-merges the
+previous tag's release branch. A backport that master still holds unchanged
+resolves as identical changes. A backport that master reworked, and
+release-only commits (version lines, checker pins, CI), either conflict or are
+kept silently where master's side looks unchanged (see the Delta check below).
+`rerere` is switched on so a resolution is remembered.
 Only stable tags are imported: Mathlib and Batteries tag each stable Lean
 release, and the apps need all three at the same version.
 
@@ -52,7 +56,12 @@ changed only a native 32-bit build.
 1. **Conflicts** — `import` exits 20 and leaves the merge in the tree. v4.34.0
    had five single-hunk conflicts; see that merge commit's message for the
    reasoning pattern (take upstream's structure, keep the port's behaviour
-   under `LEAN_EMSCRIPTEN`).
+   under `LEAN_EMSCRIPTEN`). Once the merge is committed, `drift` and `delta`
+   come before the first build. After a clean merge `run` stops for them
+   (exit 21, both lists printed). On conflicts it stops with 20 and prints
+   neither: commit the merge, run both by hand (the CONFLICTS message names
+   them), then `run` again, which prints `delta`, not `drift`, and goes on to
+   build and gate.
 2. **Drift review** — `drift` lists files changed on both sides. A clean
    textual merge proves nothing: upstream may have added a second code path
    that bypasses a wasm guard, renamed something a patch calls, or moved the
@@ -61,20 +70,39 @@ changed only a native 32-bit build.
    `Lean/Environment.lean` + `Lean/Elab/Import.lean` (legacy-import tolerance,
    `irPhases`), `library/module.cpp` (non-mmap read path), `runtime/io.cpp`
    (stdin ring), `util/shell.cpp` (no second thread under Emscripten).
-   **Delta check** — a clean merge can also keep stale files. Stable tags sit
-   on release branches and the merge base is on master, so git's merge keeps
-   the previous tag's release-branch copies wherever master's side looks
-   unchanged. v4.36.0's merge kept a module that v4.35.0's backport added
-   (`src/LeanExport/Json.lean`, still imported by the merged `Parse.lean`)
-   and v4.35.0's three checker pins in `src/CMakeLists.txt`. Neither build
-   nor gate noticed. `delta <tag>` compares every file with what it should
-   be: the tag's file where the line kept the previous tag's (`NOT-TAG`), else
-   the tag's file plus the line's own edits on top of the previous tag, by
-   `git merge-file` (`DEVIATES`, or `CONFLICT` where those edits do not apply
-   cleanly). Run it once the import branch builds, and account for each entry
-   in the merge message or a fix commit. For v4.36.0 that leaves the two CI
-   workflows (conflicts resolved in the merge) and `Lean/Shell.lean` (a
-   post-merge fix).
+   **Delta check** — content that merges cleanly can also be stale. Stable
+   tags sit on release branches and the merge base is on master, so git's
+   merge keeps the previous tag's release-branch copies wherever master's
+   side looks unchanged. At v4.36.0, git's merge (before resolution) kept
+   `src/LeanExport/Json.lean`, which #15577 (v4.35.0's backport of #15542)
+   added. A clean hunk of the conflicted `Parse.lean` still imported it, and
+   the conflict resolution removed it. The merge also kept v4.35.0's three
+   checker pins in clean hunks of the conflicted `src/CMakeLists.txt`, which
+   the drift review found. The build and the gate cannot see the pins
+   (`if(NOT Emscripten)`, `EXCLUDE_FROM_ALL`), and neither ever ran on the
+   stale module. `delta <tag> [<rev>]` redoes the merge with the previous tag
+   as its base, so a release-branch copy cannot win: `git merge-tree` of the
+   tag and the line before the merge, path by path, in a throwaway object
+   store (it adds no object to the repository; git may refresh the timestamps
+   of objects or packs the merge recomputes). It lists every path outside
+   stage0 where `<rev>` (default `import/<tag>`) differs from that result,
+   mode and type included: `CONFLICT` where that merge conflicts (always
+   listed: review the resolution), `DEVIATES` where the line had changed the
+   path since the previous tag, `NOT-TAG` where it had not (the tag's file
+   was due). A path neither tag has is the line's own: what commits after the
+   merge do to it is not delta's business, but a path the merge commit itself
+   added or dropped is (`LINE-ONLY`: git moves a line-only file into a
+   directory upstream renamed, or a conflict's side file was committed). Run
+   it as soon as the merge is committed, before the first build: an entry in
+   what the build reads (`SRC_PATHS` in `import-release.sh`) fixed after a
+   build costs a rebuild and a re-gate (`run` stops there after the merge,
+   clean or not). Run it again before `accept`, when every remaining entry
+   needs a reason, in the merge message or a fix commit. On v4.36.0's merge
+   commit (84d5308b24) it lists the two CI workflows (`CONFLICT`, resolved in
+   the merge) and `src/CMakeLists.txt` (`DEVIATES`: the pins, fixed in
+   eb79d44655); at the import branch's tip `src/Lean/Shell.lean` (`DEVIATES`:
+   the post-merge fix ec93e29a6a) takes the pins' place. On git's unresolved
+   merge it also lists the three LeanExport files (`NOT-TAG`).
 3. **Build breaks / gate failures** — fix on the import branch as ordinary
    commits on top of the merge. Never amend the merge once anyone has seen it.
 4. **Exports** — what the IR interpreter resolves by name (every boxed wrapper,
@@ -120,11 +148,19 @@ changed only a native 32-bit build.
 
 ```sh
 wasm64-build/import-release.sh watch            # 0 up to date · 10 ready · 11 waiting for Mathlib/Batteries
-wasm64-build/import-release.sh run v4.34.0      # import → build → gate, stops at the first judgment point
-wasm64-build/import-release.sh drift v4.34.0
-wasm64-build/import-release.sh delta v4.34.0    # each listed file needs a reason or a fix
+wasm64-build/import-release.sh import v4.34.0   # exit 20 on conflicts: resolve them, then commit the merge
+wasm64-build/import-release.sh drift v4.34.0    # review each file both sides changed
+wasm64-build/import-release.sh delta v4.34.0    # before the first build: each listed path needs a reason or a fix
+wasm64-build/import-release.sh build v4.34.0    # ~15–30 min cold
+wasm64-build/import-release.sh gate v4.34.0     # ~35–45 min
+wasm64-build/import-release.sh run v4.34.0      # or in two goes: import, then stop before the build (exit 20 on
+                                                #   conflicts; 21 after a clean merge, with drift's and delta's
+                                                #   lists). Merge committed, lists accounted for: run again,
+                                                #   delta (prints) → build → gate; stops on a build break or a
+                                                #   gate failure
 wasm64-build/native64.sh v4.34.0                # after build: the compiler that writes every shipped olean
 wasm64-build/mathlib-tree.sh v4.34.0            # Mathlib@v4.34.0 → <build dir>/mathlib/{essential,extra}-tree
+wasm64-build/import-release.sh delta v4.34.0    # again before accept: every remaining entry needs its reason
 wasm64-build/import-release.sh accept v4.34.0   # LOCAL fast-forward of qed64-wasm64; prints the push command
 wasm64-build/import-release.sh release v4.34.0  # stage + verify the release; prints record/tag/publish commands
 ```

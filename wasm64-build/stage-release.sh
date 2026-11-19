@@ -308,7 +308,7 @@ stage_tools_by_reference() {
   fi
   [ "$(shasum -a 256 "$GD/bin/lean.wasm" | cut -c1-64)" = "$WASM_SHA" ] \
     || die "$GD/bin/lean.wasm is not the binary $BASE_REC_ID's gate passed on (gate.wasmSha256): rm -rf $(shq "$GD") and re-run"
-  # ~8 min (import-release.sh gate): judged by its log, as there
+  # ~35-45 min (import-release.sh gate): judged by its log, as there
   if node --stack-size=8192 "$P/gate.mjs" --artifact "$GD" > "$OUT/$ID.gate.log" 2>&1 && grep -q "GATE PASSED" "$OUT/$ID.gate.log"; then
     grep -E "^(FAIL| ok)" "$OUT/$ID.gate.log" || true
   else
