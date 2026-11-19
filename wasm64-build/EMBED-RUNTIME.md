@@ -200,10 +200,13 @@ The three task-manager variables take decimal digits only (since 0038): anything
    notifications are allowed — **any other notification ends the worker**. One
    document per session. Requests are answered on stdout.
 6. Header resolution: the exact import set, else the smallest covering
-   registered environment, else refused with a header diagnostic; each
-   resolution sends `$/qed64/headerStatus {version, mode: "exact" | "covered" |
-   "refused", key, moduleCount, missing, ms}`. A header change re-runs setup in
-   place.
+   registered environment, else refused with one error on the header,
+   `modules #[…] are not loaded in this session` (consumers match that
+   phrase); each resolution sends `$/qed64/headerStatus {version, mode:
+   "exact" | "covered" | "refused", key, moduleCount, missing, ms}`, where
+   `version` is that of the document whose header setup it reports. A header
+   change re-runs setup in place; a body edit reuses the setup and sends no
+   status.
 
 The runtime allows re-entering `main` for an in-process session replacement
 after the FileWorker exits (a new ring, `callMain` again); QED64 instead runs
@@ -405,22 +408,27 @@ before (PATCHES.md 0040):
 
 ## 7. QED64 behaviour inside the runtime
 
-A toolchain-only embedder inherits three QED64-flavoured details: an
+A toolchain-only embedder inherits two QED64-flavoured details: an
 environment importing `QED64.Essential` covers `Mathlib`, `Mathlib.Tactic`,
-`Batteries` and `MIL.Common`; the refused-header diagnostic names QED64's
-"Load exact imports" action; and the `$/qed64/headerStatus` notification name.
-(The fourth, the `QED64_ALLOW_LEGACY_IMPORTS` variable, has no reader since R11a.)
+`Batteries` and `MIL.Common`; and the `$/qed64/headerStatus` notification name.
+(Two others are gone: the `QED64_ALLOW_LEGACY_IMPORTS` variable has no reader since R11a, and
+since K3 the refused-header diagnostic no longer names QED64's "Load exact imports" action, which
+QED64 retired with its library packs, D1.)
 
 **Frozen since 2026-11-01** (architecture review K3). The umbrella's name and its four aliases
 (`src/Lean/Language/Lean.lean`, `lookupPrebuiltEnv`: an environment whose closure holds
 `QED64.Essential` covers `Mathlib`, `Mathlib.Tactic`, `Batteries` and `MIL.Common`) change only
 with a `PATCHES.md` entry. Two changes are parked until an embedder other than QED64 needs them or
 a new alias is requested: taking the alias list as data, and renaming `$/qed64/headerStatus` (its
-readers bind to the method name, so a rename needs a window that serves both names). The next
-runtime release makes the refused-header text generic, no longer naming "Load exact imports" but
-keeping the substring "are not loaded in this session", which QED64's e2e matches (the showcase's C7,
-`tests/ux/specs/30-robustness.spec.mjs`, compares the whole current text and loosens to that substring in
-the same adoption), and fixes `headerStatus.version`. Neither needs a protocol bump.
+readers bind to the method name, so a rename needs a window that serves both names).
+
+**Since K3** (no protocol bump: the same method and fields). The refused-header text is generic,
+`modules #[…] are not loaded in this session`: it lost its ending `— use "Load exact imports"`
+and keeps the phrase that consumers match (QED64's e2e; the showcase's C7,
+`tests/ux/specs/30-robustness.spec.mjs`). `headerStatus.version` is the version of the document
+whose header setup the notification reports (§3.4). Before, every setup carried the document's
+first version, because the FileWorker bound `setupImports` to the `DocumentMeta` it started with;
+nothing keyed on it.
 
 ## Compatibility
 

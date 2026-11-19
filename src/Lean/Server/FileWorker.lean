@@ -94,7 +94,10 @@ structure WorkerContext where
   pendingServerRequestsRef : IO.Ref (Std.TreeMap RequestID (IO.Promise (ServerRequestResponse Json)))
   hLog                     : FS.Stream
   initParams               : InitializeParams
-  processor                : Parser.InputContext → BaseIO Lean.Language.Lean.InitialSnapshot
+  /-- Takes the whole `DocumentMeta`, not only its input, so that `setupImports` reports each
+  header setup with the version of the document that started it (patch 0032's
+  `$/qed64/headerStatus`; see `initializeWorker`). -/
+  processor                : DocumentMeta → BaseIO Lean.Language.Lean.InitialSnapshot
   clientHasWidgets         : Bool
   /--
   Options defined on the worker cmdline (i.e. not including options from `setup-file`), used for
@@ -449,7 +452,9 @@ def setupImports
       }
     | none =>
       IO.eprintln s!"[WASM LSP] header refused: key={key} missing={verdict.missing}"
-      let msg := s!"modules {verdict.missing} are not loaded in this session — use \"Load exact imports\""
+      -- Generic text, naming no embedder's action (the architecture review's K3). Consumers match
+      -- the phrase "are not loaded in this session" (QED64's e2e, the showcase's C7): keep it.
+      let msg := s!"modules {verdict.missing} are not loaded in this session"
       return .error {
         diagnostics := (← diagnosticsOfHeaderError msg)
         result? := none
@@ -529,9 +534,18 @@ section Initialization
           -- Emit a refresh request after a file worker restart.
           pendingRefreshInfo? := some { lastRefreshTimestamp := timestamp, successiveRefreshAttempts := 0 }
         })
-    let processor := Language.Lean.process (setupImports doc opts chanOut)
-    let processor ← Language.mkIncrementalProcessor processor
-    let initSnap ← processor doc.mkInputContext
+    -- `setupImports` gets the document each processor call processes (patch 0032, fixed by the
+    -- architecture review's K3). The ref is read inside the call, before the header task starts,
+    -- so each header setup reports the version that started it. Bound once to `doc` (stock runs
+    -- one header setup per process), every later setup of the resident FileWorker (0031) stamped
+    -- the document's first version on `$/qed64/headerStatus` and `$/lean/ileanHeaderSetupInfo`.
+    let setupDocRef ← IO.mkRef doc
+    let processor ← Language.mkIncrementalProcessor fun old? => do
+      Language.Lean.process (setupImports (← setupDocRef.get) opts chanOut) old?
+    let processor : DocumentMeta → BaseIO Language.Lean.InitialSnapshot := fun «meta» => do
+      setupDocRef.set «meta»
+      processor «meta».mkInputContext
+    let initSnap ← processor doc
     let _ ← ServerTask.IO.asTask do
       let importClosure ← IO.lazyPure fun _ => getImportClosure? initSnap
       let importClosure ← importClosure.filterMapM (documentUriFromModule? ·)
@@ -637,7 +651,7 @@ section Updates
   def updateDocument («meta» : DocumentMeta) : WorkerM Unit := do
     (← get).reporterCancelTk.set
     let ctx ← read
-    let initSnap ← ctx.processor «meta».mkInputContext
+    let initSnap ← ctx.processor «meta»
     let doc ← (← get).doc.update «meta» initSnap
     let reporterCancelTk ← CancelToken.new
     let reporter ← reportSnapshots ctx doc reporterCancelTk
