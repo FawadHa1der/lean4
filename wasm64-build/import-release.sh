@@ -6,7 +6,9 @@
 #   wasm64-build/import-release.sh import  <tag>     # branch import/<tag>, merge the tag (stops on conflicts)
 #   wasm64-build/import-release.sh drift   <tag>     # files BOTH sides changed: the semantic-drift review list
 #   wasm64-build/import-release.sh delta   <tag> [<rev>]
-#                                                    # files where the merge is not the tag + the line's own edits
+#                                                    # paths where <rev> (import/<tag>) is not the tag merged with
+#                                                    # the line's own changes: run it before the first build, and
+#                                                    # again before accept
 #   wasm64-build/import-release.sh build   <tag>     # Docker stage1 build into ../wasm64-lean-kernel-build-<tag>
 #   wasm64-build/import-release.sh gate    <tag>     # release gate on that artifact (writes GATE-PASSED)
 #   wasm64-build/import-release.sh gate-dir <build dir>
@@ -121,15 +123,25 @@ cmd_drift() {
   both_sides "$ours" "$1" | grep -v '^stage0/' || true
 }
 
-# Is the merge the tag plus the line's own edits? Stable tags sit on release
-# branches and the merge base is on master, so git's merge can keep the
-# previous tag's release-branch copies (v4.36.0: a module and three checker
-# pins that v4.35.0 had and v4.36.0 does not). This compares each file of
-# <rev> (default import/<tag>) with the tag's file where the line kept the
-# previous tag's, else with the tag's file plus the line's own edits on top of
-# the previous tag (git merge-file). Files only the line has are skipped (a merge
-# cannot get them wrong), and so is stage0 (taken whole). It lists; each entry
-# needs a reason (a recorded conflict resolution, a post-merge fix) or a fix.
+# Is <rev> the tag plus the line's own changes? Stable tags sit on release
+# branches and the merge base is on master, so git's merge keeps the previous
+# tag's release-branch copies wherever master's side looks unchanged (v4.36.0:
+# a module and three checker pins that v4.35.0 had and v4.36.0 does not).
+# delta redoes the merge over the previous tag instead: git merge-tree of the
+# tag and the line before the merge (<merge>^1) with <prev> as the base, by
+# path (no rename detection) and with the line's attributes, so a release-
+# branch copy is the base and cannot win. That merge writes into a throwaway
+# object store: delta adds no object to the repository (git may refresh the
+# timestamps of objects or packs the merge recomputes). It then lists each
+# path outside stage0 (taken whole) where <rev> (default import/<tag>) is not
+# that merge's result: CONFLICT where the merge conflicts (always listed),
+# DEVIATES where the line had changed the path since <prev> (by name), NOT-TAG
+# where it had not, so the tag's file was due. A path neither tag has is the
+# line's own: what commits after the merge do to it is not delta's business,
+# but a path the merge commit itself added or dropped is (LINE-ONLY: git moves
+# a line-only file into a directory upstream renamed; a conflict's side file
+# committed). Each entry needs a reason (the merge message, a fix commit) or
+# a fix.
 merge_of() { # the first-parent commit of <rev> whose second parent is <tag>
   local t c; t="$(git rev-parse "$1^{commit}")"
   for c in $(git rev-list --first-parent --merges "$2"); do
@@ -137,37 +149,61 @@ merge_of() { # the first-parent commit of <rev> whose second parent is <tag>
   done
   return 1
 }
-blob_of() { git cat-file -e "$1:$2" 2>/dev/null && git cat-file blob "$1:$2"; }
+in_list() { local x="$1" e; shift; for e in "$@"; do [ "$e" = "$x" ] && return 0; done; return 1; }
+has() { git cat-file -e "$1:$2" 2>/dev/null; }   # does tree-ish $1 have path $2?
 
 cmd_delta() {
-  need_tag "$1"; local tag="$1" rev="${2:-import/$1}" merge ours prev tmp f rc n=0 edited
+  need_tag "$1"; local tag="$1" rev="${2:-import/$1}" merge ours prev objs tmp rc=0 n=0 want f how
+  local -a conflicted=()
+  for f in "$tag" "$rev"; do git rev-parse -q --verify "$f^{commit}" >/dev/null || die "no commit $f here (fetched?)"; done
   merge="$(merge_of "$tag" "$rev")" || die "no first-parent commit of $rev merges $tag"
-  ours="$merge^1"; prev="$(imported_tag "$ours")"
-  [ -n "$prev" ] || die "the line before the merge contains no stable tag"
-  tmp="$(mktemp -d)"
-  say "# $rev against $tag + the line's own edits on top of $prev (stage0 is taken whole, not checked)"
-  edited="$(git -c core.quotePath=false diff --name-only --no-renames "$prev" "$ours" -- . ':!stage0')"
-  while IFS= read -r f; do
-    [ -n "$f" ] && ! grep -qxF -- "$f" <<<"$edited" || continue
-    say "NOT-TAG   $f  (the line kept $prev's file, and it differs from $tag's)"; n=$((n + 1))
-  done < <(git -c core.quotePath=false diff --name-only --no-renames "$tag" "$rev" -- . ':!stage0')
-  while IFS= read -r f; do
-    [ -n "$f" ] || continue
-    git cat-file -e "$prev:$f" 2>/dev/null || git cat-file -e "$tag:$f" 2>/dev/null || continue
-    if ! git cat-file -e "$ours:$f" 2>/dev/null; then # the line deleted it
-      if git cat-file -e "$rev:$f" 2>/dev/null; then say "DEVIATES  $f  (the line deleted it)"; n=$((n + 1)); fi
-      continue
-    fi
-    blob_of "$tag" "$f" >"$tmp/tag" || :; blob_of "$prev" "$f" >"$tmp/prev" || :; blob_of "$ours" "$f" >"$tmp/ours"
-    rc=0; git merge-file -q -p "$tmp/tag" "$tmp/prev" "$tmp/ours" >"$tmp/want" 2>/dev/null || rc=$?
-    if [ "$rc" -ne 0 ]; then
-      say "CONFLICT  $f  (the line's edits do not apply cleanly to $tag's file: review the resolution)"; n=$((n + 1))
-    elif ! blob_of "$rev" "$f" | cmp -s - "$tmp/want"; then
-      say "DEVIATES  $f  (not $tag's file + the line's edits on top of $prev)"; n=$((n + 1))
-    fi
-  done <<<"$edited"
-  rm -r "$tmp"
-  say "# $n file(s) to account for"
+  ours="$(git rev-parse "$merge^1")"
+  # imported_tag fails when no stable tag is merged (cmd_status relies on that)
+  prev="$(imported_tag "$ours")" \
+    || die "the line before the merge ($(git rev-parse --short "$ours")) has no stable tag (is the previous tag fetched?)"
+  objs="$(cd "$(git rev-parse --git-path objects)" && pwd)"
+  tmp="$(mktemp -d)"; trap "rm -rf $(printf %q "$tmp")" EXIT   # expanded now: tmp is local, and set -u
+  mkdir "$tmp/objects"
+  say "# $rev against $tag merged with the line's changes $prev..$(git rev-parse --short "$ours") (by path); stage0 is taken whole, not checked"
+  ( # every git here writes into the throwaway store and reads the repository's objects through it
+    export GIT_OBJECT_DIRECTORY="$tmp/objects" GIT_ALTERNATE_OBJECT_DIRECTORIES="$objs"
+    # line 1: the merge's tree; then the conflicted paths. Exit 1 only means conflicts.
+    git --attr-source="$ours" merge-tree --write-tree -z --name-only --no-messages -X no-renames \
+      --merge-base="$prev" "$ours" "$tag" >"$tmp/merge" || rc=$?
+    [ "$rc" -le 1 ] || die "git merge-tree of $tag and $ours over $prev failed (exit $rc)"
+    { IFS= read -r -d '' want
+      while IFS= read -r -d '' f; do case "$f" in stage0/*) ;; *) conflicted+=("$f") ;; esac; done; } <"$tmp/merge"
+    for f in ${conflicted[@]+"${conflicted[@]}"}; do
+      if git diff-tree -r --quiet "$want" "$rev" -- ":(literal)$f"; then
+        say "CONFLICT  $f  (that merge conflicts here, and $rev has its unresolved entry: markers, or one side)"
+      else
+        say "CONFLICT  $f  (that merge conflicts here: review the resolution)"
+      fi; n=$((n + 1))
+    done
+    git diff-tree -r -z --name-only "$want" "$rev" -- ':!stage0' >"$tmp/differs"
+    while IFS= read -r -d '' f; do
+      in_list "$f" ${conflicted[@]+"${conflicted[@]}"} && continue
+      if ! has "$prev" "$f" && ! has "$tag" "$f"; then
+        # the line's own path: listed only where the merge commit added it, or dropped it and <rev> still lacks it
+        git diff-tree -r --quiet "$ours" "$merge" -- ":(literal)$f" && continue
+        if has "$merge" "$f" && ! has "$ours" "$f"; then how=added
+        elif ! has "$merge" "$f" && ! has "$rev" "$f"; then how=dropped
+        else continue; fi
+        say "LINE-ONLY $f  (neither tag has it, and the merge commit $how it)"; n=$((n + 1)); continue
+      fi
+      if ! git diff-tree -r --quiet "$prev" "$ours" -- ":(literal)$f"; then
+        say "DEVIATES  $f  (the line changed it since $prev, and $rev's is not that merge's)"
+      elif ! has "$tag" "$f"; then
+        say "NOT-TAG   $f  (the line had not changed it since $prev, and $tag does not have it)"
+      elif ! has "$rev" "$f"; then
+        say "NOT-TAG   $f  (the line had not changed it since $prev, and $rev does not have it)"
+      else
+        say "NOT-TAG   $f  (the line had not changed it since $prev, and $rev's is not $tag's)"
+      fi; n=$((n + 1))
+    done <"$tmp/differs"
+    say "# $n path(s) to account for"
+  )
+  rm -rf "$tmp"; trap - EXIT
 }
 
 cmd_import() {
