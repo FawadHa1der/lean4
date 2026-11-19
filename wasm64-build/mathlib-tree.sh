@@ -31,10 +31,39 @@ BD="${QED64_BUILD_DIR:-$REPO/../wasm64-lean-kernel-build-$TAG}"
 IMG=qed64-toolchain:emsdk-7.0.0
 MATHLIB_URL="${MATHLIB_URL:-https://github.com/leanprover-community/mathlib4}"
 MATHLIB_REV="${MATHLIB_REV:-$TAG}"
-# Three roots whose closure is the served profile. Extra roots (the games';
-# mathlib-extra-roots.txt, or env MATHLIB_EXTRA_ROOTS, space separated) are
-# built in the same Lake workspace but staged as a separate additive tree.
-MATHLIB_ROOTS="${MATHLIB_ROOTS:-Mathlib.Geometry.Manifold.IsManifold.Basic Mathlib.Geometry.Manifold.Instances.Sphere Mathlib.Analysis.SpecialFunctions.Complex.Circle}"
+# Before any git or python3: /usr/bin/git and /usr/bin/python3 are xcrun shims,
+# which an unaccepted Xcode licence breaks; the CommandLineTools' copies work.
+if ! git --version >/dev/null 2>&1 && [ -d /Library/Developer/CommandLineTools ]; then
+  export DEVELOPER_DIR=/Library/Developer/CommandLineTools
+fi
+# Roots whose closure is the served profile: mathlib-essential's "roots" in
+# js/packs.json, the list pack-set.mjs records in the pack's manifest, read from
+# there so the two cannot drift: the first three since the first release, and
+# since v4.36.0 five small ones the apps' files import (tactics, norm_num's
+# primality, pigeonhole, the reals' topology lemmas). Stage the tree from this
+# checkout: pack-set.mjs refuses only a root the tree lacks, so a packs.json
+# naming other roots would put them in the manifest of a tree not cut for them.
+# For the same reason env MATHLIB_ROOTS (space separated), which overrides the
+# list, is for a trial only. Extra roots (the games'; mathlib-extra-roots.txt,
+# or env MATHLIB_EXTRA_ROOTS, space separated) are built in the same Lake
+# workspace but staged as a separate additive tree.
+if [ -z "${MATHLIB_ROOTS:-}" ]; then
+  # python3 -I: no module from the cwd, no PYTHON* variable. A root is a module
+  # name, dot-separated words: the list goes unquoted into the container's bash.
+  MATHLIB_ROOTS="$(python3 -I -c '
+import json, re, sys
+p = sys.argv[1]
+try:
+    ess = [d for d in json.load(open(p, encoding="utf-8"))["packs"] if d["id"] == "mathlib-essential"]
+    roots = ess[0]["roots"] if len(ess) == 1 else None
+    if not (isinstance(roots, list) and roots and all(isinstance(r, str) and re.fullmatch(r"\w+(\.\w+)*", r) for r in roots)
+            and len(set(roots)) == len(roots)):
+        raise ValueError("want one mathlib-essential pack whose roots are a non-empty list of distinct module names")
+except Exception as e:
+    sys.exit("mathlib-tree: cannot read the roots of mathlib-essential from %s: %s: %s" % (p, type(e).__name__, e))
+print(" ".join(roots))
+' "$REPO/wasm64-build/js/packs.json")" || exit 1
+fi
 # The extra roots are committed (mathlib-extra-roots.txt) so a version import
 # carries the games' needs without anyone remembering them; the env overrides.
 if [ -z "${MATHLIB_EXTRA_ROOTS+x}" ]; then
@@ -48,9 +77,6 @@ ROOTS="$MATHLIB_ROOTS ${MATHLIB_EXTRA_ROOTS:-}"
 # would stop resolving (-504 Lean.*, -276 Std.* modules at v4.34.0).
 CORE_ROOTS="${CORE_ROOTS-Lean Std}"
 THREADS="${LEAN_NUM_THREADS:-6}"      # fd exhaustion + an 8 GiB Docker VM: keep it modest
-if ! git --version >/dev/null 2>&1 && [ -d /Library/Developer/CommandLineTools ]; then
-  export DEVELOPER_DIR=/Library/Developer/CommandLineTools
-fi
 NATIVE="$BD/native"
 [ -x "$NATIVE/stage1/bin/lean" ] || { echo "mathlib-tree: no native64 compiler in $NATIVE — run native64.sh $TAG" >&2; exit 1; }
 # One recipe per import: Lake, git and ProofWidgets' Node build run in HEAD's $IMG, which must be the

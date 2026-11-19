@@ -311,7 +311,8 @@ manifest, so the release's runtime manifest and every chunk are byte-identical
 to what QED64 serves, sourceRevision included). `lean-core` and `mathlib-essential` are the
 bytes QED64 serves (`--packs-from`), written by the v4.34.0 import's compilers
 (lean-core: wasm `8d91aadcda`; Mathlib: native `857544b439`); re-packing that
-import with `js/packs.json` reproduces their raw packs byte for byte, and only
+import with `js/packs.json` as it was then (three `mathlib-essential` roots;
+v4.36.0 added five) reproduces their raw packs byte for byte, and only
 part 000 of each transport differs, in the gzip header's OS byte (QED64's Apple
 zlib wrote `0x13`; `pack.mjs` pins `0x03`). `mathlib-game-extra` had never been
 served (its only copy, in QED64's staging, had bare part URLs): it is re-cut

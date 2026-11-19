@@ -1,6 +1,6 @@
 {
   "schema": "lean4-wasm64.packs/v1",
-  "about": "The library packs of a release and how each is cut (RELEASE.md). Read by pack-set.mjs. `build`: which build directory holds the source — `import` (the release's import build: its wasm64 stage1 lib/lean, native64, the Mathlib trees) or `runtime` (the released runtime's own build, which differs from the import after a kernel-only fix). `compiler`: whose compiler wrote the oleans — `wasm` (that build's wasm64 stage1, its BUILT-COMMIT) or `native64` (the import's NATIVE-COMMIT). Mount points, roots and release strings of lean-core and mathlib-essential are those QED64 has served since v4.33; re-packing the v4.34.0 import with them reproduces the served raw packs byte for byte. Placeholders: {leanVersion}, {buildId} and {commit12} (of the pack's build directory), {mathlib7}. Checks, refused before packing: every root has its <root path>.olean in the tree (`include`: in the selection); `excludesInit`: the tree holds no Init; `disjointFrom`: no .olean path in both trees; `modulesList` (relative to the import build directory, one module per line, blank and # lines ignored — the selection mathlib-tree.sh wrote): exactly the modules of the tree. Checked after packing: `closedOver` (pack ids, [] = self-closed) — every import of every module is a module of this pack or of those packs, whose manifests are read from --out (packed earlier in the same run — so listed before it here — or copied there first).",
+  "about": "The library packs of a release and how each is cut (RELEASE.md). Read by pack-set.mjs. `build`: which build directory holds the source — `import` (the release's import build: its wasm64 stage1 lib/lean, native64, the Mathlib trees) or `runtime` (the released runtime's own build, which differs from the import after a kernel-only fix). `compiler`: whose compiler wrote the oleans — `wasm` (that build's wasm64 stage1, its BUILT-COMMIT) or `native64` (the import's NATIVE-COMMIT). Mount points, roots and release strings of lean-core and mathlib-essential are those QED64 has served since v4.33, except that mathlib-essential's roots gained five at v4.36.0 (K8 row 9: small modules the apps' files import); re-packing the v4.34.0 import with them as they were then (mathlib-essential's three roots) reproduces the served raw packs byte for byte. Placeholders: {leanVersion}, {buildId} and {commit12} (of the pack's build directory), {mathlib7}. Checks, refused before packing: every root has its <root path>.olean in the tree (`include`: in the selection); `excludesInit`: the tree holds no Init; `disjointFrom`: no .olean path in both trees; `modulesList` (relative to the import build directory, one module per line, blank and # lines ignored — the selection mathlib-tree.sh wrote): exactly the modules of the tree. Checked after packing: `closedOver` (pack ids, [] = self-closed) — every import of every module is a module of this pack or of those packs, whose manifests are read from --out (packed earlier in the same run — so listed before it here — or copied there first).",
   "packs": [
     {
       "id": "lean-core",
@@ -22,8 +22,13 @@
       "mount": "/lib/lean/library",
       "roots": [
         "Mathlib.Analysis.SpecialFunctions.Complex.Circle",
+        "Mathlib.Combinatorics.Pigeonhole",
         "Mathlib.Geometry.Manifold.Instances.Sphere",
-        "Mathlib.Geometry.Manifold.IsManifold.Basic"
+        "Mathlib.Geometry.Manifold.IsManifold.Basic",
+        "Mathlib.Tactic.Cases",
+        "Mathlib.Tactic.Have",
+        "Mathlib.Tactic.NormNum.Prime",
+        "Mathlib.Topology.Instances.Real.Lemmas"
       ],
       "urlPrefix": "/profiles/",
       "release": "mathlib-essential-{mathlib7}-{buildId}",
@@ -31,7 +36,7 @@
       "excludesInit": true,
       "modulesList": "mathlib/essential-modules.txt",
       "closedOver": ["lean-core"],
-      "about": "Import closure of the roots plus Lean and Std, minus Init (mathlib-tree.sh); written by native64."
+      "about": "Import closure of the roots plus Lean and Std, minus Init (mathlib-tree.sh, which reads the roots from here); written by native64."
     },
     {
       "id": "mathlib-game-extra",

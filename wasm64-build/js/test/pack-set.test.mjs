@@ -26,8 +26,13 @@ const BUILT = "8d91aadcda8a0b231e47c42d4ff4b9b8360563aa";
 const NATIVE = "857544b439aa51633344d638dacc03d304b9ea96";
 const MATHLIB = "5ed2965256430c3649e86755f9576b54eca72435";
 const RUNTIME = "a8817d01f97227b1b04cc7d661b9e396f6ca8f34";
-const ROOTS = ["Mathlib.Analysis.SpecialFunctions.Complex.Circle", "Mathlib.Geometry.Manifold.Instances.Sphere", "Mathlib.Geometry.Manifold.IsManifold.Basic"];
+// mathlib-essential's roots as packs.json gives them (mathlib-tree.sh reads the
+// same list): every fake essential tree holds each one, so the fixtures follow
+// the list. The import fixtures give the first three edges of their own.
+const ROOTS = JSON.parse(fs.readFileSync(path.join(pkg, "packs.json"), "utf8")).packs.find((d) => d.id === "mathlib-essential").roots;
+assert.ok(ROOTS.length >= 3, `the import fixtures need three roots of mathlib-essential; packs.json gives ${ROOTS.length}`);
 const oleanOf = (name) => `${name.split(".").join("/")}.olean`;
+const literal = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); // a module name or path inside a RegExp
 const putter = (dir) => (rel, bytes) => { fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true }); fs.writeFileSync(path.join(dir, rel), bytes); };
 
 function runtimeDir() {
@@ -65,6 +70,7 @@ const ESSENTIAL = {
   [ROOTS[0]]: ["Init", "Init.Core", ROOTS[2]], // the implicit Init edge: pack.mjs drops it
   [ROOTS[1]]: ["Init", ROOTS[0]],
   [ROOTS[2]]: ["Lean"],
+  ...Object.fromEntries(ROOTS.slice(3).map((r) => [r, ["Init", "Lean"]])),
   Lean: ["Init", "Std"],
   Std: ["Init.Prelude"],
 };
@@ -100,6 +106,7 @@ test("pack-set cuts every pack of packs.json from the import and the runtime bui
   assert.deepEqual(core.roots, ["Init"]);
   assert.match(core.pack.transport.parts[0].url, /^\/profiles\/lean-core\.pack\.gzip\.[0-9a-f]{20}\.part-000$/);
   assert.equal(manifest("mathlib-essential").release, `mathlib-essential-${MATHLIB.slice(0, 7)}-${buildId}`);
+  assert.deepEqual(manifest("mathlib-essential").roots, ROOTS, "the manifest records packs.json's roots, in its order");
   const extra = manifest("mathlib-game-extra");
   assert.match(extra.pack.transport.parts[0].url, /^\/profiles\/mathlib-game-extra\.pack\.gzip\.[0-9a-f]{20}\.part-000$/);
   assert.deepEqual(extra.roots, []);
@@ -145,11 +152,12 @@ test("pack-set refuses Init in an Init-free tree and a module shared by disjoint
 
 test("pack-set refuses a root with no .olean, before packing", () => {
   const { K, put } = buildDir();
-  fs.rmSync(path.join(K, "mathlib/essential-tree", oleanOf(ROOTS[1])));
-  put("mathlib/essential-modules.txt", ESSENTIAL_FILES.filter((f) => f !== oleanOf(ROOTS[1])).map((f) => f.slice(0, -6).split("/").join(".")).join("\n"));
+  const gone = [ROOTS[1], ROOTS.at(-1)]; // one of the first three and the last: every root is checked, not a prefix
+  for (const g of gone) fs.rmSync(path.join(K, "mathlib/essential-tree", oleanOf(g)));
+  put("mathlib/essential-modules.txt", ESSENTIAL_FILES.filter((f) => !gone.map(oleanOf).includes(f)).map((f) => f.slice(0, -6).split("/").join(".")).join("\n"));
   let r = run(["--build-dir", K, "--out", path.join(K, "p"), "--lean-version", "4.34.0", "--no-imports", "--only", "lean-core,mathlib-essential"]);
   assert.equal(r.status, 1, r.stdout + r.stderr);
-  assert.match(r.stderr, /mathlib-essential: root\(s\) with no \.olean in .*essential-tree: Mathlib\.Geometry\.Manifold\.Instances\.Sphere \(Mathlib\/Geometry\/Manifold\/Instances\/Sphere\.olean\) — renamed or dropped upstream\?/);
+  assert.match(r.stderr, new RegExp(`mathlib-essential: root\\(s\\) with no \\.olean in .*essential-tree: ${gone.map((g) => `${literal(g)} \\(${literal(oleanOf(g))}\\)`).join(", ")} — renamed or dropped upstream\\?`));
   assert.doesNotMatch(r.stderr, /lists|does not list/, "the list matches the tree; only the root is missing");
   assert.ok(!fs.existsSync(path.join(K, "p")), "refused before writing anything");
   // a root of an include pack must be in the selection, not merely in the tree
@@ -222,7 +230,7 @@ test("closedOver resolves against a manifest already in --out, and refuses befor
   fs.writeFileSync(path.join(out, "lean-core.manifest.json"), handManifest(["Init", "Init.Prelude"]));
   r = run(args);
   assert.equal(r.status, 1, r.stdout + r.stderr);
-  assert.match(r.stderr, /1 dangling import\(s\), in none of mathlib-essential \+ lean-core: e\.g\. Mathlib\.Analysis\.SpecialFunctions\.Complex\.Circle → Init\.Core/);
+  assert.match(r.stderr, new RegExp(`1 dangling import\\(s\\), in none of mathlib-essential \\+ lean-core: e\\.g\\. ${literal(ROOTS[0])} → Init\\.Core`));
   assert.ok(fs.existsSync(path.join(out, "lean-core.manifest.json")), "a closedOver manifest is never removed");
 
   fs.writeFileSync(path.join(out, "lean-core.manifest.json"), "{ not json");

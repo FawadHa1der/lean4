@@ -130,17 +130,21 @@ wasm64-build/import-release.sh release v4.34.0  # stage + verify the release; pr
 ```
 
 The release (`RELEASE.md`) is what the apps consume: runtime chunks, the
-three library packs (`js/packs.json` — the pack cut moved here from QED64's
-`import-packs.sh`, with the same mounts, roots and release strings), the
-native compiler, module lists and the `lean4-wasm64` tools, each byte under a
-digest in `release.json`.
+four packs of `js/packs.json` (`lean-core`, `mathlib-essential` and
+`mathlib-game-extra`, whose cut moved here from QED64's `import-packs.sh` with
+the same mounts, roots and release strings, `mathlib-essential` gaining five
+roots at v4.36.0; and `lean-lib`, the runtime build's own `lib/lean`, for
+Node), the native compiler, module lists and the `lean4-wasm64` tools, each
+byte under a digest in `release.json`.
 
 `mathlib-tree.sh` builds one Lake workspace and stages two trees:
-`essential-tree` = import closure of the three profile roots + `CORE_ROOTS`
+`essential-tree` = import closure of the profile roots (`mathlib-essential`'s
+`roots` in `js/packs.json`: three, and since v4.36.0 eight) + `CORE_ROOTS`
 (`Lean Std` — module-system Mathlib no longer pulls the core umbrellas in, and
 `import Lean` must keep resolving) minus `Init.*`; `extra-tree` = closure of
-the games' roots (`mathlib-extra-roots.txt`, committed with who needs each;
-env `MATHLIB_EXTRA_ROOTS` overrides) minus essential, an additive pack only
+the games' roots (`mathlib-extra-roots.txt`: since v4.36.0 lean4game's
+generated `wasm/mathlib-roots.txt`, copied byte for byte, with who imports
+each; see below) minus essential, an additive pack only
 the games mount (`mathlib-game-extra`). Both get the `deprecated_module` shims whose target is
 already inside them (`mathlib-select.py`): Mathlib moves modules and leaves
 the old name as a shim nothing imports, so a closure never contains one, and
@@ -148,7 +152,37 @@ without them every file written against a pre-move name is refused where
 stock Lean only warns (v4.34.0: 80 + 4 shims added, 72 skipped, listed in
 `shims-skipped.txt`; `*-selection.json` carries `deprecatedShims`). Names
 whose shim upstream already deleted stay gone. `SELECT_ONLY=1` re-runs the
-selection over an existing build in seconds.
+selection over an existing build in seconds. `pack-set.mjs` records
+`js/packs.json`'s roots in the pack's manifest and refuses only a root the tree
+lacks, so cut the tree and stage the release from the same checkout
+(`mathlib-tree.sh` reads that checkout's `js/packs.json`;
+`essential-selection.json` records the roots a tree was cut for, with `Lean`
+and `Std`). Env `MATHLIB_ROOTS` replaces the profile roots for a trial only: a
+tree cut for other roots must not be staged with that `packs.json`.
+
+The extra roots are lean4game's: its `scripts/game-roots.mjs` (not in this
+repository, though the file's header names it) writes `wasm/mathlib-roots.txt`
+from the import headers of the catalog games, GameServer and lean-i18n. At
+each import, before `mathlib-tree.sh`, copy that file from lean4game's pushed
+`wasm64-port` over `mathlib-extra-roots.txt`, byte for byte (never edit it
+here), and check it with that commit's script, run from a checkout or an
+export of it:
+
+```sh
+node scripts/game-roots.mjs --check --games-src <games> \
+  --have <Mathlib at the tag> --have <Batteries at the rev Mathlib pins>
+```
+
+`<games>` holds the catalog's `games-src/` checkouts, each at its catalog rev
+plus its port patch, as the games lane builds them (its `verify_source`
+refuses a checkout whose HEAD is another tree; an older port reports
+differences the file does not have). Each `--have` is a source tree,
+Batteries' at the rev in Mathlib's `lake-manifest.json`. Exit 0 means the file
+is what the generator writes from those sources and every listed module has
+its file in one of the trees. Name the lean4game commit in the commit message.
+A name deleted upstream fails the check and `lake build`: env
+`MATHLIB_EXTRA_ROOTS` replaces the file's whole list (it is not a deny-list),
+so set it to the file's other names, and tell lean4game.
 
 Build directory: `../wasm64-lean-kernel-build-<tag>` (override `QED64_BUILD_DIR`).
 It is never an app's build tree — a stage1 rebuild unpairs every snapshot baked
