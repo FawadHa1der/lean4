@@ -329,7 +329,7 @@ in every `location` that adds one), `gzip off` for octet-stream, `try_files $uri
   `LEAN_WASM_STACK_PROBE_SLOTS` and `LEAN_WASM_SYMTAB_TRACE` (kernel patch 0039: native-symbol
   lookups on stderr) are copied into the runtime's own environment. The pthread pool is 24
   Workers, as in a browser (kernel patch 0038's `LEAN4_WASM64_PTHREAD_POOL`, its two thread-exit
-  knobs and `LEAN4_WASM64_RTSTATS` left with the architecture review's D3b).
+  knobs and `LEAN4_WASM64_RTSTATS` left with kernel patch 0047, the architecture review's D3b).
 - **`node --stack-size=8192`** for anything that boots the runtime in its own
   process (`node-runner`, `persistent-probe`, `gate`; `lean4-wasm64 run|gate|probe`
   add it, and `node-runner` / `persistent-probe` started without it re-exec

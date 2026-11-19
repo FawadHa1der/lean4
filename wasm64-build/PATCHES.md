@@ -8,7 +8,7 @@ follow below. Summary:
 
 | # | Patch | Upstream? |
 |---|---|---|
-| 0001 | Emscripten wasm64 Docker recipe: emsdk 6.0.5, and 7.0.0 since the v4.36 riders' emsdk 7 move (`FROM emscripten/emsdk:7.0.0` and the image pins of `build.sh`, `native64.sh`, `mathlib-tree.sh` and `stage-release.sh`) | recipe replaces the i386-stage0 shim |
+| 0001 | Emscripten wasm64 Docker recipe: emsdk 6.0.5, and 7.0.0 since 0048, the v4.36 riders' emsdk 7 move (`FROM emscripten/emsdk:7.0.0` and the image pins of `build.sh`, `native64.sh`, `mathlib-tree.sh` and `stage-release.sh`) | recipe replaces the i386-stage0 shim |
 | 0002 | CMake wasm64 configuration (-m64 end-to-end, memory cache vars, platform target) | plumbing yes; memory values are policy |
 | 0003 | `LEAN_SCALAR_PTR_LITERAL` gated on pointer width, not `LEAN_EMSCRIPTEN` | **as-is** |
 | 0004 | `llvm_is_declaration` C ABI + `LLVMBindings.lean` `Context` declaration order | **as-is** (live correctness bugs) |
@@ -23,11 +23,11 @@ follow below. Summary:
 | 0013 | **In-memory snapshot load** (`CompactedRegion.readMem`, `lean_wasm_load_snapshot_mem`): the host streams a region straight into a `malloc` buffer, skipping the MEMFS staging copy (a second multi-GB JS-heap allocation) | applies to any no-mmap host; the shared `finish_region_read` refactor is upstream-neutral |
 | 0014 | **Snapshot-load stage timings + streamed init progress**: every load reports region-read vs `[init]`-replay split (plus top-10 module timings when replay >5 s), and streams `[WASM INIT] i/n module` per module so hosts can render live progress through the blocking call | diagnostic; the numbers justify upstream work on initializer execution |
 | 0015 | Multi-arch emsdk base image (drops the -arm64 pin so amd64 hosts build natively) | build hygiene |
-| 0016 | **Replay-control flags on `lean_wasm_load_snapshot_mem`** (bit 0 = run the `[init]` replay; extension states come from the region, the replay rebuilds process-side registrations) | **retired** by the architecture review's R11a (every caller passed 1): the replay always runs; `flags` stays in the export's signature, ignored |
+| 0016 | **Replay-control flags on `lean_wasm_load_snapshot_mem`** (bit 0 = run the `[init]` replay; extension states come from the region, the replay rebuilds process-side registrations) | **dead since 0045** (the architecture review's R11a; every caller passed 1): the replay always runs; only the `flags` parameter is left, ignored |
 | 0017 | **Interpreter dlsym probes gated on the wasm export table**: `lookup_symbol_in_cur_exe` consults a one-time `Set` of export names before calling dlsym | **as-is** for the Emscripten target — turns a 173 s pathology into ~1 s (below). **Superseded by 0039** (an in-module table, no dlsym, no JS); a 2-line `#ifdef` skeleton remains |
 | 0018 | **Host-pumped LSP file worker** (`lean_wasm_lsp_init` / `lean_wasm_lsp_send`): drive a single-file server session one message at a time when a blocking stdin is impossible (WASM event-loop hosts); forces `server.reportDelayMs := 0` (timed sleeps on dedicated pthreads do not wake under this build) | **retired** by 0033: the resident transport (0031/0032) replaced it |
-| 0019 | **24 preallocated pthread workers, 8 MiB thread stacks**: every `ServerTask` is `prio := .dedicated`, and synchronous `pthread_create` under Emscripten can only claim preallocated workers | needed by any wasm host running the language server; no line of it is left, its settings live on rewritten in `src/CMakeLists.txt`: the pool of 24 (`-sPTHREAD_POOL_SIZE=24`, again since the architecture review's D3b; from 0038 until then the default of 0038's `src/emscripten-pthread-pool.js`) and the 8 MiB stacks (`-sDEFAULT_PTHREAD_STACK_SIZE=8388608`) |
-| 0020 | **Keepalive-guard emscripten's `$checkMailbox`** (build-image patch to emsdk 6.0.5; re-anchored for 7.0.0 by the emsdk 7 move, where emscripten#27995 finds library deps by itself and the deps edit became an assert of 7.0.0's shape, the bug itself unchanged there and on upstream main): mailbox servicing ran through `callUserCallback`→`maybeExit`, which `_exit()`s an EXIT_RUNTIME=1 runtime with no keepalives — terminating the pthread blocked in `emscripten_proxy_sync` right after its proxied op executed. Reproduced in 30 lines of pure C on stock wasm32 | **upstream emscripten PR ready** — see docs/EMSDK-BUG-REPORT.md |
+| 0019 | **24 preallocated pthread workers, 8 MiB thread stacks**: every `ServerTask` is `prio := .dedicated`, and synchronous `pthread_create` under Emscripten can only claim preallocated workers | needed by any wasm host running the language server; no line of it is left, its settings live on rewritten in `src/CMakeLists.txt`: the pool of 24 (`-sPTHREAD_POOL_SIZE=24`, again since 0047, the architecture review's D3b; from 0038 until then the default of 0038's `src/emscripten-pthread-pool.js`) and the 8 MiB stacks (`-sDEFAULT_PTHREAD_STACK_SIZE=8388608`) |
+| 0020 | **Keepalive-guard emscripten's `$checkMailbox`** (build-image patch to emsdk 6.0.5; re-anchored for 7.0.0 by the emsdk 7 move, 0048, where emscripten#27995 finds library deps by itself and the deps edit became an assert of 7.0.0's shape, the bug itself unchanged there and on upstream main): mailbox servicing ran through `callUserCallback`→`maybeExit`, which `_exit()`s an EXIT_RUNTIME=1 runtime with no keepalives — terminating the pthread blocked in `emscripten_proxy_sync` right after its proxied op executed. Reproduced in 30 lines of pure C on stock wasm32 | **upstream emscripten PR ready** — see docs/EMSDK-BUG-REPORT.md |
 | 0021 | **Pre-built header environments** (`Language.Lean.prebuiltHeaderEnvs`, consulted by `processHeader` before the disk import; populated by `lean_wasm_lsp_init` from the wasm env cache): olean reads from elaboration pthreads proxy to the host and stall under WORKERFS | the hook shape is upstream-plausible for any embedder pre-importing on a preferred thread |
 | 0022 | **Flush the worker's LSP output after each message**: frame bodies have no trailing newline; a line-buffered host stream held them until the next message, whose bytes a framed reader ate as the missing body | **retired**: upstream already flushed after each message; only a comment is left |
 | 0023 | **Covering-environment aliasing for worker headers**: `lean_wasm_lsp_init` serves a document from the smallest cached env whose closure covers its imports (snapshot-seeded Init/umbrella envs ⇒ no olean import; exact positions; playground superset semantics) | **retired** by 0033; the covering logic moved to 0032's resolver |
@@ -217,13 +217,13 @@ Gate the rebuild on: garbage input → ≥1 error diagnostic; the defect test in
 
 The lean4game ecosystem (GameServer + every published game) is legacy-mode
 Lean; its oleans are self-contained. Under the wasm target (and natively under
-`QED64_ALLOW_LEGACY_IMPORTS`, until the architecture review's R11a removed that
-branch), `importModulesCore` skips the non-`module` guard, and admitted legacy
-modules get `irPhases := .all` so their parsers/initializers/tactics evaluate
-(the meta gate otherwise refuses).
-Both branches are unreachable in stock configurations. Enables the whole
-wasm64-lean4game port: game envs bake into snapshots and Runner-checked
-levels run in the browser.
+`QED64_ALLOW_LEGACY_IMPORTS`, until 0045, the architecture review's R11a,
+removed that branch), `importModulesCore` skips the non-`module` guard, and
+admitted legacy modules get `irPhases := .all` so their
+parsers/initializers/tactics evaluate (the meta gate otherwise refuses).
+The wasm tolerance and the `irPhases` rule are unreachable in stock
+configurations. Enables the whole wasm64-lean4game port: game envs bake into
+snapshots and Runner-checked levels run in the browser.
 
 ## 0031 — wasm: resident stdin ring + PROXY_TO_PTHREAD (browser64 transport port) (8407585c65)
 
@@ -538,7 +538,7 @@ a build by the commits the headings name, so an entry left unnamed would stage a
 as 0037; `stage-release.sh` refuses a heading spelled `## Unreleased: …`. The fixes from the
 review of 0038-0039b (r0038) are a later commit; these entries describe the result.)
 
-**Mostly removed again by the architecture review's D3b** (approved by the user 2026-11-01, for
+**Mostly removed again by 0047, the architecture review's D3b** (approved by the user 2026-11-01, for
 the next runtime release: v4.36's). No host set the pool size or either exit, and none read the
 counters (grep of QED64, lean4game, the widgets showcase and the proof sheets), so they are gone,
 the counters inside 0036's guard path included: that path's freeze names them as its one
@@ -707,7 +707,8 @@ through JavaScript (`Object.keys(…).indexOf` over the exports, under the dynam
   `_main`, `_lean_wasm_reset`, the 0038 and 0039 gauges, and the three Emscripten built-ins hosts
   reach (`__emscripten_proxy_main`, `__emscripten_check_mailbox`, `_pthread_self`, now also bound
   on `Module`): 27 names (`_lean_wasm_reset`, which no host called, left it and the runtime with
-  the architecture review's R11a, and 0038's three counters, which no host read, with its D3b).
+  0045, the architecture review's R11a, and 0038's three counters, which no host read, with 0047,
+  its D3b).
   749 names left it: 221 `@[export]` names (table entries now), 527 C++
   `lean_*` functions no JavaScript calls (the interpreter's keys are never C names: an
   `@[extern]` decl is reached through its boxed wrapper), and `initialize_libuv`. The generator's
@@ -823,7 +824,7 @@ added ~18 MB of wasm), so interpreted code — package code, `#eval`, the `[init
 package modules — interpreted every such core function it called, from the shipped `.ir`.
 
 - **The table holds them** (`gen-exports.py` `INCLUDE_PLAIN = True`), kind `plain`. That switch
-  and the gate's `EXPECT_PLAIN_NATIVE`, kept for an A/B against 0039, have since been removed.
+  and the gate's `EXPECT_PLAIN_NATIVE`, kept for an A/B against 0039, have since been removed (0045).
   `requiresBoxedVersion` (LCNF `ExplicitBoxing`) is false exactly when a function has parameters
   none of which is scalar, borrowed or void, no scalar result, is not `extern` and has at most 16
   parameters: each plain function takes owned objects and returns one, the ABI `call` (`curry`),
@@ -924,7 +925,7 @@ which switches that rewrite off: the objects must be identical, and three positi
 (`eh-funclet-controls/`, the two bugs' shapes) must differ, or the build fails. Workaround flags
 exist (`-mllvm -enable-scalar-pre=false`, `-mllvm -jump-threading-threshold=0`) if it ever fires.
 Both bugs are still open at emsdk 7.0.0's LLVM (84ba7b37f0; #229448's fix, #229465, unmerged), so
-the guard stays with the emsdk 7 move; it replays the system libraries' compiles one directory
+the guard stays with the emsdk 7 move (0048); it replays the system libraries' compiles one directory
 deeper there (`<cache>/build/wasm64-emscripten/…`, emscripten#27694, 6.0.10). On the first 7.0.0
 build (the emsdk7-eval trial, bd4560f0a3, 2026-11-17) it passed: the controls differ; 124 C++
 translation units, libc++ 58, libc++abi 18 and libunwind 1 sources identical.
@@ -1226,7 +1227,7 @@ malloc-family (`operator new`/`delete` variants, `___libc_{malloc,calloc,realloc
 pins the export list exactly sees the new names.
 
 **Known limits of the runtimes linked with emsdk 6.0.5** (emscripten#28028; from this patch until
-the emsdk 7 move, lean-v4.35.0-0bf1fb2 among them; history for later runtimes, below). mimalloc
+the emsdk 7 move, 0048, lean-v4.35.0-0bf1fb2 among them; history for later runtimes, below). mimalloc
 takes its memory from emmalloc, and hands it blocks over 512 MiB directly. emmalloc's region sizes
 are 32-bit there, which fails in two ways:
 - A single allocation of about 4 GiB or more returns NULL (reported in #28028 on emsdk 6.0.12:
@@ -1242,7 +1243,7 @@ are 32-bit there, which fails in two ways:
   at 3.29 GiB), and heaps past 4 GiB are untested on such a runtime. The runtime's maximum is
   16 GiB, so a host that lets the heap of such a runtime pass 4 GiB carries this risk.
 
-**Fixed by emsdk 7.0.0** (#28035, the fix of #28028; the emsdk 7 move): emmalloc's sizes are 64-bit
+**Fixed by emsdk 7.0.0** (#28035, the fix of #28028; the emsdk 7 move, 0048): emmalloc's sizes are 64-bit
 there. Measured on the first 7.0.0 build (the emsdk7-eval trial, 2026-11-17): single blocks of 4.0
 and 5.0 GiB, the reuse of a freed 4.25 GiB region, and compactor reserves of 4 and 5 GiB on an Init
 header save all succeed; a 16 GiB reserve fails cleanly (the address space). So a bake's reserve,
@@ -1310,3 +1311,236 @@ Chrome's stack). `#lsp_code` elaborates one command and prints the `code` that
 `msgToInteractiveDiagnostic` gives each of its errors: the Meta probe's and the kernel probe's
 theorems must get `wasm.stackExhausted`, and an ordinary `decide` failure must not. The tag is
 spelt out at each site, so this run is what catches a typo in one copy.
+
+## 0045 — wasm: delete the runtime's dead code (architecture review R11a) (d79b022803)
+
+0045 to 0048 ride the v4.36 import (K8 rows 2, 3, 4 and 16): one revertible commit each, in this
+order, on top of the import's own commits. Their entries are written before the first gated build
+of the stack; its numbers come with it.
+
+**What goes.** Code no consumer reaches (the architecture review's §5 #4a), deleted with the v4.36
+import's runtime, since a `src` change means a new runtime anyway:
+- 0016's replay switch: `lean_wasm_load_snapshot_mem` always runs the `[init]` replay. `flags`
+  stays in the export's signature (`_flags`, ignored), so the export keeps its three i64
+  parameters, and hosts keep passing `1n`, which a runtime before this one needs. The line
+  `[WASM PROFILE] init replay SKIPPED` goes with the branch. Every caller passed 1, so the replay,
+  its `[WASM INIT] i/n` lines and the stage-timing line print as before. 0016 is dead (its row
+  above): only its parameter is left.
+- B7, the base's debug leftovers: `debug.cpp`'s `[DEBUG:ASSERT]` `console.log` block (an assertion
+  still prints to stderr, as in stock) and 12 of `Shell.lean`'s 16 `[WASM DEBUG]` lines: the
+  environment cache's 3, `wasmCompile`'s 6 and 0037's "waiting on the tasks" line, and the two
+  loaders' "loading" lines.
+- B8, `thread.cpp`'s pointer-width gate for a native 32-bit build: this line's stage0 is native
+  64-bit, and the default thread stacks stay 8 MiB under Emscripten and 1 GiB natively.
+- 0030's environment-variable branch: `importModulesCore` no longer reads
+  `QED64_ALLOW_LEGACY_IMPORTS`. The wasm target tolerates legacy imports as before, and native
+  builds keep stock's guard. node-runner stops forwarding the variable. QED64's
+  `bake-snapshot --allow-legacy-imports` and `snapshot-probe --init-flags` do nothing on this
+  runtime.
+- `lean_wasm_reset` and its export: no caller in any branch of QED64, lean4game, the showcase or
+  the proof sheets (exports-audit's output over the four trees is unchanged but for the contract's
+  size). The JavaScript contract is 28 names.
+- The `dl_iterate_phdr` stub (MAIN_MODULE era): since 0039's static link nothing references it
+  (0bf1fb2's and the emsdk 7.0.0 trial's symbol maps lack it), and check-link's calibrated, empty
+  allowlist fails a build where a reference returns.
+- The build inputs the dead-tooling review left for a runtime build: `docker-wasm64/configure.sh`
+  (unreferenced; in git at eaf94493ba), `gen-exports.py`'s `INCLUDE_PLAIN` and the gate's
+  `EXPECT_PLAIN_NATIVE` (constant since 0039b; the manifest keeps `include_plain: true`), the CMake
+  comments that gave 12 GB as the ceiling, and the seed's who-calls-it comments after D4 (a).
+
+`debug.cpp` and `thread.cpp` are v4.36.0's again.
+
+**Kept.** The frozen lines of EMBED-RUNTIME.md §5, byte for byte: both `[DEBUG:PROGRESS]` lines,
+both `[WASM DEBUG] … cached env for #[…]` lines, `[WASM INIT] i/n` and 0011's compactor text. Also
+the `[WASM PROFILE]` timings. And, on purpose, the two `[WASM DEBUG] … failed: <error>` lines
+(`wasmLoadSnapshot failed`, `wasmLoadSnapshotMem failed`): B7 by the review's inventory, but a
+failed load's only diagnostic. EMBED-RUNTIME.md §2 promises one (a failed load returns 1, with a
+diagnostic on stderr), and QED64's snapshot-probe prints a failed load's last lines. They stay
+diagnostics, not frozen lines (§5).
+
+**Gate.** No check of its own. S2 binds the 28 contract names with the repository's seed (29
+before); G2 and G5 require the plain entries as since 0039b, without the switch; the gate's bake no
+longer pins `QED64_ALLOW_LEGACY_IMPORTS`; check-link must still report 0 undefined symbols.
+
+**For consumers**: an older lean4-wasm64 gate (4.35.0-0bf1fb2 and before) requires
+`_lean_wasm_reset` of every runtime, so it fails S2 on this one (`_lean_wasm_reset not bound on
+Module`): gate it with its own tools. The new tools still pass the older runtimes (S2 is a subset
+check). A host that set `flags` to 0 would now get the replay (none did).
+
+## 0046 — wasm: a generic refused-header text; `headerStatus.version` is its setup's document version (architecture review K3) (5af348619f)
+
+Two fixes to 0032's resident header resolver (the architecture review's K3, K8 row 3), in
+`src/Lean/Server/FileWorker.lean`. Neither changes the protocol: `$/qed64/headerStatus` keeps its
+method and fields, and a refusal is still one error on the header.
+
+- **The refusal names no action:** `modules #[…] are not loaded in this session`. The old ending
+  ` — use "Load exact imports"` named a QED64 action that the page never offered on a refusal and
+  that QED64 has since retired (D1); lean4game and the proof sheets never had it. The substring
+  "are not loaded in this session" stays, and consumers match that substring, not the whole text:
+  QED64's e2e (`REFUSED_NOTE`) and the showcase's C7. The severity, the range and the stderr line
+  `[WASM LSP] header refused: …` are unchanged.
+- **`headerStatus.version` is the version of the document whose header setup it reports**, and so
+  is `$/lean/ileanHeaderSetupInfo`'s. `initializeWorker` bound `setupImports` to the first
+  `DocumentMeta`. That is right for stock, where a header change restarts the worker, but the
+  resident FileWorker (0031) re-runs setup in place, so every later setup carried the first
+  version. `WorkerContext.processor` now takes the `DocumentMeta`: each call puts it in a ref that
+  the call itself reads before the header task starts, so a setup keeps its own version even when
+  the next edit arrives first. A body edit reuses the setup and sends no status, as before, so a
+  status can carry a version older than the document's current one. Native builds: the first
+  setup is unchanged, and a later one still restarts the worker; in stock's own race, a header
+  change before the first setup has run, the surviving setup now carries its own version (in its
+  progress diagnostics and its setup info), not the first one.
+
+The public interface of `Lean.Server.FileWorker` changes (the type of `WorkerContext.processor`).
+No dependent declaration refers to it; native64 and the Mathlib trees must be built from a tree
+that has this commit. See EMBED-RUNTIME.md §3.4 and §7.
+
+**Gate.** No check of its own: no gate lane refuses a header or reads `version`. It is checked by
+hand on the candidate, with 0bf1fb2 as the negative control: QED64's resident probe (`--act2`,
+`DUMP_MSGS=1`) must report act 2's covered setup with `"version":2` (0bf1fb2: 1), and a header
+importing a module no loaded environment has must get one error,
+`modules #[Mathlib.NotAModule] are not loaded in this session` (0bf1fb2: the same with the old
+ending). Results: from the first gated build.
+
+**For consumers**: no re-pin is needed for the text. QED64's e2e and the showcase's C7 match the
+phrase that stays; lean4game reads `missing`; the proof sheets read the phase. A reader that
+compares `headerStatus.version` with the document's version now gets the right one, but none
+exists today (QED64 exposes the field as `status().header.version`).
+
+## 0047 — wasm: 0038's unused knobs and counters removed; the pool of 24 again; the gate checks K6's glue names (ae4262dcf8)
+
+**What goes** (the architecture review's D3b, K8 row 4, approved by the user 2026-11-01 for the
+next runtime release). 0038 gave hosts the size of the pthread pool and two opt-in ways for an idle
+thread to give its Worker back, and counted the engine-stack guard. No host set or read any of it
+(grep of QED64, lean4game, the widgets showcase and the proof sheets; exports-audit over the four
+trees changes only in a gitignored QED64 scratch page: the counters' names, and `pthreadPoolSize`
+is no longer a guarded Module input). Removed:
+- `Module.pthreadPoolSize` and its JS library `src/emscripten-pthread-pool.js`: the link passes
+  `-sPTHREAD_POOL_SIZE=24` again, 0019's pool, and `LEAN_EXE_LINK_DEPS` names the export list
+  alone.
+- `LEAN_WASM_STD_SURPLUS_EXIT` and `LEAN_WASM_PARKED_IDLE_MS`: the standard workers of a `Task.get`
+  burst stay and parked threads wait for good, as before 0038 and as every host ran.
+- `lean_wasm_task_manager_stat`, `lean_wasm_engine_probes`, `lean_wasm_engine_guard_trips` and the
+  counting: the JavaScript contract is 25 names, and both engine-guard sites are 0036's again (with
+  0044's key), the one exception the user named to the stack freeze.
+
+**Kept**: on wasm the standard workers counted and created detached; `wasm_knob` (r0038's parser,
+now for 0035's `LEAN_WASM_PARKED_DEDICATED` alone); parking and
+`lean_wasm_task_manager_parked_threads`; `lean_init_task_manager_using`; the 24-Worker default.
+Native builds are unchanged (the native preprocessed output of the three runtime files is
+byte-identical). 0038's entry describes 0038 as it shipped.
+
+**Tools**: `js/runtime-knobs.mjs` forwards the three `LEAN_WASM_*` variables left; its pool key and
+`runtimeStats` go, with node-runner's `LEAN4_WASM64_RTSTATS`, the tools' `LEAN4_WASM64_PTHREAD_POOL`
+and `js/probes/thread-knobs.lean`. `js/runtime-contract.mjs` drops the counters and the level "0038"
+and splits S6: the names QED64's worker reads (the review's K6: rows 1-4 of QED64's
+`docs/ARCHITECTURE.md` "Glue internals the worker reads", at fd95a2a: the exit entries by identity
+at any index, message mode, the mailbox kick as a global binding, PThread's `unusedWorkers` and
+`pthreads`) on a line of their own, apart from the export contract; then the rest, which still
+requires what lean4game's pinned worker (QED64 73d7f3b) reads: the exit entries at [0] and [1] (a
+note since 0048), the mailbox-await parse, `_pthread_self`, PThread's methods.
+
+**Gate**: the ten `[0038]` checks go. A static check comes in: the glue allocates the 24-Worker pool
+(QED64's edit hold waits for 6 of the 24), and a runtime from 0038 to 0046 passes on its library's
+default, 24. The removed `[knobs off]` check was the gate's only runtime check that parking stays
+off by default (0035b), so the task storm's default run checks that itself:
+`[default: no parking] no dedicated task reuses a thread (parking is off by default, 0035b)` (at
+least one pthread per dedicated task), beside the opt-in `[parking 8]` check. S6 prints two lines,
+K6's (5 items) and the rest: 19 items with this patch's tools, 18 from 0048 on, where the
+positional exit-entry item became a note. Numbers: from the first gated build.
+
+Acceptance (K8 row 4) is on the candidate runtime: QED64's edit-storm and reload-storm lanes; one
+run with `Elab.async` on (the proof sheets' thread-growth lane); the stack re-runs (proof sheets
+L02.1/L08.1, lean4game NNG4 `decide`, QED64's deep-recursion lane).
+
+**For consumers**: a host that still sets `Module.pthreadPoolSize`, `LEAN_WASM_STD_SURPLUS_EXIT` or
+`LEAN_WASM_PARKED_IDLE_MS` changes nothing (none does). A lean4-wasm64 gate from before this release
+fails S2 on this runtime (the three counters); its `[0038]` checks skip, as on a runtime before
+0038. Gate it with its own tools (QED64: adopt-release `--tools`). The new tools still pass the
+published runtimes (their pool is 24: 0019's literal before 0038, the pool library's default from
+0038 to 0046; S2 is a subset check; S6 is unchanged in substance).
+
+## 0048 — build: the toolchain moves to Emscripten 7.0.0 (e4ef4939d6)
+
+**What and why** (K8 row 16, approved by the user 2026-11-19: go, riding the v4.36 import, on
+7.0.0; keep 0020; legacy EH; keep the 6.0.5 images. Evaluation: the kernel-local
+`work/emsdk7-eval/REPORT.md`). The line moves from emsdk 6.0.5 to 7.0.0: `emscripten/emsdk:7.0.0`
+(index digest sha256:6bd7aef9…), Emscripten 777e6e5db7, LLVM 84ba7b37f0 (trunk, major 24),
+Binaryen 133, the image's Node 24.19.0. The image's native toolchain is unchanged (gcc 13.3.0,
+glibc 2.39, CMake 3.28.3, Python 3.12.3; the base moved from Ubuntu 24.04.4 to 24.04.5, and glibc's
+package from 2.39-0ubuntu8.8 to 8.9), so native64's toolchain is too; native64 and the Mathlib trees
+are first built in this image at this import (the trial re-tarred v4.35's native tree). What it
+brings: allocations of 4 GiB and more (#28035, the fix of 0043's limits, #28028), copies of an exact
+multiple of 4 GiB (6.0.10), the stale-waiter clear of #27501 for waitAsync hosts (6.0.7), and a base
+for later fixes that land only on 7.x (#28186, a proxying lost wakeup, in 7.0.1; if 7.0.1 ships
+before the v4.36 runtime build, it is a further bump, and S6 is re-run).
+
+**The forced changes**, each by an Emscripten change between 6.0.5 and 7.0.0:
+1. 0020's deps anchor became an assert of 7.0.0's shape (#27995, 7.0.0: JS-library deps are found
+   by scanning a body, so `$checkMailbox__deps` lost `$callUserCallback` and 0020's first anchor
+   stopped matching). Its body and tail edits apply unchanged, and the bug it guards is unchanged
+   at 7.0.0 and on upstream main.
+2. `-sDEFAULT_TO_CXX=1` at link (#27469, 6.0.6): `lean` links through leanc, i.e. emcc, which
+   ignores `-lstdc++` and no longer adds libc++ and libc++abi by itself. Link-only.
+3. `NODEFS,WORKERFS` in `-sEXPORTED_RUNTIME_METHODS` (#27940, 6.0.13, removed `FS.filesystems`):
+   hosts mount `Module.NODEFS` and `Module.WORKERFS`.
+4. 0038's pool library was pinned to 6.0.5, and #28171 (the 7.0.0 version) trips that pin: moot,
+   as 0047 deleted the library.
+5. The funclet guard (0040, build.sh step 5b) replays the system libraries' compiles one directory
+   deeper (#27694, 6.0.10). Both LLVM bugs it detects are open at 84ba7b37f0.
+
+**What hosts see** (EMBED-RUNTIME.md §1, §2, §5). `FS.filesystems` is gone. The -O3 glue is
+Terser-compressed (since 6.0.13): the runtime methods `getValue`, `setValue`, `ccall` and
+`stringToNewUTF8` exist only on Module, and of the exports only `_malloc`, `_pthread_self`,
+`__emscripten_proxy_main` and `__emscripten_check_mailbox` keep a global (`_free`, `_main` and every
+`_lean_*` are on Module alone). `proxiedFunctionTable` starts `[exitOnMainThread, _proc_exit, …]`
+(#28059, #27995) and holds inlined function expressions: a worker that hooks the exit entries by
+position (lean4game's pin, QED64 73d7f3b) sees no FileWorker exit. The Module line compares with
+`!==` (#27927). The glue clears a pthread's stale `Atomics.waitAsync` when its Worker returns to the
+pool (#27501), but not while the runtime thread's `waitAsyncPolyfilled` is true, as in QED64's
+message mode: QED64 sets the flag in every pthread realm from its HARDENING #94 on. Unchanged, not
+to be read as fixed: 0020's bug, a failed C++ `new` aborts (0043), the proxying lost wakeup #28186
+fixes, and an imported memory's heap stopping 0-128 MiB short of its maximum. The build ignores the
+link's `-sGROWABLE_ARRAYBUFFERS=2` advice (higher browser floors, and it would fold away QED64's
+message mode).
+
+**Gate and tools.** S6 accepts both glue generations: the Module line, the runtime methods as
+Module assignments with any right-hand side, WORKERFS and NODEFS on Module or in `FS.filesystems`,
+and 0020's keepalive popped after the callback. node-runner and persistent-probe take NODEFS from
+Module or `FS.filesystems` (`js/runtime-knobs.mjs`). exports-audit lists BARE reads of Module-only
+names (`runtime-contract.mjs` RUNTIME_METHODS, MODULE_ONLY_METHODS, EXPORT_GLOBALS) and marks the
+`PThread`, `TTY` and `FS` members a given glue never names; with the trial's glue it found no BARE
+read in QED64, lean4game, the showcase or the proof sheets. Provenance: stage-release refuses a
+runtime whose recipe's FROM is not its BASE_IMG and notes a native64 of another recipe; native64.sh
+and mathlib-tree.sh refuse a build dir of another recipe (one image per import). The full gate's
+resident cells run QED64's resident probe, which needs QED64's FS fallback (below): without it the
+probe reads `FS.filesystems.NODEFS` and dies in preRun on 7.0.0. Expected: S6 K6 5 items, the rest
+18 items, the PIN note "absent"; check-link 0 undefined symbols (DEFAULT_TO_CXX brings the C++
+runtime back); the 5b guard passes. Numbers: from the first gated build.
+
+**A loosening, decided here.** 0047's REQ item "exit entries at [0] and [1]", which only
+lean4game's pinned worker (QED64 73d7f3b) reads, cannot hold on 7.0.0's sorted table. It became a
+PIN item, on a note line of its own (`S6 what only lean4game's pinned worker (QED64 73d7f3b) reads
+besides: …`): "all 1 present" on 6.0.5's glue, "absent" on 7.0.0's, never a failure. So the gate no
+longer stops a 7.0.0 runtime from reaching that worker, whose exit hook silently fails to install
+there: lean4game's re-pin past QED64 58e1918, with the FS fallback QED64 evaluated as aafea5b
+(`Module.NODEFS ?? FS.filesystems.NODEFS`, and the same for WORKERFS), is a precondition of
+lean4game adopting this runtime. The three other items that worker reads stay REQ (`_pthread_self`
+is also read by QED64's thread-storm and liveness lanes); they hold on 7.0.0.
+
+**Measured on the evaluation build** (emsdk7-eval bd4560f0a3: v4.35.0's sources, 2026-11-17): built
+in about 15 minutes cold on 14 cores; gate-dir 90 ok and the full gate 114 ok, 0 FAIL (0bf1fb2: 90,
+114); `lean.wasm` −0.15% (106,075,689 B), `lean.js` −3.1% (118,823 B); the stdlib oleans (the
+lean-lib pack) byte-identical to 0bf1fb2's; allocator probes: 4.0 and 5.0 GiB blocks, a freed
+4.25 GiB region reused, compactor reserves of 4 and 5 GiB pass, 16 GiB fails cleanly, a failed
+`new` aborts. QED64 on it: adoption gate 133 ok, battery 62/62, integration as on 0bf1fb2, a clean
+10-minute storm, browser e2e 29/29, liveness 7/7, the legal ladder as on 0bf1fb2 (Fin 16/18 check,
+20/28 guard error: stack depth unchanged), Init-only memory at ready 881 against 871 MiB.
+
+**For consumers.** Re-pin before adopting: QED64 lands its FS fallback (evaluated as aafea5b) and
+its HARDENING #94 first; lean4game and the showcase through QED64 pin bumps (lean4game past QED64
+58e1918, above; the showcase also fixes its own headless `wasm-lsp.mjs` and sets
+`QED64_TOOLCHAIN_IMAGE`). Every app rebakes and re-runs its stack calibrations. A lean4-wasm64 gate
+from before this release fails a 7.0.0 runtime (S6, and its node-runner stops at
+`FS.filesystems`): gate it with this release's tools, which still pass the published 6.0.5
+runtimes.

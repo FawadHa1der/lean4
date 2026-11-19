@@ -82,8 +82,8 @@ The runtime's knobs (`runtime-knobs.mjs`; EMBED-RUNTIME.md §3.1, §3.6): `run`
 and `probe` copy `LEAN_WASM_PARKED_DEDICATED`, `LEAN_WASM_STACK_PROBE_SLOTS` and
 `LEAN_WASM_SYMTAB_TRACE` into the runtime's environment. (Kernel patch 0038's
 `LEAN4_WASM64_PTHREAD_POOL`, `LEAN_WASM_PARKED_IDLE_MS`, `LEAN_WASM_STD_SURPLUS_EXIT`
-and `run`'s `LEAN4_WASM64_RTSTATS` left with the runtime's side of them, the
-architecture review's D3b: nothing reads them.)
+and `run`'s `LEAN4_WASM64_RTSTATS` left with the runtime's side of them, kernel
+patch 0047 (the architecture review's D3b): nothing reads them.)
 `LEAN_WASM_SYMTAB_TRACE` (kernel patch 0039) prints the runtime's native-symbol
 lookups on stderr, as `[symtab] miss - <name>` and `[symtab] hit <kind> <name>`:
 `miss`, `hit` or `all`, each optionally `:<prefix>,<prefix>…`, clauses joined by

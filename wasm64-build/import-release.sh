@@ -203,7 +203,7 @@ cmd_build() {
   # a COPY of an older build's ccache is a fine seed; never share one live
   if [ ! -d "$bd/ccache" ] && [ -n "${QED64_CCACHE_SEED:-}" ] && [ -d "$QED64_CCACHE_SEED" ]; then cp -R "$QED64_CCACHE_SEED" "$bd/ccache"; fi
   local log="$bd/build-$(date +%Y%m%d-%H%M%S).log"
-  say "building into $bd (log: $log) — ~15 min cold on 14 cores"
+  say "building into $bd (log: $log) — ~15-30 min cold on 14 cores"
   rm -f "$bd/GATE-PASSED"
   if ! QED64_BUILD_DIR="$bd" bash "$REPO/wasm64-build/build.sh" >"$log" 2>&1; then
     grep -nE "error:|Error [0-9]|Killed|FAILED" "$log" | tail -20 || true

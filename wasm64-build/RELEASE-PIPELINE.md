@@ -11,7 +11,7 @@ owns the lanes inside its own repository. This file is the map and the order.
  [K1] import   merge the tag on import/vX.Y.Z            import-release.sh import   ── judgment: conflicts
  [K2] drift    review files both sides changed           import-release.sh drift    ── judgment: review
       delta    merge = the tag + the line's own edits?   import-release.sh delta    ── judgment: account for each
- [K3] build    wasm64 stage1 in Docker (own build dir)   import-release.sh build    1.5–3 h cold
+ [K3] build    wasm64 stage1 in Docker (own build dir)   import-release.sh build    ~15–30 min cold
  [K4] gate     numBits / proof / error / PARSE / resident import-release.sh gate     ~8 min
  [K5] native64 same commit, native linux, wasm64 target  native64.sh                ~1 h
  [K6] mathlib  Mathlib@vX.Y.Z with [K5], essential tree  mathlib-tree.sh            hours

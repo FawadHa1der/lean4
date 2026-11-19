@@ -365,10 +365,14 @@ and the tools. Build only to change the runtime itself.
   Node 24 or newer.
 - Network on the first run (the `emscripten/emsdk:7.0.0` image, system
   packages, libuv).
-- **Time:** about 15 minutes from cold on a 14-core Apple M-series machine (the
-  first emsdk 7.0.0 build, 2026-11-17, with the toolchain image, ccache and build
-  directory new; the emsdk image pulled before); less with a warm ccache. The
-  gate takes about 35 minutes.
+- **Time:** about 15 to 30 minutes from cold on a 14-core Apple M-series machine:
+  about 15 for the first emsdk 7.0.0 build (v4.35.0's sources, 2026-11-17, with
+  the toolchain image, ccache and build directory new; the emsdk image pulled
+  before), about 27 for the v4.36.0 import on emsdk 6.0.5 (2026-11-19, ccache
+  and build directory new: 22 for the libraries, in a run that stopped at
+  `Lean.Shell` before the link, and about 5 more for the export list, the link
+  and the funclet guard); less with a warm ccache. The gate takes about 35
+  minutes.
 
 **Build and gate**
 

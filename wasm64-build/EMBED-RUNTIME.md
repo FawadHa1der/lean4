@@ -15,7 +15,7 @@ Layers, so a host knows what it may rely on:
 
 - **[RT]** — this runtime's ABI, changed only with a `PATCHES.md` entry;
 - **[GLUE]** — Emscripten 7.0.0 glue internals some hosts reach into (6.0.5's in the runtimes released before the
-  emsdk 7 move): valid for this toolchain image (`release.json` `docker`), not a promise. Since emsdk 6.0.13 a
+  emsdk 7 move, 0048): valid for this toolchain image (`release.json` `docker`), not a promise. Since emsdk 6.0.13 a
   Terser pass compresses the -O3 glue, so a top-level name only a host reads keeps no global binding, and one
   the glue uses once may be folded into its use: reach what §1 lists through `Module`;
 - **[HOST]** — what QED64's worker does (policy, not requirement).
@@ -26,9 +26,9 @@ Layers, so a host knows what it may rely on:
 |---|---|
 | Target | `wasm64-unknown-emscripten`: Memory64, shared memory, pthreads, `-sPROXY_TO_PTHREAD=1` (`main` runs on a pthread) |
 | Memory import | `WebAssembly.Memory({shared: true, address: "i64", initial: ≥ 2048n, maximum: ≤ 262144n})` pages (128 MiB … 16 GiB), passed as `Module.wasmMemory`; the glue puts it in the import object itself (its module and field names are minified since 0039, `env.memory` before). Without a host `wasmMemory` the glue creates `{initial: INITIAL_MEMORY ‖ 128 MiB, maximum: 262144n}`. The runtime manifest records these values (`memory`). |
-| Threads | a pool of 24 pthread Workers created at load (0019; from 0038 until the architecture review's D3b a host could size it), growing on demand; 16 MiB main/application stack, 8 MiB per pthread (§3.6) |
+| Threads | a pool of 24 pthread Workers created at load (0019; from 0038 until 0047, the architecture review's D3b, a host could size it), growing on demand; 16 MiB main/application stack, 8 MiB per pthread (§3.6) |
 | Exit | `-sEXIT_RUNTIME=1` with the keepalive patch 0020 in the build image (§5) |
-| Filesystems | MEMFS (root), NODEFS, WORKERFS. Hosts mount the last two as `Module.NODEFS` and `Module.WORKERFS` (exported since the emsdk 7 move). Emsdk 6.0.13 removed `FS.filesystems` (emscripten#27940), which the 6.0.5 runtimes still have: a host that serves both reads `Module.X ?? FS.filesystems.X` |
+| Filesystems | MEMFS (root), NODEFS, WORKERFS. Hosts mount the last two as `Module.NODEFS` and `Module.WORKERFS` (exported since the emsdk 7 move, 0048). Emsdk 6.0.13 removed `FS.filesystems` (emscripten#27940), which the 6.0.5 runtimes still have: a host that serves both reads `Module.X ?? FS.filesystems.X` |
 | Runtime methods | `callMain, FS, ENV, ccall, getValue, setValue, UTF8ToString, stringToNewUTF8, NODEFS, WORKERFS`, read on `Module`: since the emsdk 7 move `getValue`, `setValue`, `ccall` and `stringToNewUTF8` have no global binding (the Terser pass inlines each into its `Module` assignment) |
 | Exports | The JavaScript contract (0039): `src/emscripten-exports.seed.txt`, the entry points of §2 plus the Emscripten built-ins hosts reach (§5), and since 0041 two runtime functions no host calls, `_lean_apply_16` and `_lean_apply_m`, exported only so that Binaryen keeps them out of `lean_apply_n` (engine stack per monadic level; PATCHES.md 0041). Reach every export through `Module` (`M._x`): since the emsdk 7 move only `_malloc`, `_pthread_self`, `__emscripten_proxy_main` and `__emscripten_check_mailbox`, which the glue reads itself, keep a global binding; `_free`, `_main` and every `_lean_*` are on `Module` alone (`js/exports-audit.mjs` lists a consumer's bare reads). Lean's own native code is not exported: the IR interpreter finds boxed wrappers, all-object functions without one (since 0039b), `@[export]` functions, constant cells and module initializers in a table linked into the module (`gen-exports.py --symtab`, `library/wasm_symtab.cpp`; until 0039 the others were ~106k exports, and the functions without a wrapper ran interpreted). Interpreted code thus calls every function of Init/Std/Lean natively; package code, and what the C keeps file-local (closed terms), runs through its `.ir` (interpreted). |
 | Linking | Static since 0039 (no `MAIN_MODULE`: no `dylink.0` section, no GOT, no side modules — `Dynlib.load` fails with an IO error). At -O3 the raw wasm import and export names are minified (`a`, `b`, …): reach an export through the glue's `Module["_x"]`, never `wasmExports["x"]`. `bin/lean.js.symbols` in the build tree maps every function index to its name (crash triage; not released). |
@@ -63,7 +63,7 @@ may import any memory whose maximum is ≤ that.
 | `_lean_enable_initializer_execution` | `()` | `BaseIO Unit` (ignore) | upstream |
 | `_lean_init_search_path` | `()` | `IO Unit` — check the tag | upstream |
 | `_lean_mk_string(cstr)` | `(i64)` | a Lean `String` (owned) | upstream |
-| `_lean_wasm_load_snapshot_mem(ptr, size, flags)` | `(i64, i64, i64)` | `IO UInt32`: 0 loaded, 1 failed (diagnostic on stderr); `flags` is ignored since R11a, pass `1n` | 0013/0014/0016 |
+| `_lean_wasm_load_snapshot_mem(ptr, size, flags)` | `(i64, i64, i64)` | `IO UInt32`: 0 loaded, 1 failed (diagnostic on stderr); `flags` is ignored since 0045 (R11a), pass `1n` | 0013/0014/0016 |
 | `_lean_wasm_load_snapshot(path)` | `(i64 String)` | `IO UInt32` — a VFS path; Node tools only | 0013 |
 | `_lean_wasm_compile(code, fileName)` | `(i64 String, i64 String)` | `IO UInt32`: 0 no errors, 1 errors (not a count); messages as JSON lines on stdout, every message of the file once, in the native frontend's order — including those of tasks a command started (`Elab.async` proofs, kernel checks, linters); it returns after every task still recorded for a command has finished (one that elaboration discarded, e.g. by backtracking, may still be running), so call it only on a thread that can block (Node's main thread, a DedicatedWorker), never from a proxied or mailbox callback | 0010/0032/0034/0037 |
 | `_lean_wasm_shell_mark_preinitialized()` | `()` | — | 0031 |
@@ -78,7 +78,7 @@ while Lean threads hold the task manager's lock (which that thread must never wa
 0039 table's gauges: the table is immutable link-time data, and a lookup takes no lock and calls no
 JavaScript. (0038 added three more counters, `_lean_wasm_task_manager_stat`,
 `_lean_wasm_engine_probes` and `_lean_wasm_engine_guard_trips`; no host called them, and they left
-with the architecture review's D3b. A runtime from 0038 up to the one before D3b still exports them.)
+with 0047, the architecture review's D3b. A runtime from 0038 to 0046 still exports them.)
 
 Since 0039 the module also binds on `Module` the three Emscripten built-ins hosts reach
 ([GLUE], §5): `__emscripten_proxy_main` (what `callMain` runs), `__emscripten_check_mailbox` and
@@ -88,11 +88,11 @@ emsdk 7 glue they and `_malloc` are the only exports that do).
 `_mem` loads: `ptr` is a `_malloc`ed buffer holding a whole `.snap` file of
 `size` bytes; on success it becomes the loaded region's memory (never free or
 reuse it). Every load replays the `[init]` attributes of the snapshot's
-modules. `flags` is ignored since the architecture review's R11a, which removed
-0016's switch; pass `1n`, which a runtime before R11a needs (its bit 0 ran that
-replay, which compiles need). The signature keeps its three arguments. QED64's
-`snapshot-probe --init-flags <n>` passes `n` as `flags`, so that flag does
-nothing since R11a. A snapshot is a memory image of one binary: its index
+modules. `flags` is ignored since 0045, the architecture review's R11a, which
+removed 0016's switch; pass `1n`, which a runtime before 0045 needs (its bit 0
+ran that replay, which compiles need). The signature keeps its three arguments.
+QED64's `snapshot-probe --init-flags <n>` passes `n` as `flags`, so that flag
+does nothing since 0045. A snapshot is a memory image of one binary: its index
 entry's `runtime` must equal this build id, and the runtime itself checks only
 the olean header (`"olean"`, version 2/3, flags 0). Each load publishes its
 environment to the covering-environment registry the language server's header
@@ -121,8 +121,8 @@ shims — see `js/node-runner.mjs`). Keys the glue reads:
 | `onAbort(what)` | the runtime is dead |
 | `onExit(code)` | fires **only when no keepalive is held** (§5) |
 
-The glue no longer reads `pthreadPoolSize`: from 0038 until the architecture review's D3b it sized
-the pool (§3.6), and no host set it.
+The glue no longer reads `pthreadPoolSize`: from 0038 until 0047, the architecture review's D3b, it
+sized the pool (§3.6), and no host set it.
 
 **`ENV` is not an input.** The glue replaces `Module.ENV` with its own object at
 load; an `ENV` passed in the `Module` literal is discarded. Set variables by
@@ -137,14 +137,14 @@ mutating `Module.ENV` in `preRun`. Two readers see them:
 |---|---|---|
 | `LEAN_PATH` | Lean | `:`-separated library dirs, prepended to the built-in `/lib/lean` (§3.3) |
 | `LEAN_WASM_PARKED_DEDICATED` | C, at task-manager creation | idle dedicated task threads kept for reuse; clamped to 64; **default 0** — parked pthreads outlive a page reload by the browser's ~2 s termination grace, and overlapping the next boot they exhausted V8's pointer-compression cage (0035b) |
-| `LEAN_COMPACTOR_RESERVE` | C | bytes reserved up front when saving a snapshot (`--incr-header-save`); a doubling buffer needs old + new at once (bakes use 3.5 GiB). A runtime linked with emsdk 6.0.5's allocator takes less than 4 GiB (4 GiB itself fails: PATCHES.md 0043); since the emsdk 7 move, what the 16 GiB address space holds beside the environment |
+| `LEAN_COMPACTOR_RESERVE` | C | bytes reserved up front when saving a snapshot (`--incr-header-save`); a doubling buffer needs old + new at once (bakes use 3.5 GiB). A runtime linked with emsdk 6.0.5's allocator takes less than 4 GiB (4 GiB itself fails: PATCHES.md 0043); since the emsdk 7 move (0048), what the 16 GiB address space holds beside the environment |
 | `LEAN_WASM_STACK_PROBE_SLOTS` | C, once | headroom (in 8-byte argument slots, default 16384 = 128 KiB) the engine-stack probe demands (§6); 0 disables it — for calibration only (0036) |
 | `LEAN_WASM_SYMTAB_TRACE` | C, at the first native-symbol lookup | diagnosis only (0039): print the IR interpreter's lookups in the native-symbol table on stderr, `[symtab] miss - <name>` and `[symtab] hit <kind> <name>`. `miss`, `hit` or `all`, each optionally `:<prefix>,<prefix>…` (only names with one of these prefixes), clauses joined by `;`: `miss:;hit:l_Lean_versionString`. Unset or empty: off; anything else: off, with one warning. A miss is normal: every lookup of a function without a boxed wrapper first misses the wrapper, and package code (`lp_…`) is never native |
 | `LEAN_NAT_MAX_SIZE`, `LEAN_STACK_SIZE_KB` | C | upstream semantics (the latter on the `main` path only) |
 | `LEAN_IMPORT_WORKERS` | Lean | parallel region reads of a snapshot with dependency files; not on the in-memory path |
 | `LEAN_NUM_THREADS`, `LEAN_MAIN_USE_THREAD`, `LEAN_ABORT_ON_PANIC`, `LEAN_BACKTRACE*` | C | **inert on Emscripten** — not knobs |
-| `QED64_ALLOW_LEGACY_IMPORTS` | none since R11a | **no effect**: legacy (non-`module`) imports are always tolerated on wasm targets, and native64 keeps stock's guard (before R11a only native64 read it). QED64's `bake-snapshot --allow-legacy-imports`, which sets it, does nothing either |
-| `LEAN_WASM_STD_SURPLUS_EXIT`, `LEAN_WASM_PARKED_IDLE_MS` | none since D3b | **no effect**: 0038's opt-in exits of surplus standard workers and of idle parked threads, which no host turned on, left with the architecture review's D3b (§3.6) |
+| `QED64_ALLOW_LEGACY_IMPORTS` | none since 0045 (R11a) | **no effect**: legacy (non-`module`) imports are always tolerated on wasm targets, and native64 keeps stock's guard (before 0045 only native64 acted on it). QED64's `bake-snapshot --allow-legacy-imports`, which sets it, does nothing either |
+| `LEAN_WASM_STD_SURPLUS_EXIT`, `LEAN_WASM_PARKED_IDLE_MS` | none since 0047 (D3b) | **no effect**: 0038's opt-in exits of surplus standard workers and of idle parked threads, which no host turned on, left with 0047, the architecture review's D3b (§3.6) |
 
 `LEAN_WASM_PARKED_DEDICATED` takes decimal digits only (since 0038): anything else (`-1`, `1e3`,
 ` 1`, `true`) is off, with one line on stderr, as unset or empty is.
@@ -206,9 +206,10 @@ mutating `Module.ENV` in `preRun`. Two readers see them:
    document per session. Requests are answered on stdout.
 6. Header resolution: the exact import set, else the smallest covering
    registered environment, else refused with one error on the header,
-   `modules #[…] are not loaded in this session` (consumers match that
-   phrase); each resolution sends `$/qed64/headerStatus {version, mode:
-   "exact" | "covered" | "refused", key, moduleCount, missing, ms}`, where
+   `modules #[…] are not loaded in this session` (consumers match its
+   substring "are not loaded in this session", not the whole text); each
+   resolution sends `$/qed64/headerStatus {version, mode: "exact" |
+   "covered" | "refused", key, moduleCount, missing, ms}`, where
    `version` is that of the document whose header setup it reports. A header
    change re-runs setup in place; a body edit reuses the setup and sends no
    status.
@@ -269,7 +270,7 @@ renderer's one pointer-compression cage (§6).
   `LEAN_WASM_STACK_PROBE_SLOTS` and (0039) `LEAN_WASM_SYMTAB_TRACE` into `Module.ENV`
   (`js/runtime-knobs.mjs`); with `QED64_COUNT_PTHREADS=1`, node-runner answers a printed line
   containing `[pthreads?]` with `[pthreads] created=<n>`.
-- **Gone since D3b** (the architecture review's; no host used them): 0038's host-sized pool
+- **Gone since 0047** (the architecture review's D3b; no host used them): 0038's host-sized pool
   (`Module.pthreadPoolSize`, node-runner's `LEAN4_WASM64_PTHREAD_POOL`), its opt-in exits of
   surplus standard workers (`LEAN_WASM_STD_SURPLUS_EXIT`) and of idle parked threads
   (`LEAN_WASM_PARKED_IDLE_MS`), and its counters (`_lean_wasm_task_manager_stat`,
@@ -333,9 +334,9 @@ its Worker).
   can swallow a later wakeup (emscripten#27492). Emsdk 7's glue clears it when
   the thread's Worker returns to the pool (#27501, 6.0.7), but that clear is
   skipped while the runtime thread's `waitAsyncPolyfilled` is true, as in
-  QED64's message mode. So QED64 now also sets the flag in every pthread realm,
-  in its pthread prelude right after the glue loads (QED64 f4cd57f, HARDENING
-  #94): no pthread arms a native waiter. S6's check (the flag present and
+  QED64's message mode. So QED64 sets the flag in every pthread realm too,
+  from its HARDENING #94 on (in its pthread prelude, right after the glue
+  loads): no pthread arms a native waiter. S6's check (the flag present and
   mutable) covers both uses.
 - **Growable array buffers** [GLUE]: every emsdk 7 link suggests
   `-sGROWABLE_ARRAYBUFFERS=2` (`-Wpthreads-mem-growth`). The build does not
@@ -388,7 +389,7 @@ told. Lean prints the first four with `IO.eprintln` (stderr; in a browser, `Modu
 |---|---|---|---|
 | `[DEBUG:PROGRESS] Loading <n> modules...` | `src/Lean/Environment.lean`, `finalizeImport`: `s!"[DEBUG:PROGRESS] Loading {modules.size} modules..."` (the base's line, on stderr since 0031) | once per olean import | the showcase's `scripts/judge-bake.mjs` J2 (`Loading (\d+) modules`: exactly one, `n` the staged tree's module count) |
 | `[DEBUG:PROGRESS] <i>/<n>: <module>` | the same: `s!"[DEBUG:PROGRESS] {i + 1}/{modules.size}: {mod.module}"` | modules 1, 51, 101, … and the last | QED64's worker (`public/workers/lean.worker.js`, `/\[DEBUG:PROGRESS\]\s*(\d+)\/(\d+)/`: import progress); `judge-bake.mjs` J2 (an `n/n:` line) |
-| `[WASM INIT] <i>/<n> <module>` | `src/Lean/Shell.lean`, `wasmLoadSnapshotMem` (`lean_wasm_load_snapshot_mem`, 0014): `s!"[WASM INIT] {i}/{total} {env.header.modules[modIdx].module}"` | per module of the `[init]` replay (every load since R11a; with `flags` bit 0 before), during that blocking call | QED64's worker (`/^\[WASM INIT\] (\d+)\/(\d+) (.*)$/`: live progress of a snapshot load) |
+| `[WASM INIT] <i>/<n> <module>` | `src/Lean/Shell.lean`, `wasmLoadSnapshotMem` (`lean_wasm_load_snapshot_mem`, 0014): `s!"[WASM INIT] {i}/{total} {env.header.modules[modIdx].module}"` | per module of the `[init]` replay (every load since 0045, R11a; with `flags` bit 0 before), during that blocking call | QED64's worker (`/^\[WASM INIT\] (\d+)\/(\d+) (.*)$/`: live progress of a snapshot load) |
 | `[WASM DEBUG] wasmLoadSnapshotMem: cached env for #[<imports>]`, and `[WASM DEBUG] wasmLoadSnapshot: cached env for #[<imports>]` | `src/Lean/Shell.lean`: `s!"[WASM DEBUG] wasmLoadSnapshotMem: cached env for {key}"` (0013) and `s!"[WASM DEBUG] wasmLoadSnapshot: cached env for {key}"` (the base) | at the end of each successful snapshot load | the showcase's `scripts/headless/exact-header.mjs` (`/cached env for #\[([^\]]*)\]/` on the log of QED64's `snapshot-probe.mjs`, which echoes `[WASM DEBUG]` lines: the key the snapshot seeded) and `scripts/headless/wasm-lsp.mjs` |
 | `object compactor: out of memory growing the region buffer to …`, inside the save's IO error `failed to write '<file>': …` | `src/runtime/compact.cpp`, `object_compactor::alloc` (0011): `"object compactor: out of memory growing the region buffer to " << … << " MB (" << … << " MB used); " << "set LEAN_COMPACTOR_RESERVE to reserve the buffer up front"`; the IO error is `lean_compacted_region_save`'s (`src/library/module.cpp`) | when a snapshot save outgrows its region buffer | the showcase's `scripts/bake.sh` (on that substring it rebakes once with 512 MiB more `--reserve`) and `judge-bake.mjs` J1 (any `object compactor:` line fails a bake) |
 
@@ -396,8 +397,8 @@ QED64 freezes the same lines except `[WASM INIT]`, which its worker parses too (
 "Toolchain lines consumers parse"). The
 `[WASM DEBUG]` prefix does not make the cached-env line removable. Every other `[WASM DEBUG]`,
 `[WASM PROFILE]` and `[WASM LSP]` line is a diagnostic: consumers only filter or log them (the gate
-strips them, with these, before it judges Lean's output), and they may change or go. Since R11a the
-only other `[WASM DEBUG]` lines are those of a failed snapshot load,
+strips them, with these, before it judges Lean's output), and they may change or go. Since 0045
+(R11a) the only other `[WASM DEBUG]` lines are those of a failed snapshot load,
 `[WASM DEBUG] wasmLoadSnapshot failed: <error>` and `[WASM DEBUG] wasmLoadSnapshotMem failed: <error>`:
 the one place the error's text appears (QED64's `snapshot-probe.mjs` prints a failed load's last lines).
 
@@ -417,7 +418,7 @@ proofs, from V8's generic wrapper on the C++-exception trampolines; 0040's nativ
 no trampolines. PATCHES.md 0039, 0040.) Recursion that passes no checkpoint (the IR interpreter, some
 expression traversals) can still overflow, as native Lean can abort there. Headless, the
 node-runner knob `LEAN4_WASM64_PTHREAD_STACK_MB=0.68` gives the pthreads Chrome's budget. (From
-0038 until the architecture review's D3b the guard also counted its questions and refusals for
+0038 until 0047, the architecture review's D3b, the guard also counted its questions and refusals for
 hosts, `_lean_wasm_engine_probes()` and `_lean_wasm_engine_guard_trips(site)`; no host read them.
 The guard itself is 0036's, unchanged by either.)
 
@@ -455,9 +456,10 @@ before (PATCHES.md 0040):
 A toolchain-only embedder inherits two QED64-flavoured details: an
 environment importing `QED64.Essential` covers `Mathlib`, `Mathlib.Tactic`,
 `Batteries` and `MIL.Common`; and the `$/qed64/headerStatus` notification name.
-(Two others are gone: the `QED64_ALLOW_LEGACY_IMPORTS` variable has no reader since R11a, and
-since K3 the refused-header diagnostic no longer names QED64's "Load exact imports" action, which
-QED64 retired with its library packs, D1.)
+(Two others are gone: the `QED64_ALLOW_LEGACY_IMPORTS` variable has no reader since 0045
+(architecture review R11a), and since 0046 (architecture review K3) the refused-header diagnostic
+no longer names QED64's "Load exact imports" action, which QED64 retired with its library packs,
+D1.)
 
 **Frozen since 2026-11-01** (architecture review K3). The umbrella's name and its four aliases
 (`src/Lean/Language/Lean.lean`, `lookupPrebuiltEnv`: an environment whose closure holds
@@ -466,13 +468,13 @@ with a `PATCHES.md` entry. Two changes are parked until an embedder other than Q
 a new alias is requested: taking the alias list as data, and renaming `$/qed64/headerStatus` (its
 readers bind to the method name, so a rename needs a window that serves both names).
 
-**Since K3** (no protocol bump: the same method and fields). The refused-header text is generic,
-`modules #[…] are not loaded in this session`: it lost its ending `— use "Load exact imports"`
-and keeps the phrase that consumers match (QED64's e2e; the showcase's C7,
-`tests/ux/specs/30-robustness.spec.mjs`). `headerStatus.version` is the version of the document
-whose header setup the notification reports (§3.4). Before, every setup carried the document's
-first version, because the FileWorker bound `setupImports` to the `DocumentMeta` it started with;
-nothing keyed on it.
+**Since 0046** (architecture review K3; no protocol bump: the same method and fields). The
+refused-header text is generic, `modules #[…] are not loaded in this session`: it lost its ending
+`— use "Load exact imports"` and keeps the substring consumers match, "are not loaded in this
+session" (QED64's e2e; the showcase's C7, `tests/ux/specs/30-robustness.spec.mjs`).
+`headerStatus.version` is the version of the document whose header setup the notification reports
+(§3.4). Before, every setup carried the document's first version, because the FileWorker bound
+`setupImports` to the `DocumentMeta` it started with; nothing keyed on it.
 
 ## Compatibility
 

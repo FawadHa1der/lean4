@@ -1,7 +1,10 @@
 #!/bin/bash
 # Clean-room wasm64 (Memory64) toolchain build for this branch.
-# Expected wall-clock on a 14-core M-series: ~15 min cold (the first emsdk 7.0.0
-# build, 2026-11-17, with the toolchain image, ccache and build dir new), less warm.
+# Expected wall-clock on a 14-core M-series: ~15-30 min cold (the first emsdk 7.0.0
+# build, 2026-11-17, with the toolchain image, ccache and build dir new: ~15 min; the
+# v4.36.0 import on emsdk 6.0.5, 2026-11-19: ~22 min for the libraries, in a run that
+# stopped before the link, and ~5 min more for steps 4b-5b, the export list, the link
+# and the funclet guard), less warm.
 # Build tree and ccache live OUTSIDE the repo (BUILD_DIR, default sibling
 # <repo>-build) so the checkout stays clean.
 set -euo pipefail
