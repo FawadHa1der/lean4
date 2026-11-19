@@ -129,15 +129,10 @@ cmd_import() {
   git switch -c "$br" "$LINE"
   say "merging $tag ($(git rev-list --count "$LINE..$tag") upstream commits) into $br"
   if git merge --no-ff --no-commit "$tag" >/dev/null 2>&1; then :; fi
-  # stage0/ is upstream's bootstrap compiler: never merge it, take theirs and
-  # re-apply the line's two pointer-width gates (stage0-line-edits.patch).
-  local s0; s0="$(git diff --name-only --diff-filter=U -- stage0 || true)"
-  if [ -n "$s0" ]; then
-    echo "$s0" | xargs git checkout --theirs --
-    git apply --3way "$REPO/wasm64-build/stage0-line-edits.patch" 2>/dev/null \
-      || say "note: stage0-line-edits.patch no longer applies — check whether upstream absorbed the gates, then refresh it"
-    echo "$s0" | xargs git add --
-  fi
+  # stage0/ is upstream's bootstrap compiler, built natively (64-bit): never
+  # merge it, take the tag's tree whole (files it dropped go too). The line
+  # keeps no edits there (v4.36.0's build confirmed upstream's stage0 builds it).
+  git restore --source="$tag" --staged --worktree -- stage0
   local unmerged; unmerged="$(git diff --name-only --diff-filter=U)"
   if [ -n "$unmerged" ]; then
     say "CONFLICTS — resolve, 'git add', 'git commit', then: $0 build $tag"

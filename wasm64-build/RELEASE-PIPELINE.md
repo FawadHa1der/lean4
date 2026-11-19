@@ -40,13 +40,11 @@ Only stable tags are imported: Mathlib and Batteries tag each stable Lean
 release, and the apps need all three at the same version.
 
 `stage0/` is upstream's bootstrap compiler and is never merged: the import
-takes upstream's files and re-applies `stage0-line-edits.patch` (two
-pointer-width gates for a 32-bit native stage0). They are not needed: this
-line's stage0 is native 64-bit, and each gate changes only a native 32-bit
-build (its Emscripten and 64-bit branches are stock's). The next import drops
-the patch and this step once one build confirms it. Until then, if the patch
-stops applying, check whether upstream absorbed the gates, then refresh it with
-`git diff --text vX.Y.Z HEAD -- stage0 > wasm64-build/stage0-line-edits.patch`.
+takes the tag's `stage0/` whole, files it dropped included. The line keeps no
+edits there. Its stage0 is built natively (64-bit), and v4.36.0's build
+confirmed that upstream's stage0 builds the line as it is. The two
+pointer-width gates the line used to re-apply (`stage0-line-edits.patch`)
+changed only a native 32-bit build.
 
 ## Judgment points (where automation stops)
 
