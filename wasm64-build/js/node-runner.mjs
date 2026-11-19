@@ -29,7 +29,7 @@ import path from "node:path";
 import vm from "node:vm";
 import { createRequire } from "node:module";
 import { applyCliContract, ensureStackSize } from "./cli-args.mjs";
-import { forwardWasmEnv, poolModuleKeys, runtimeStats } from "./runtime-knobs.mjs";
+import { forwardWasmEnv } from "./runtime-knobs.mjs";
 
 // First, before the contract prints anything: replaces this process (same PID) when
 // started without --stack-size, so every line below is printed once.
@@ -76,14 +76,10 @@ const cli = applyCliContract({
     "",
     "env: LEAN4_WASM64_PTHREAD_STACK_MB=<n> gives the runtime's pthread Workers an n-MiB stack (default 4);",
     "     0.68 reproduces a Chrome Worker's 500 KiB (deep recursion tests)",
-    "     LEAN4_WASM64_PTHREAD_POOL=<n> is Module.pthreadPoolSize: the pthread Workers created at load (0..64, default 24;",
-    "     kernel patch 0038 on, earlier runtimes ignore it)",
-    "     LEAN_WASM_PARKED_DEDICATED, LEAN_WASM_PARKED_IDLE_MS, LEAN_WASM_STD_SURPLUS_EXIT, LEAN_WASM_STACK_PROBE_SLOTS and",
-    "     LEAN_WASM_SYMTAB_TRACE are copied into the runtime's environment (EMBED-RUNTIME.md §3.1); LEAN_WASM_SYMTAB_TRACE",
-    "     (kernel patch 0039) prints native-symbol lookups on stderr: miss|hit|all[:prefix,…], clauses joined by ';'",
-    "     LEAN4_WASM64_RTSTATS=1 answers every printed line containing [rtstats?] with a line [rtstats] <json>: the pool,",
-    "     task-manager and engine-guard counters (runtime-knobs.mjs runtimeStats); QED64_COUNT_PTHREADS=1 answers",
-    "     [pthreads?] with [pthreads] created=<n>",
+    "     LEAN_WASM_PARKED_DEDICATED, LEAN_WASM_STACK_PROBE_SLOTS and LEAN_WASM_SYMTAB_TRACE are copied into the",
+    "     runtime's environment (EMBED-RUNTIME.md §3.1); LEAN_WASM_SYMTAB_TRACE (kernel patch 0039) prints",
+    "     native-symbol lookups on stderr: miss|hit|all[:prefix,…], clauses joined by ';'",
+    "     QED64_COUNT_PTHREADS=1 answers every printed line containing [pthreads?] with a line [pthreads] created=<n>",
     "     LEAN4_WASM64_CWD=work makes the work dir Lean's cwd (the pre-r2 layout: relative paths land in --work;",
     "     bakes then differ from QED64's runner in the main module name)",
     "",
@@ -207,22 +203,14 @@ process.argv[1] = "/bin/lean";
 // report the count at a point of its choosing (the CLI never exits).
 const countPthreads = !!process.env.QED64_COUNT_PTHREADS;
 let pthreadsCreated = 0;
-// Opt-in (LEAN4_WASM64_RTSTATS=1), the same way: a printed line containing `[rtstats?]` is
-// answered with `[rtstats] <json>`, the runtime's thread and engine-guard counters
-// (runtime-knobs.mjs). A Lean thread's print is a synchronous proxied call to this thread,
-// so the answer follows the line at once; the exports it reads are lock-free.
-const rtStats = !!process.env.LEAN4_WASM64_RTSTATS;
 
 globalThis.Module = {
-  ...(countPthreads || rtStats ? {
+  ...(countPthreads ? {
     print: (line) => {
       console.log(line);
-      if (countPthreads && line.includes("[pthreads?]")) console.log(`[pthreads] created=${pthreadsCreated}`);
-      if (rtStats && line.includes("[rtstats?]")) console.log(`[rtstats] ${JSON.stringify(runtimeStats(globalThis.Module))}`);
+      if (line.includes("[pthreads?]")) console.log(`[pthreads] created=${pthreadsCreated}`);
     },
   } : {}),
-  // LEAN4_WASM64_PTHREAD_POOL (patch 0038): the pool of pthread Workers created at load
-  ...poolModuleKeys(),
   arguments: args.leanArgs,
   locateFile: (file) => path.join(path.dirname(leanJs), file),
   mainScriptUrlOrBlob: leanJs,
@@ -295,9 +283,8 @@ globalThis.Module = {
         globalThis.Module.ENV.QED64_PROFILE_INIT = process.env.QED64_PROFILE_INIT;
       }
       // The runtime's own knobs (runtime-knobs.mjs): dedicated-thread parking (0035, off by
-      // default, qed64 L9; the gate opts in to exercise it), a parked thread's idle exit and the
-      // exit of surplus standard workers (0038, off by default), the engine-stack probe's
-      // headroom (0036, for calibration; 0 disables it) and the native-symbol trace (0039).
+      // default, qed64 L9; the gate opts in to exercise it), the engine-stack probe's headroom
+      // (0036, for calibration; 0 disables it) and the native-symbol trace (0039).
       forwardWasmEnv(globalThis.Module.ENV);
     },
   ],

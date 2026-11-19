@@ -1030,23 +1030,22 @@ if(CMAKE_SYSTEM_NAME MATCHES "Emscripten")
     APPEND LEAN_EXE_LINKER_FLAGS
     " ${LIB}/temp/libleanshell.a ${TOOLCHAIN_STATIC_LINKER_FLAGS} ${EMSCRIPTEN_SETTINGS} ${EMSCRIPTEN_LINK_SETTINGS} -lnodefs.js -lworkerfs.js -s EXIT_RUNTIME=1 -s ERROR_ON_UNDEFINED_SYMBOLS=0 -sALLOW_TABLE_GROWTH=1 --emit-symbol-map -sEXPORTED_FUNCTIONS=@${LEAN_SOURCE_DIR}/emscripten-exports.txt -sEXPORTED_RUNTIME_METHODS=ccall,callMain,FS,ENV,getValue,setValue,stringToNewUTF8,UTF8ToString -s STACK_SIZE=16777216 -sINITIAL_MEMORY=${EMSCRIPTEN_INITIAL_MEMORY} -sMAXIMUM_MEMORY=${EMSCRIPTEN_MAXIMUM_MEMORY} -sDEFAULT_PTHREAD_STACK_SIZE=8388608 -sPROXY_TO_PTHREAD=1"
   )
-  # The pthread pool: Workers created (and loaded) at start-up, so a thread can
-  # start without the main JS thread waiting for a new Worker to boot. Its size
-  # is the host's since patch 0038: PTHREAD_POOL_SIZE is a JS expression emitted
-  # verbatim into the glue, here a variable of emscripten-pthread-pool.js (a JS
-  # library): `Module.pthreadPoolSize`, an integer clamped to 0..64, else 24 as
-  # since patch 0019 (every language-server task is `.dedicated`, a thread each).
-  # Threads beyond the pool get a Worker of their own (PROXY_TO_PTHREAD forces
-  # PTHREAD_POOL_SIZE_STRICT=0).
+  # The pthread pool: 24 Workers created (and loaded) at start-up, so a thread can
+  # start without the main JS thread waiting for a new Worker to boot (patch 0019:
+  # every language-server task is `.dedicated`, a thread each). Threads beyond the
+  # pool get a Worker of their own (PROXY_TO_PTHREAD forces PTHREAD_POOL_SIZE_STRICT=0).
+  # Hosts count on the 24: QED64's edit hold waits for 6 of them to be free. From
+  # patch 0038 until the architecture review's D3b the size was the host's
+  # (`Module.pthreadPoolSize`, through a JS library of this link); no host set it.
   string(
     APPEND LEAN_EXE_LINKER_FLAGS
-    " -sPTHREAD_POOL_SIZE=leanPthreadPoolTarget --js-library=${LEAN_SOURCE_DIR}/emscripten-pthread-pool.js"
+    " -sPTHREAD_POOL_SIZE=24"
   )
   # Inputs of the `lean` link that are not libraries: a change to one relinks it
   # (stdlib.make.in). gen-exports.py rewrites the export list only when it changes,
   # so the dependency is a true one; the link itself still runs on every build, as
   # the dummy shared-library targets below touch their outputs each time.
-  set(LEAN_EXE_LINK_DEPS "${LEAN_SOURCE_DIR}/emscripten-pthread-pool.js ${LEAN_SOURCE_DIR}/emscripten-exports.txt")
+  set(LEAN_EXE_LINK_DEPS "${LEAN_SOURCE_DIR}/emscripten-exports.txt")
   # The native-symbol table (patch 0039; gen-exports.py writes it only when it
   # changes): an input and a prerequisite of the `lean` rule alone, never part of
   # LEAN_EXE_LINKER_FLAGS, which leanc/leanir/lake/leanchecker share. Another wasm

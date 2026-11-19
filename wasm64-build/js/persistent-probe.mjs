@@ -15,7 +15,7 @@ import path from "node:path";
 import vm from "node:vm";
 import { createRequire } from "node:module";
 import { applyCliContract, ensureStackSize } from "./cli-args.mjs";
-import { forwardWasmEnv, poolModuleKeys, symtabStats } from "./runtime-knobs.mjs";
+import { forwardWasmEnv, symtabStats } from "./runtime-knobs.mjs";
 
 // First, before the contract prints anything: replaces this process (same PID) when
 // started without --stack-size, so every line below is printed once.
@@ -51,9 +51,8 @@ const cli = applyCliContract({
     "  --passes <n>      passes over --cases (default 2)",
     "  -h, --help        print this help and exit 0, before any side effect",
     "",
-    "env: LEAN4_WASM64_PTHREAD_POOL=<n> is Module.pthreadPoolSize, the pthread Workers created at load (0..64, default 24;",
-    "     kernel patch 0038); LEAN_WASM_PARKED_DEDICATED, LEAN_WASM_PARKED_IDLE_MS, LEAN_WASM_STD_SURPLUS_EXIT,",
-    "     LEAN_WASM_STACK_PROBE_SLOTS and LEAN_WASM_SYMTAB_TRACE are copied into the runtime's environment (EMBED-RUNTIME.md §3.1)",
+    "env: LEAN_WASM_PARKED_DEDICATED, LEAN_WASM_STACK_PROBE_SLOTS and LEAN_WASM_SYMTAB_TRACE are copied into the",
+    "     runtime's environment (EMBED-RUNTIME.md §3.1)",
     "",
     "output: the default run prints `SYMTAB {json}` before PASS on a runtime with the native-symbol table (kernel",
     "     patch 0039): a fresh self-check (status 0 = intact), the entries by kind, the FNV, the lookups made",
@@ -139,7 +138,6 @@ process.argv[1] = "/bin/lean";
 
 globalThis.Module = {
   noInitialRun: true,
-  ...poolModuleKeys(),
   locateFile: (f) => path.join(path.dirname(leanJs), f),
   mainScriptUrlOrBlob: leanJs,
   print: capture("stdout"),

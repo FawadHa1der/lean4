@@ -1,9 +1,8 @@
 # The lean4-wasm64 package (wasm64-build/js): unit tests and package contents.
-# Branch-scoped to the wasm64 line and to wasm64-build/ changes (and the runtime's
-# pool-size JS library, which the unit tests evaluate, the link wiring in
-# src/CMakeLists.txt and src/stdlib.make.in, which they check, and the JS export
-# contract, which they compare with the gate's copy: the paths are the sparse
-# checkout's); minutes, not the hours of Lean's own CI.
+# Branch-scoped to the wasm64 line and to wasm64-build/ changes (and the link
+# wiring in src/CMakeLists.txt and src/stdlib.make.in, which the unit tests check,
+# and the JS export contract, which they compare with the gate's copy: the paths
+# are the sparse checkout's); minutes, not the hours of Lean's own CI.
 # Node built-ins only: no install step (the native-symbol table's generator tests
 # run python3, which the runner has).
 name: lean4-wasm64 package
@@ -11,10 +10,10 @@ name: lean4-wasm64 package
 on:
   push:
     branches: [qed64-wasm64]
-    paths: ["wasm64-build/**", "src/emscripten-pthread-pool.js", "src/emscripten-exports.seed.txt", "src/CMakeLists.txt", "src/stdlib.make.in", ".github/workflows/lean4-wasm64-js.yml"]
+    paths: ["wasm64-build/**", "src/emscripten-exports.seed.txt", "src/CMakeLists.txt", "src/stdlib.make.in", ".github/workflows/lean4-wasm64-js.yml"]
   pull_request:
     branches: [qed64-wasm64]
-    paths: ["wasm64-build/**", "src/emscripten-pthread-pool.js", "src/emscripten-exports.seed.txt", "src/CMakeLists.txt", "src/stdlib.make.in", ".github/workflows/lean4-wasm64-js.yml"]
+    paths: ["wasm64-build/**", "src/emscripten-exports.seed.txt", "src/CMakeLists.txt", "src/stdlib.make.in", ".github/workflows/lean4-wasm64-js.yml"]
   workflow_dispatch:
 
 permissions:
@@ -34,7 +33,6 @@ jobs:
           # JS export contract test/symtab.test.mjs compares with runtime-contract.mjs
           sparse-checkout: |
             /wasm64-build/
-            /src/emscripten-pthread-pool.js
             /src/CMakeLists.txt
             /src/stdlib.make.in
             /src/emscripten-exports.seed.txt
@@ -54,7 +52,7 @@ jobs:
           npm pack --dry-run --json > /tmp/pack.json
           node -e '
             const files = JSON.parse(require("fs").readFileSync("/tmp/pack.json", "utf8"))[0].files.map((f) => f.path);
-            const need = ["cli.mjs", "node-runner.mjs", "gate.mjs", "fetch-release.mjs", "verify-release.mjs", "release.mjs", "pack-set.mjs", "packs.json", "formats/README.md", "formats/HOSTING.md", "probes/task-storm.lean", "probes/thread-knobs.lean", "runtime-knobs.mjs",
+            const need = ["cli.mjs", "node-runner.mjs", "gate.mjs", "fetch-release.mjs", "verify-release.mjs", "release.mjs", "pack-set.mjs", "packs.json", "formats/README.md", "formats/HOSTING.md", "probes/task-storm.lean", "runtime-knobs.mjs",
               "probes/symtab.lean", "probes/parity-legacy-init.lean", "probes/parity-module-mathlib.lean", "runtime-contract.mjs", "exports-audit.mjs",
               "formats/snapshot-index.md", "LICENSE"];
             const missing = need.filter((n) => !files.includes(n));

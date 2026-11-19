@@ -23,7 +23,7 @@ Layers, so a host knows what it may rely on:
 |---|---|
 | Target | `wasm64-unknown-emscripten`: Memory64, shared memory, pthreads, `-sPROXY_TO_PTHREAD=1` (`main` runs on a pthread) |
 | Memory import | `WebAssembly.Memory({shared: true, address: "i64", initial: ≥ 2048n, maximum: ≤ 262144n})` pages (128 MiB … 16 GiB), passed as `Module.wasmMemory`; the glue puts it in the import object itself (its module and field names are minified since 0039, `env.memory` before). Without a host `wasmMemory` the glue creates `{initial: INITIAL_MEMORY ‖ 128 MiB, maximum: 262144n}`. The runtime manifest records these values (`memory`). |
-| Threads | a pool of `Module.pthreadPoolSize` pthread Workers (0..64, default 24; 0038) created at load, growing on demand; 16 MiB main/application stack, 8 MiB per pthread (§3.6) |
+| Threads | a pool of 24 pthread Workers created at load (0019; from 0038 until the architecture review's D3b a host could size it), growing on demand; 16 MiB main/application stack, 8 MiB per pthread (§3.6) |
 | Exit | `-sEXIT_RUNTIME=1` with the keepalive patch 0020 in the build image (§5) |
 | Filesystems | MEMFS (root), NODEFS, WORKERFS |
 | Runtime methods | `callMain, FS, ENV, ccall, getValue, setValue, UTF8ToString, stringToNewUTF8` |
@@ -65,17 +65,16 @@ may import any memory whose maximum is ≤ that.
 | `_lean_wasm_shell_mark_preinitialized()` | `()` | — | 0031 |
 | `_lean_browser64_configure_input_ring(ptr, capacity)` | `(i64, u32)` | `u32`: 0, or `EINVAL` (28) | 0031 |
 | `_lean_wasm_task_manager_parked_threads()` | `()` | `u32`: pthreads parked by the task manager | 0035 |
-| `_lean_wasm_task_manager_stat(key)` | `(u32)` | `f64`: 0 standard workers live, 1 their cap, 2 the most ever live, 3 surplus exits, 4 parked threads, 5 idle exits of parked threads, 6 standard workers started (§3.6); -1 for another key or before the task manager exists | 0038 |
-| `_lean_wasm_engine_probes()` | `()` | `f64`: questions the engine-stack guard asked since start-up (§6) | 0038 |
-| `_lean_wasm_engine_guard_trips(site)` | `(u32)` | `f64`: its refusals at site 0 (the kernel) or 1 (`Core.checkSystem`); 0 for another site | 0038 |
 | `_lean_wasm_symtab_stats(key)` | `(u32)` | `f64`: the native-symbol table's gauges: 0..6 lookups that found an entry of kind boxed, plain, export, cell, init, init_rt, init_meta; 7 lookups that found none; 8 its entries; 9..15 its entries by kind; 16 its self-check's status (0 intact); 17, 18 the high and low 32 bits of the FNV-1a-64 the check decoded (the build's `lib/temp/lean_wasm_symtab.json` has the same); -1 for another key. Keys 9..18 run the self-check once (a few ms) | 0039 |
 | `_lean_wasm_symtab_selfcheck(counts, fnv)` | `(i64, i64)` | `u32`: a full decode of the table now (names strictly increasing, kinds in range, every address set, the FNV equal to the generator's): 0 intact, else the first defect (1 empty, 2 a name too long, 3 a block off its offset, 4 out of order, 5 a kind out of range, 6 a null address, 7 another FNV). `counts` (7 × u64) and `fnv` (u64) may be `0n` | 0039 |
 | `callMain(args)` | `string[]` | runs `lean_main` on the application pthread | — |
 
-The 0038 counters are lock-free: a host may call them from its main JS thread at any time, also
+The parked-thread count is lock-free: a host may call it from its main JS thread at any time, also
 while Lean threads hold the task manager's lock (which that thread must never wait for). So are the
-0039 table's: the table is immutable link-time data, and a lookup takes no lock and calls no
-JavaScript.
+0039 table's gauges: the table is immutable link-time data, and a lookup takes no lock and calls no
+JavaScript. (0038 added three more counters, `_lean_wasm_task_manager_stat`,
+`_lean_wasm_engine_probes` and `_lean_wasm_engine_guard_trips`; no host called them, and they left
+with the architecture review's D3b. A runtime from 0038 up to the one before D3b still exports them.)
 
 Since 0039 the module also binds on `Module` the three Emscripten built-ins hosts reach
 ([GLUE], §5): `__emscripten_proxy_main` (what `callMain` runs), `__emscripten_check_mailbox` and
@@ -108,7 +107,6 @@ shims — see `js/node-runner.mjs`). Keys the glue reads:
 | `wasmMemory` | the shared i64 memory (§1); pthreads receive it |
 | `INITIAL_MEMORY` | only without `wasmMemory` |
 | `noInitialRun: true` | persistent hosts: do not run `main` at load |
-| `pthreadPoolSize` | the pthread Workers created at load (§3.6): an integer, clamped to 0..64; absent, blank or not a number, 24. Read once, when the glue is evaluated (0038; an earlier runtime ignores it) |
 | `arguments` | argv of the implicit `main` (one-shot CLI) |
 | `locateFile(path)` | where `lean.wasm` is (QED64: a Blob URL of verified bytes) |
 | `mainScriptUrlOrBlob` | the script **every pthread Worker** loads: the glue itself, or a prelude that `importScripts` it in the same global scope |
@@ -117,6 +115,9 @@ shims — see `js/node-runner.mjs`). Keys the glue reads:
 | `onRuntimeInitialized` | the C-API initialization (§3.2) |
 | `onAbort(what)` | the runtime is dead |
 | `onExit(code)` | fires **only when no keepalive is held** (§5) |
+
+The glue no longer reads `pthreadPoolSize`: from 0038 until the architecture review's D3b it sized
+the pool (§3.6), and no host set it.
 
 **`ENV` is not an input.** The glue replaces `Module.ENV` with its own object at
 load; an `ENV` passed in the `Module` literal is discarded. Set variables by
@@ -131,8 +132,6 @@ mutating `Module.ENV` in `preRun`. Two readers see them:
 |---|---|---|
 | `LEAN_PATH` | Lean | `:`-separated library dirs, prepended to the built-in `/lib/lean` (§3.3) |
 | `LEAN_WASM_PARKED_DEDICATED` | C, at task-manager creation | idle dedicated task threads kept for reuse; clamped to 64; **default 0** — parked pthreads outlive a page reload by the browser's ~2 s termination grace, and overlapping the next boot they exhausted V8's pointer-compression cage (0035b) |
-| `LEAN_WASM_PARKED_IDLE_MS` | C, at task-manager creation | a parked dedicated thread exits after that many ms without a task (clamped to 3,600,000); **default unset: parked threads wait for good** (0038, §3.6) |
-| `LEAN_WASM_STD_SURPLUS_EXIT` | C, at task-manager creation | `1`: a standard worker exits while more of them live than the cap, as after a burst of `Task.get` in pool tasks; **default unset: they stay** (0038, §3.6) |
 | `LEAN_COMPACTOR_RESERVE` | C | bytes reserved up front when saving a snapshot (`--incr-header-save`); a doubling buffer needs old + new at once (bakes use 3.5 GiB) |
 | `LEAN_WASM_STACK_PROBE_SLOTS` | C, once | headroom (in 8-byte argument slots, default 16384 = 128 KiB) the engine-stack probe demands (§6); 0 disables it — for calibration only (0036) |
 | `LEAN_WASM_SYMTAB_TRACE` | C, at the first native-symbol lookup | diagnosis only (0039): print the IR interpreter's lookups in the native-symbol table on stderr, `[symtab] miss - <name>` and `[symtab] hit <kind> <name>`. `miss`, `hit` or `all`, each optionally `:<prefix>,<prefix>…` (only names with one of these prefixes), clauses joined by `;`: `miss:;hit:l_Lean_versionString`. Unset or empty: off; anything else: off, with one warning. A miss is normal: every lookup of a function without a boxed wrapper first misses the wrapper, and package code (`lp_…`) is never native |
@@ -140,8 +139,9 @@ mutating `Module.ENV` in `preRun`. Two readers see them:
 | `LEAN_IMPORT_WORKERS` | Lean | parallel region reads of a snapshot with dependency files; not on the in-memory path |
 | `LEAN_NUM_THREADS`, `LEAN_MAIN_USE_THREAD`, `LEAN_ABORT_ON_PANIC`, `LEAN_BACKTRACE*` | C | **inert on Emscripten** — not knobs |
 | `QED64_ALLOW_LEGACY_IMPORTS` | none since R11a | **no effect**: legacy (non-`module`) imports are always tolerated on wasm targets, and native64 keeps stock's guard (before R11a only native64 read it). QED64's `bake-snapshot --allow-legacy-imports`, which sets it, does nothing either |
+| `LEAN_WASM_STD_SURPLUS_EXIT`, `LEAN_WASM_PARKED_IDLE_MS` | none since D3b | **no effect**: 0038's opt-in exits of surplus standard workers and of idle parked threads, which no host turned on, left with the architecture review's D3b (§3.6) |
 
-The three task-manager variables take decimal digits only (since 0038): anything else (`-1`, `1e3`,
+`LEAN_WASM_PARKED_DEDICATED` takes decimal digits only (since 0038): anything else (`-1`, `1e3`,
 ` 1`, `true`) is off, with one line on stderr, as unset or empty is.
 
 ### 3.2 Persistent initialization (`onRuntimeInitialized`)
@@ -238,39 +238,38 @@ names `/work/X.lean` `X`). `LEAN4_WASM64_CWD=work` keeps the earlier layout
 (the work dir, mirrored at its host path, is the cwd, so relative paths land
 in it).
 
-### 3.6 Threads and Workers (0038)
+### 3.6 Threads and Workers
 
 Every live pthread holds one Emscripten Worker, and in a browser each Worker is an isolate in the
 renderer's one pointer-compression cage (§6).
 
-- **The pool** [RT]: `Module.pthreadPoolSize` Workers are created, and load the module, while the
-  runtime starts (default 24). A thread then starts on an idle pool Worker; when none is idle it
-  gets a new Worker, which boots first. A finished thread's Worker returns to the pool; nothing
-  terminates Workers before exit. A smaller pool boots faster and holds fewer isolates while idle;
-  a host with thresholds keyed to 24 (QED64's edit hold: fewer than 6 free pool Workers) moves
-  them with it. The glue computes the size into a top-level `leanPthreadPoolTarget` [GLUE].
-- **Threads that leave** [RT], both opt-in through `Module.ENV` in `preRun` (§3.1); measure a page
-  reload with them before turning them on (§6, 0035b):
+- **The pool** [RT]: 24 Workers are created, and load the module, while the runtime starts
+  (`-sPTHREAD_POOL_SIZE=24`, 0019). A thread then starts on an idle pool Worker; when none is idle
+  it gets a new Worker, which boots first. A finished thread's Worker returns to the pool; nothing
+  terminates Workers before exit. Hosts count on the 24 (QED64's edit hold: fewer than 6 free pool
+  Workers); the gate checks the glue allocates them.
+- **Threads** [RT]:
   - Standard workers serve pool tasks. Their cap is the task manager's worker count
     (`_lean_init_task_manager_using(n)`, else the hardware concurrency) plus one per pool task
-    blocked in `Task.get`, and such a block starts a worker when none is idle, so a
-    burst of nested `Task.get`s leaves workers beyond the cap. They stay unless
-    `LEAN_WASM_STD_SURPLUS_EXIT=1`, which makes a waiting worker exit while more live than the
-    cap; a later burst creates them again. It has no hysteresis: a pool task that `Task.get`s
-    over and over while every worker is busy starts (a `pthread_create` round trip to the main
-    JS thread) and ends a worker per get, where without it the first stays and is reused; the
-    gauge's key 6 counts the starts.
-  - Dedicated threads park only with `LEAN_WASM_PARKED_DEDICATED=<n>` (default 0); with
-    `LEAN_WASM_PARKED_IDLE_MS=<ms>` a parked thread exits after that idle time.
-- **Gauges** [RT]: `_lean_wasm_task_manager_stat(key)` (§2), lock-free. Emscripten's own
+    blocked in `Task.get`, and such a block starts a worker when none is idle, so a burst of
+    nested `Task.get`s leaves workers beyond the cap. They stay for the life of the process, each
+    holding a Worker, and the next burst reuses them.
+  - Dedicated threads park only with `LEAN_WASM_PARKED_DEDICATED=<n>` (default 0; through
+    `Module.ENV` in `preRun`, §3.1; measure a page reload with it before turning it on, §6,
+    0035b). A parked thread waits for its next task as long as the runtime lives.
+- **Gauges** [RT]: `_lean_wasm_task_manager_parked_threads()` (§2), lock-free. Emscripten's own
   `PThread.unusedWorkers` (idle pool Workers) and `PThread.pthreads` (Workers running a thread)
   [GLUE] count the Workers.
-- **Node**: `node-runner.mjs` and `persistent-probe.mjs` take
-  `LEAN4_WASM64_PTHREAD_POOL=<n>` for `Module.pthreadPoolSize` and copy `LEAN_WASM_PARKED_DEDICATED`,
-  `LEAN_WASM_PARKED_IDLE_MS`, `LEAN_WASM_STD_SURPLUS_EXIT`, `LEAN_WASM_STACK_PROBE_SLOTS` and (0039)
-  `LEAN_WASM_SYMTAB_TRACE` into `Module.ENV`; with `LEAN4_WASM64_RTSTATS=1`, node-runner answers a printed line containing
-  `[rtstats?]` with `[rtstats] <json>` of these gauges and the guard's counters
-  (`js/runtime-knobs.mjs`).
+- **Node**: `node-runner.mjs` and `persistent-probe.mjs` copy `LEAN_WASM_PARKED_DEDICATED`,
+  `LEAN_WASM_STACK_PROBE_SLOTS` and (0039) `LEAN_WASM_SYMTAB_TRACE` into `Module.ENV`
+  (`js/runtime-knobs.mjs`); with `QED64_COUNT_PTHREADS=1`, node-runner answers a printed line
+  containing `[pthreads?]` with `[pthreads] created=<n>`.
+- **Gone since D3b** (the architecture review's; no host used them): 0038's host-sized pool
+  (`Module.pthreadPoolSize`, node-runner's `LEAN4_WASM64_PTHREAD_POOL`), its opt-in exits of
+  surplus standard workers (`LEAN_WASM_STD_SURPLUS_EXIT`) and of idle parked threads
+  (`LEAN_WASM_PARKED_IDLE_MS`), and its counters (`_lean_wasm_task_manager_stat`,
+  `_lean_wasm_engine_probes`, `_lean_wasm_engine_guard_trips`; node-runner's
+  `LEAN4_WASM64_RTSTATS`).
 
 ## 4. The stdin ring (0031) [RT]
 
@@ -312,28 +311,38 @@ its Worker).
   (`lsp-frames.js`). The glue does not honour `Module.stdout`.
 - **Exit** [GLUE]: with a keepalive held, `_proc_exit` never calls
   `Module.onExit`; a FileWorker exit is visible only by hooking the proxied
-  exit functions (QED64 wraps `proxiedFunctionTable[0]` and `[1]`).
+  exit functions (QED64 wraps the `proxiedFunctionTable` entries equal to
+  `_proc_exit` and `exitOnMainThread`, at any index, since its 58e1918; older
+  copies of its worker, lean4game's pin among them, wrap `[0]` and `[1]`).
 - **Mailbox** [GLUE, HARDENING #52 in QED64]: a lost main-thread mailbox
   wakeup can freeze every Lean pthread. QED64 switches the glue to
   postMessage notifications (`waitAsyncPolyfilled = true` in `preRun`) and
   kicks `__emscripten_check_mailbox()` from a 1 s timer. Kernel patch 0035
   narrows the trigger; it does not remove it.
 - **The [GLUE] surface the gate checks** (its S6, `js/runtime-contract.mjs`, on every runtime since
-  0039 linked statically and its glue is generated anew): a classic script that adopts the host's
-  `Module`; pthread Workers named `"em-pthread"`; the runtime methods of §1 and the `Module` keys of
-  §3.1; a top-level `wasmMemory` that adopts `Module.wasmMemory`; `FS` (`mkdirTree`, `makedev`,
-  `WORKERFS`, `NODEFS`); `TTY` with `ttys[…].ops.put_char` called per byte; `PThread`
-  (`unusedWorkers`, `pthreads`, `allocateUnusedWorker`, `getNewWorker`, `returnWorkerToPool`,
-  called as `PThread.x()`); `proxiedFunctionTable` with `_proc_exit` at `[0]` and
-  `exitOnMainThread` at `[1]`; `waitAsyncPolyfilled`; `checkMailbox` holding a keepalive (0020)
-  and calling `__emscripten_check_mailbox()`; `__emscripten_thread_mailbox_await` with a literal
-  `pthread_ptr+N`; top-level `_pthread_self` and `__emscripten_check_mailbox`; `callMain` running
-  `_emscripten_proxy_main`; `runtimeKeepalivePush`; `ABORT`; `class ExitStatus`; the thrown string
-  `"unwind"`; a pthread Worker's `onerror` rethrowing; a top-level `spawnThread` the glue calls by
-  name (node-runner's `QED64_COUNT_PTHREADS`). Test probes' reach-ins (`cleanupThread`,
-  `proxiedJSCallArgs`, `EXITSTATUS`, `runtimeKeepaliveCounter`, `runtimeExited`,
-  `ENVIRONMENT_IS_PTHREAD`) are reported, not required. `js/exports-audit.mjs` lists what a
-  consumer tree touches against this list and the export contract.
+  0039 linked statically and its glue is generated anew), in two lines. First, apart from the
+  export contract, the names QED64's worker reads (the architecture review's K6: rows 1-4 of
+  QED64's `docs/ARCHITECTURE.md` "Glue internals the worker reads"; a named export is only the
+  worker's fallback): a top-level `proxiedFunctionTable` with `_proc_exit` and `exitOnMainThread`
+  among its entries, at any index, both top-level functions (the exit hook); `waitAsyncPolyfilled`
+  and `checkMailbox` holding a keepalive (0020) and calling `__emscripten_check_mailbox()`
+  (message mode); a top-level binding `__emscripten_check_mailbox` (the kick); a top-level
+  `PThread` with `unusedWorkers` and `pthreads` (the pool sample behind the edit hold). Then the
+  rest: a classic script that adopts the host's `Module`; pthread Workers named `"em-pthread"`;
+  the runtime methods of §1 and the `Module` keys of §3.1; a top-level `wasmMemory` that adopts
+  `Module.wasmMemory`; `FS` (`mkdirTree`, `makedev`, `WORKERFS`, `NODEFS`); `TTY` with
+  `ttys[…].ops.put_char` called per byte; `callMain` running `_emscripten_proxy_main`;
+  `runtimeKeepalivePush`; `ABORT`; `class ExitStatus`; the thrown string `"unwind"`; a pthread
+  Worker's `onerror` rethrowing; a top-level `spawnThread` the glue calls by name (node-runner's
+  `QED64_COUNT_PTHREADS`); and what QED64's worker before its 58e1918 and R7a (f83bc70) reads, in
+  the copy lean4game pins (QED64 73d7f3b): `proxiedFunctionTable[0]` = `_proc_exit` and `[1]` =
+  `exitOnMainThread`, `PThread`'s `allocateUnusedWorker`, `getNewWorker` and `returnWorkerToPool`
+  called as `PThread.x()`, `__emscripten_thread_mailbox_await` with a literal `pthread_ptr+N`, and
+  a top-level `_pthread_self` (also QED64's thread-storm and liveness lanes). Test probes'
+  reach-ins (`cleanupThread`, `proxiedJSCallArgs`, `EXITSTATUS`, `runtimeKeepaliveCounter`,
+  `runtimeExited`, `ENVIRONMENT_IS_PTHREAD`) are reported, not required. `js/exports-audit.mjs`
+  lists what a consumer tree touches against this list and the export contract. Re-check the list
+  at an emsdk move, when 0020 goes upstream, or when the build changes (K6).
 
 **stderr: the lines hosts parse (the progress contract)** [RT]. The runtime prints these lines
 itself, and consumers parse them, so their text is frozen: a runtime that changes one is a
@@ -373,9 +382,10 @@ fits depends on the engine. (0039's runtime alone needed ~5% more stack in a ses
 proofs, from V8's generic wrapper on the C++-exception trampolines; 0040's native exceptions have
 no trampolines. PATCHES.md 0039, 0040.) Recursion that passes no checkpoint (the IR interpreter, some
 expression traversals) can still overflow, as native Lean can abort there. Headless, the
-node-runner knob `LEAN4_WASM64_PTHREAD_STACK_MB=0.68` gives the pthreads Chrome's budget. Since
-0038 a host can read how often the guard asked and refused: `_lean_wasm_engine_probes()` and
-`_lean_wasm_engine_guard_trips(site)` (§2). Counters only: the guard itself is 0036's.
+node-runner knob `LEAN4_WASM64_PTHREAD_STACK_MB=0.68` gives the pthreads Chrome's budget. (From
+0038 until the architecture review's D3b the guard also counted its questions and refusals for
+hosts, `_lean_wasm_engine_probes()` and `_lean_wasm_engine_guard_trips(site)`; no host read them.
+The guard itself is 0036's, unchanged by either.)
 
 - Browser: a classic **DedicatedWorker** (`importScripts`, nested Workers for
   pthreads; a SharedWorker cannot host it), cross-origin isolated (HOSTING.md),

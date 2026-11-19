@@ -17,14 +17,14 @@
 //     the Mathlib-header cell, the resident FileWorker and the covered cell (with their facts when the
 //     resident probe has --probe-file). An input left out prints a note: `gate --artifact <dir>` alone
 //     can still pass.
-//  0038 (folded into the runs above, no runtime of its own): the glue's pool size from
-//     Module.pthreadPoolSize, the opt-in exits of surplus standard workers and idle parked
-//     threads, the engine-guard counters. Skipped, with a note, on a runtime before 0038.
+//  Static, first: the glue's pthread pool of 24 Workers (0019; QED64's edit hold counts on it).
 //  0039 (static checks first, the rest folded into the runs above): the JavaScript export contract
-//     and the glue surface hosts reach into (S2, S6: every runtime), no generated export and a
-//     statically linked module (S1), the native-symbol table intact (G2), core initializers and
-//     constant cells found in it (G3, G4), plain core functions run native (G5, 0039b), no lookup
-//     lost (G7). Skipped, with a note, on a runtime before 0039.
+//     and the glue surface hosts reach into (S2, S6 with K6's names on a line of their own: every
+//     runtime), no generated export and a statically linked module (S1), the native-symbol table
+//     intact (G2), core initializers and constant cells found in it (G3, G4), plain core functions
+//     run native (G5, 0039b), no lookup lost (G7). Skipped, with a note, on a runtime before 0039.
+//  (0038's host-sized pool, thread-exit knobs and counters left with the architecture review's D3b,
+//  and their checks with them.)
 // Every check prints ok or FAIL; exits nonzero if any failed.
 //
 // Usage: node gate.mjs --artifact <dir> [--mathlib-lib <olean tree>]
@@ -43,7 +43,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseSeed, staticChecks } from "./runtime-contract.mjs";
+import { parseSeed, pthreadPool, staticChecks } from "./runtime-contract.mjs";
 
 // The runner harnesses live alongside this gate (self-contained build dir).
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -125,9 +125,8 @@ for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
 // The runner knobs at their defaults for every child unless a check sets one: the checks
 // judge the runtime, not the caller's shell ("" counts as unset in node-runner).
 const PINNED = {
-  LEAN4_WASM64_CWD: "", LEAN4_WASM64_PTHREAD_STACK_MB: "", LEAN4_WASM64_PTHREAD_POOL: "", LEAN4_WASM64_RTSTATS: "",
-  LEAN_WASM_STACK_PROBE_SLOTS: "", LEAN_WASM_PARKED_DEDICATED: "", LEAN_WASM_PARKED_IDLE_MS: "", LEAN_WASM_STD_SURPLUS_EXIT: "",
-  LEAN_WASM_SYMTAB_TRACE: "",
+  LEAN4_WASM64_CWD: "", LEAN4_WASM64_PTHREAD_STACK_MB: "",
+  LEAN_WASM_STACK_PROBE_SLOTS: "", LEAN_WASM_PARKED_DEDICATED: "", LEAN_WASM_SYMTAB_TRACE: "",
 };
 // 0039's G7: every run traces the native-symbol lookups that miss a `lean_*` name (none may: the
 // interpreter never asks for a C runtime function by name) unless a check traces more. Runtimes
@@ -171,8 +170,7 @@ function runChild(args, timeoutMs, env = {}, stopWhen = null) {
   });
 }
 
-// `leanFlags`: Lean's own options, before the file
-async function runLean(source, label, env = {}, leanFlags = []) {
+async function runLean(source, label, env = {}) {
   const work = mkTemp("lean4-wasm64-gate-");
   fs.writeFileSync(path.join(work, "input.lean"), source);
   // Since the keepalive guard (patch 0020) and the resident transport (0031),
@@ -183,7 +181,7 @@ async function runLean(source, label, env = {}, leanFlags = []) {
   // `rfl` elaborates, the process is killed by the timeout. The CLI checks below
   // are therefore judged by OUTPUT; a timeout is reported, not failed.
   try {
-    const r = await runChild([STACK, runner, "--artifact", artifact, "--work", work, "--", ...leanFlags, "/work/input.lean"], 240_000, { ...TRACE_LEAN, ...env });
+    const r = await runChild([STACK, runner, "--artifact", artifact, "--work", work, "--", "/work/input.lean"], 240_000, { ...TRACE_LEAN, ...env });
     noteMisses(label, r.stderr);
     return r;
   } finally {
@@ -198,34 +196,26 @@ const gate = (ok, label, extra = "") => {
   if (!ok) failures += 1;
 };
 
-// PATCH 0038, STATIC (G1): the glue sizes its pthread pool from Module.pthreadPoolSize
-// (src/emscripten-pthread-pool.js, a JS library of the link). A link that silently lost the
-// library would keep a fixed pool and pass every runtime check, so the glue's own text is checked.
-// A runtime before 0038 has none of these names: its 0038 checks are skipped with a note.
+// THE PTHREAD POOL, STATIC (0019): PThread.initMainThread allocates 24 Workers at start-up
+// (-sPTHREAD_POOL_SIZE=24), so a thread starts without the main JS thread waiting for a Worker to
+// boot, and hosts count on them (QED64's edit hold waits for 6 of the 24 to be free). A link that
+// lost the setting would allocate none and pass every runtime check (a thread then gets a Worker of
+// its own when it starts), so the glue's own text is checked (runtime-contract.mjs pthreadPool).
+// From 0038 until the architecture review's D3b the size was the host's (Module.pthreadPoolSize,
+// through 0038's pool library): such a runtime passes on its default, 24.
 const glue = fs.readFileSync(path.join(artifact, "bin/lean.js"), "utf8");
-const KNOB_EXPORTS = ["_lean_wasm_task_manager_stat", "_lean_wasm_engine_probes", "_lean_wasm_engine_guard_trips"];
-const poolGlue = {
-  loop: /var pthreadPoolSize\s*=\s*leanPthreadPoolTarget\s*;/.test(glue),
-  target: /var leanPthreadPoolTarget\s*=\s*leanPoolInt\(\s*Module\[\s*["']pthreadPoolSize["']\s*\]\s*,\s*24\s*,\s*0\s*,\s*64\s*\)/.test(glue),
-  parse: /function leanPoolInt\(/.test(glue),
-};
-const knobExports = KNOB_EXPORTS.filter((n) => glue.includes(`Module["${n}"]`));
-const is0038 = Object.values(poolGlue).some(Boolean) || knobExports.length > 0;
-const skip0038 = (label) => console.log(`note  [0038] ${label}: skipped (a runtime before 0038)`);
-if (is0038) {
-  gate(Object.values(poolGlue).every(Boolean), "[0038] the glue's pthread pool is Module.pthreadPoolSize (var pthreadPoolSize=leanPthreadPoolTarget)",
-    Object.entries(poolGlue).filter(([, ok]) => !ok).map(([k]) => `missing: ${k}`).join(", "));
-  gate(knobExports.length === KNOB_EXPORTS.length, "[0038] the task-manager and engine-guard counters are exported",
-    KNOB_EXPORTS.filter((n) => !knobExports.includes(n)).map((n) => `missing: ${n}`).join(", "));
-} else {
-  skip0038("the glue's pool size and the counter exports");
-}
+const pool = pthreadPool(glue);
+gate(pool.size === 24, "the glue allocates the 24-Worker pthread pool at start-up (-sPTHREAD_POOL_SIZE=24; QED64's edit hold counts on it)",
+  pool.size === null ? "no pool loop found in PThread.initMainThread"
+    : pool.form === "0038" ? `0038's pool library: Module.pthreadPoolSize, default ${pool.size} (a runtime before D3b)`
+      : `var pthreadPoolSize=${pool.size}`);
 
 // PATCH 0039, STATIC (runtime-contract.mjs). S2 and S6 hold for every runtime: the exports hosts
 // call, bound on Module to function exports (raw wasm names are minified since 0039, so they are
-// checked through the glue's own bindings), and the glue internals QED64's worker and node-runner
-// reach into. S1, from 0039 on: no generated Lean name exported, a small glue, a statically linked
-// module. From the repository (import-release.sh gate-dir) S2 also checks src/emscripten-exports.seed.txt.
+// checked through the glue's own bindings), and the glue internals hosts reach into, the names
+// QED64's worker reads (K6) on a line of their own. S1, from 0039 on: no generated Lean name
+// exported, a small glue, a statically linked module. From the repository (import-release.sh
+// gate-dir) S2 also checks src/emscripten-exports.seed.txt.
 const seedFile = path.join(root, "..", "..", "src", "emscripten-exports.seed.txt");
 const seed = fs.existsSync(seedFile) ? parseSeed(fs.readFileSync(seedFile, "utf8")) : null;
 const statics = (() => {
@@ -240,67 +230,8 @@ for (const r of statics.results) {
 }
 const skip0039 = (label) => console.log(`note  [0039] ${label}: skipped (a runtime before 0039)`);
 
-// The runtime's counters (LEAN4_WASM64_RTSTATS=1): node-runner answers a printed line containing
-// `[rtstats?]` with `[rtstats] <json>` right after it (runtime-knobs.mjs runtimeStats).
-const RTSTATS = { LEAN4_WASM64_RTSTATS: "1" };
-const ASK = '#eval IO.println "ASK [rtstats?]"\n';
-const rtstatsOf = (out) => {
-  const lines = out.split("\n");
-  return lines.flatMap((l, i) => {
-    const m = /^\[rtstats\] (\{.*\})$/.exec(l);
-    if (!m || i === 0) return [];
-    try { return [{ asked: lines[i - 1], ...JSON.parse(m[1]) }]; } catch { return []; }
-  });
-};
-const askedStats = (out, marker) => rtstatsOf(out).find((s) => s.asked.includes(`${marker} [rtstats?]`)) ?? null;
-const poolTargets = [];
-
-// G5/G6 judge probes/thread-knobs.lean, which samples the task manager every 100 ms for 3 s after
-// a burst of blocking pool tasks (phase nest) and after a burst of dedicated tasks (phase burst):
-// `KNOBS <phase>[-end] t=<ms since the burst> [rtstats?]`. With the knobs on (`on`) the surplus
-// standard workers exit and parked threads leave after IDLE_MS; by default neither happens.
-const IDLE_MS = 300;
-function judgeKnobs(out, on, tag) {
-  if (!is0038) return skip0038(`thread knobs [${tag}]`);
-  const samples = rtstatsOf(out).flatMap((s) => {
-    const m = /KNOBS (nest|burst)(?:-end)? t=(\d+) \[rtstats\?\]/.exec(s.asked);
-    return m && s.tm ? [{ phase: m[1], t: Number(m[2]), tm: s.tm }] : [];
-  });
-  const nest = samples.filter((x) => x.phase === "nest"), burst = samples.filter((x) => x.phase === "burst");
-  const n = nest.at(-1)?.tm, b = burst.at(-1)?.tm;
-  const std = n ? `live ${n.liveStd}, cap ${n.stdCap}, peak ${n.liveStdPeak}, surplus exits ${n.stdSurplusExits}${n.stdSpawns == null ? "" : `, ${n.stdSpawns} started`}` : "no sample";
-  const mostParked = burst.length ? Math.max(...burst.map((x) => x.tm.parked)) : null;
-  if (!on) {
-    // past the cap (--threads=2): with the burst inside the cap, "every worker stays" would hold whatever the runtime did
-    gate(!!n && n.liveStdPeak > n.stdCap && n.stdSurplusExits === 0 && n.liveStd === n.liveStdPeak,
-      `[0038] [${tag}] after a Task.get burst past the cap every standard worker stays (LEAN_WASM_STD_SURPLUS_EXIT unset)`, std);
-    gate(!!b && mostParked === 0 && b.parkedIdleExits === 0,
-      `[0038] [${tag}] after a burst of dedicated tasks no thread parks or leaves idle (parking unset)`,
-      b ? `parked at most ${mostParked}, idle exits ${b.parkedIdleExits}` : "no sample");
-    return;
-  }
-  gate(!!n && n.liveStdPeak > n.stdCap && n.liveStd <= n.stdCap && n.stdSurplusExits >= n.liveStdPeak - n.stdCap,
-    `[0038] [${tag}] LEAN_WASM_STD_SURPLUS_EXIT=1: after a Task.get burst the standard workers fall back to the cap`, std);
-  const first = burst.findIndex((x) => x.tm.parked > 0);
-  const gone = first < 0 ? -1 : burst.findIndex((x, i) => i > first && x.tm.parked === 0);
-  gate(first >= 0 && gone >= 0 && burst[gone].t <= IDLE_MS + 1000 && b.parked === 0 && b.parkedIdleExits >= 1,
-    `[0038] [${tag}] LEAN_WASM_PARKED_IDLE_MS=${IDLE_MS}: parked dedicated threads leave once idle that long (1 s slack)`,
-    !b ? "no sample" : first < 0 ? "no thread parked" : gone < 0 ? `${b.parked} still parked ${burst.at(-1).t} ms after the burst`
-      : `${mostParked} parked, none ${burst[gone].t} ms after the burst; idle exits ${b.parkedIdleExits}`);
-}
-
-// G3 rides on three runs, this one (-3), the legacy file (4) and the Meta deep recursion (abc):
-// LEAN4_WASM64_PTHREAD_POOL is Module.pthreadPoolSize, which the glue reads as 0, 4 and 24 (the
-// default). The pool size changes only how many Workers exist before a thread needs one, so the
-// runs' own checks hold at any size.
-// THREAD KNOBS OFF (0038, G5/G6) ride on this run too: probes/thread-knobs.lean after it, with
-// every knob unset and the standard-worker cap at 2 (--threads=2), so its Task.get burst goes past
-// the cap; the workers beyond it stay and no dedicated thread parks, as before 0038.
-const smokePool = { LEAN4_WASM64_PTHREAD_POOL: "-3", ...RTSTATS };
-const smoke = await runLean("#eval System.Platform.numBits\nexample : (2 + 2 : Nat) = 4 := by rfl\n" + ASK + readProbe("thread-knobs.lean"),
-  "smoke", smokePool, ["--threads=2"]);
-poolTargets.push(["-3", 0, askedStats(smoke.stdout, "ASK")]);
-// as before 0038, only the progress lines are set aside (and 0039's lookup trace), not every diagnostic line
+const smoke = await runLean("#eval System.Platform.numBits\nexample : (2 + 2 : Nat) = 4 := by rfl\n", "smoke");
+// only the progress lines are set aside (and 0039's lookup trace), not every diagnostic line
 const smokeOut = smoke.stdout.replace(/\[(DEBUG:PROGRESS|symtab)\][^\n]*(?:\n|$)/g, "");
 gate(/^64$/m.test(smoke.stdout) && !/error/i.test(smokeOut),
   "numBits=64 + rfl proof (judged by output)", smoke.timedOut ? "CLI kept alive after main, killed by the timeout (patch 0020; expected)" : `exit ${smoke.status}`);
@@ -308,15 +239,9 @@ gate(/^64$/m.test(smoke.stdout) && !/error/i.test(smokeOut),
 // glue returned silently when it could not resolve it. The CLI printing anything at all means main ran.
 gate(/^64$/m.test(smoke.stdout), "callMain ran main (the one-shot CLI printed #eval's 64)",
   /^64$/m.test(smoke.stdout) ? "" : "no output: main never ran (is _emscripten_proxy_main exported and callMain's entry function bound?)");
-judgeKnobs(smoke.stdout, false, "knobs off");
 
-// THREAD KNOBS ON (0038, G5/G6) ride on the false proof: probes/thread-knobs.lean after it, with
-// the standard-worker cap at 2 (--threads=2), surplus standard workers exiting, and parked
-// dedicated threads (8) leaving after 300 ms idle. The proof's error is on line 1 whatever follows.
-const KNOBS_ON = { LEAN_WASM_STD_SURPLUS_EXIT: "1", LEAN_WASM_PARKED_DEDICATED: "8", LEAN_WASM_PARKED_IDLE_MS: "300", ...RTSTATS };
-const bad = await runLean("example : (1 + 1 : Nat) = 3 := by rfl\n" + readProbe("thread-knobs.lean"), "bad", KNOBS_ON, ["--threads=2"]);
+const bad = await runLean("example : (1 + 1 : Nat) = 3 := by rfl\n", "bad");
 gate(/input\.lean:1:\d+: error|"severity":\s*"error"/.test(bad.stdout), "false proof reports a positioned error (judged by output)", bad.timedOut ? "CLI kept alive, killed by the timeout (expected)" : `exit ${bad.status}`);
-judgeKnobs(bad.stdout, true, "knobs on");
 
 // The parse defect lives in the PERSISTENT path (lean_wasm_compile); the
 // one-shot CLI has always reported parse errors. Drive the persistent probe
@@ -374,9 +299,8 @@ const legacySrc = "import Lean\n" + ["is-module.lean", "private-default.lean", "
 // 0039 rides on this run too (G3, G4, G5, G6, G7): probes/symtab.lean after the legacy probes, and the
 // runtime traces every lookup that found nothing plus those that found the probe's names.
 const SYMTAB_HITS = ["l_Lean_versionString", "l_Lean_Meta_simpExtension", "l_Lean_Name_append"];
-const legacy = await runLean(legacySrc + ASK + "\n" + readProbe("symtab.lean"), "legacy",
-  { LEAN4_WASM64_PTHREAD_POOL: "4", ...RTSTATS, LEAN_WASM_SYMTAB_TRACE: `miss:;hit:${SYMTAB_HITS.join(",")}` });
-poolTargets.push(["4", 4, askedStats(legacy.stdout, "ASK")]);
+const legacy = await runLean(legacySrc + "\n" + readProbe("symtab.lean"), "legacy",
+  { LEAN_WASM_SYMTAB_TRACE: `miss:;hit:${SYMTAB_HITS.join(",")}` });
 const legacyOut = stripDebug(legacy.stdout);
 gate(/isModule=false/.test(legacyOut) && !/isModule=true/.test(legacyOut), "legacy file: env.header.isModule = false",
   legacy.timedOut ? "CLI kept alive (expected)" : `exit ${legacy.status}`);
@@ -444,7 +368,13 @@ const stormRun = async (env, tag) => {
     leaked ? `${leaked[1]} bytes reached the leaked buffer` : "no result");
   return { ok, created };
 };
-await stormRun({}, "default: no parking");
+const plain = await stormRun({}, "default: no parking");
+// Parking is off as served (patch 0035b, qed64 HARDENING #53 "L9"): no dedicated task reuses a
+// thread, so each one creates a pthread (the import of v4.36.0: 2,955 for 2,140 dedicated tasks).
+// A default that parked even one thread would let the chain's continuations reuse it.
+gate(!!plain.ok && !!plain.created && Number(plain.created[1]) >= Number(plain.ok[1]),
+  "[default: no parking] no dedicated task reuses a thread (parking is off by default, 0035b)",
+  plain.created ? `${plain.created[1]} pthreads created for ${plain.ok ? plain.ok[1] : "?"} dedicated tasks` : "pthread count unavailable");
 const parked = await stormRun({ LEAN_WASM_PARKED_DEDICATED: "8" }, "parking 8");
 gate(!!parked.ok && !!parked.created && Number(parked.created[1]) * 4 <= Number(parked.ok[1]),
   "[parking 8] dedicated tasks reuse parked threads (at most 1 pthread created per 4 dedicated tasks)",
@@ -455,10 +385,6 @@ gate(!!parked.ok && !!parked.created && Number(parked.created[1]) * 4 <= Number(
 // LEAN4_WASM64_PTHREAD_STACK_MB=0.68 gives the pthreads Chrome's budget (Node keeps ~192 KiB of it).
 const CHROME = { LEAN4_WASM64_PTHREAD_STACK_MB: "0.68" };
 const overflowed = (out) => /Maximum call stack size exceeded|too much recursion/.test(out);
-// G7 (0038): each run then asks for the engine guard's counters (GUARD); the Meta one also carries
-// G3's third pool size, abc (the default, 24: no change for this run).
-const GUARD = '#eval IO.println "GUARD [rtstats?]"\n';
-const guardOf = (out) => askedStats(out, "GUARD")?.guard ?? null;
 // 0036's two messages in full: consumers recognise the guard by these words (QED64's lib/stack-limit.ts,
 // PATCHES.md 0036), so a reword has to stop here, not reach a release. Each is checked whole: the Meta one's
 // first words are also plain maxRecDepth's. Since 0044 both errors also carry an LSP code (checked below);
@@ -466,19 +392,15 @@ const guardOf = (out) => askedStats(out, "GUARD")?.guard ?? null;
 const GUARD_TEXT_META = "maximum recursion depth has been reached: the WebAssembly runtime's stack is exhausted (a browser gives it far less stack than native Lean has; raising maxRecDepth does not help, and the same code may succeed natively)";
 const GUARD_TEXT_KERNEL = "the WebAssembly engine's stack is exhausted: this proof recurses deeper than a browser allows (the same proof may check natively)";
 const GUARD_REWORDED = "not 0036's exact words: consumers match them, so a reword needs a matching QED64 change and a release-notes line (PATCHES.md 0036)";
-const deepMetaRun = await runLean(readProbe("deep-recursion.lean") + GUARD, "deep", { ...CHROME, LEAN4_WASM64_PTHREAD_POOL: "abc", ...RTSTATS });
-poolTargets.push(["abc", 24, askedStats(deepMetaRun.stdout, "GUARD")]);
-const deepMeta = stripDebug(deepMetaRun.stdout);
+const deepMeta = stripDebug((await runLean(readProbe("deep-recursion.lean"), "deep", CHROME)).stdout);
 gate(deepMeta.includes(GUARD_TEXT_META) && /DEEP SURVIVED/.test(deepMeta) && !overflowed(deepMeta),
   "deep recursion at Chrome's stack (Meta): 0036's message in full, the thread survives",
   overflowed(deepMeta) ? "the engine's stack overflowed (RangeError)" : !/DEEP SURVIVED/.test(deepMeta) ? "no result" : deepMeta.includes(GUARD_TEXT_META) ? "" : GUARD_REWORDED);
-const deepKernelRun = await runLean(readProbe("deep-recursion-kernel.lean") + GUARD, "deep-kernel", { ...CHROME, ...RTSTATS });
-const deepKernel = stripDebug(deepKernelRun.stdout);
+const deepKernel = stripDebug((await runLean(readProbe("deep-recursion-kernel.lean"), "deep-kernel", CHROME)).stdout);
 gate(deepKernel.includes(GUARD_TEXT_KERNEL) && /DEEP SURVIVED/.test(deepKernel) && !overflowed(deepKernel),
   "deep recursion at Chrome's stack (kernel): 0036's message in full, the thread survives",
   overflowed(deepKernel) ? "the engine's stack overflowed (RangeError)" : !/DEEP SURVIVED/.test(deepKernel) ? "no result" : deepKernel.includes(GUARD_TEXT_KERNEL) ? "" : GUARD_REWORDED);
-const deepRoomyRun = await runLean(readProbe("deep-recursion.lean") + GUARD, "deep-roomy", RTSTATS);
-const deepRoomy = stripDebug(deepRoomyRun.stdout);
+const deepRoomy = stripDebug((await runLean(readProbe("deep-recursion.lean"), "deep-roomy")).stdout);
 gate(/DEEP SURVIVED/.test(deepRoomy) && !/error/i.test(deepRoomy),
   "the same Meta proof at the default stack still checks (the probe does not cost valid proofs)",
   /error/i.test(deepRoomy) ? deepRoomy.split("\n").find((l) => /error/i.test(l))?.slice(0, 160) : "");
@@ -498,21 +420,6 @@ gate(codesOf("kernelSite").includes(GUARD_CODE) && !codeTail,
   `[0044] the kernel guard's error has the LSP code ${GUARD_CODE}`, codeTail || shownCodes("kernelSite"));
 gate(codesOf("plain").length > 0 && !codesOf("plain").includes(GUARD_CODE) && !codeTail,
   `[0044] an ordinary error does not get ${GUARD_CODE}`, codeTail || shownCodes("plain"));
-// G7: counters only (the guard itself is 0036's): a question is counted at each probe point of
-// the two guard sites, a refusal by site (0 the kernel's depth guard, 1 Core.checkSystem)
-if (is0038) {
-  const shownGuard = (g) => (g ? `probes ${g.probes}, refused: kernel ${g.trips[0]}, checkSystem ${g.trips[1]}` : "no sample");
-  const gMeta = guardOf(deepMetaRun.stdout), gKernel = guardOf(deepKernelRun.stdout), gRoomy = guardOf(deepRoomyRun.stdout);
-  gate(!!gMeta && gMeta.trips[1] >= 1, "[0038] engine-guard counters at Chrome's stack (Meta): Core.checkSystem's refusal is counted", shownGuard(gMeta));
-  gate(!!gKernel && gKernel.trips[0] >= 1, "[0038] engine-guard counters at Chrome's stack (kernel): the kernel guard's refusal is counted", shownGuard(gKernel));
-  gate(!!gRoomy && gRoomy.probes > 0 && gRoomy.trips[0] === 0 && gRoomy.trips[1] === 0,
-    "[0038] engine-guard counters at the default stack: the guard asked, and refused nothing", shownGuard(gRoomy));
-  gate(poolTargets.every(([, want, x]) => x?.pool?.target === want),
-    "[0038] LEAN4_WASM64_PTHREAD_POOL is the glue's pool size: -3, 4, abc give 0, 4, 24",
-    poolTargets.map(([v, want, x]) => `${v}: ${x?.pool?.target ?? "no sample"}${x?.pool?.target === want ? "" : ` (want ${want})`}`).join(", "));
-} else {
-  skip0038("the engine-guard counters and the pool sizes");
-}
 // ASYNC ELABORATION THROUGH lean_wasm_compile (patch 0037; qed64 probe-neg N6, N6b, N7). With
 // `Elab.async` on, a theorem's proof, kernel check and (when the whole command is async) linters
 // run in tasks whose messages live only in `Command.State.snapshotTasks`; the persistent shell

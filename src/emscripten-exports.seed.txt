@@ -33,11 +33,8 @@ _lean_wasm_load_snapshot_mem                # W (the browser's only loader), sna
 _lean_wasm_shell_mark_preinitialized        # W, resident: before callMain('--worker')
 _lean_browser64_configure_input_ring        # W, resident: the stdin ring (0031)
 
-# task manager and engine-guard gauges (0035, 0038)
+# the task manager's gauge (0035; 0038's counters left with the architecture review's D3b)
 _lean_wasm_task_manager_parked_threads      # W status.pool.parked
-_lean_wasm_task_manager_stat                # kernel js runtime-knobs.mjs (node-runner [rtstats?], the gate)
-_lean_wasm_engine_probes                    # kernel js runtime-knobs.mjs
-_lean_wasm_engine_guard_trips               # kernel js runtime-knobs.mjs
 
 # the native-symbol table's diagnostics (0039)
 _lean_wasm_symtab_stats                     # kernel js persistent-probe (the gate's G2), runtime-knobs.mjs

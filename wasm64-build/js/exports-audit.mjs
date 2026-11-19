@@ -55,7 +55,7 @@ const contract = new Set(fs.existsSync(seedFile) ? parseSeed(fs.readFileSync(see
 if (opts.seed && !fs.existsSync(opts.seed)) { console.error(`exports-audit: ${opts.seed} not found`); process.exit(2); }
 const glueKnown = new Set(GLUE_NAMES);
 // what a host may read on Module besides the glue's own: its inputs (EMBED-RUNTIME.md §3.1)
-const MODULE_INPUTS = new Set(["wasmMemory", "INITIAL_MEMORY", "noInitialRun", "pthreadPoolSize", "arguments", "locateFile",
+const MODULE_INPUTS = new Set(["wasmMemory", "INITIAL_MEMORY", "noInitialRun", "arguments", "locateFile",
   "mainScriptUrlOrBlob", "print", "printErr", "preRun", "onRuntimeInitialized", "onAbort", "onExit", "setStatus", "ENV"]);
 
 /**

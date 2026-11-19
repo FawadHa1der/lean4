@@ -10,7 +10,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { CONTRACT, GLUE_SURFACE, contractLevel, exportBindings, parseSeed, readWasm, requiredExports, staticChecks } from "../runtime-contract.mjs";
+import { CONTRACT, GLUE_NAMES, GLUE_SURFACE, contractLevel, exportBindings, parseSeed, proxiedFunctionTable, pthreadPool, readWasm, requiredExports,
+  staticChecks } from "../runtime-contract.mjs";
 
 const pkg = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const BUILD = path.resolve(pkg, "..");
@@ -399,10 +400,75 @@ test("the static checks pass a 0039 runtime that keeps the contract and the glue
   const { level, results } = staticChecks(rt);
   assert.equal(level, "0039");
   for (const r of results) if (!r.note) assert.equal(r.ok, true, `${r.label}: ${r.extra}`);
-  assert.equal(results.filter((r) => !r.note).length, 6); // S1 x4, S2, S6
+  assert.equal(results.filter((r) => !r.note).length, 7); // S1 x4, S2, S6 K6, S6
+  assert.match(byLabel(results, /^S6 K6 /).label, /5 items/);
   assert.match(byLabel(results, /^S6 test-probe/).label, /all 4 present/);
   for (const s of GLUE_SURFACE) assert.equal(s.test(rt.glue), true, s.id);
   assert.equal(exportBindings(rt.glue).get("_lean_wasm_compile"), `e${CONTRACT.findIndex((c) => c.name === "_lean_wasm_compile")}`);
+});
+
+test("K6: S6 checks the glue names QED64's worker reads on a line of their own, the exit entries at any index", () => {
+  // QED64's docs/ARCHITECTURE.md "Glue internals the worker reads", rows 1-4, one or two items each
+  assert.deepEqual(GLUE_SURFACE.filter((s) => s.k6).map((s) => [s.k6, s.id]),
+    [[1, "exit entries"], [2, "waitAsyncPolyfilled"], [2, "checkMailbox"], [3, "__emscripten_check_mailbox"], [4, "PThread pool"]]);
+  for (const s of GLUE_SURFACE.filter((s) => s.k6)) assert.equal(s.need, "REQ", s.id);
+  const k6Line = (r) => byLabel(r, /^S6 K6 /), restLine = (r) => byLabel(r, /^S6 the \[GLUE\]/);
+  const glueWith = (from, to) => { const g = runtimeOf(); return { glue: g.glue.replace(from, to), wasmBytes: g.wasmBytes }; };
+  const TABLE = "var proxiedFunctionTable=[_proc_exit,exitOnMainThread,pthreadCreateProxied];";
+  // emsdk may reorder the table: K6 holds at any index; the copy lean4game pins (QED64 73d7f3b) hooks [0] and [1]
+  let { results } = staticChecks(glueWith(TABLE, "var proxiedFunctionTable=[pthreadCreateProxied,exitOnMainThread,_proc_exit];"));
+  assert.equal(k6Line(results).ok, true, k6Line(results).extra);
+  assert.equal(restLine(results).ok, false);
+  assert.match(restLine(results).extra, /^exit entries at \[0\] and \[1\]: /);
+  // an entry missing, or a table that holds the names but not the top-level functions it is compared with
+  for (const [from, to, why] of [[TABLE, "var proxiedFunctionTable=[_proc_exit,pthreadCreateProxied];", "no exitOnMainThread entry"],
+    ["var _proc_exit=code=>", "var procExit=code=>", "_proc_exit not defined at top level"],
+    [TABLE, "var proxiedFunctionTable=_tableOf(_proc_exit,exitOnMainThread);", "not an array literal"]]) {
+    ({ results } = staticChecks(glueWith(from, to)));
+    assert.equal(k6Line(results).ok, false, why);
+    assert.match(k6Line(results).extra, /^exit entries: /, why);
+  }
+  // the kick is the global binding; Module.__emscripten_check_mailbox alone does not do (the worker's fallback)
+  ({ results } = staticChecks(glueWith("__emscripten_check_mailbox=Module[\"__emscripten_check_mailbox\"]=", "Module[\"__emscripten_check_mailbox\"]=")));
+  assert.match(k6Line(results).extra, /^__emscripten_check_mailbox: /);
+  assert.equal(restLine(results).ok, true, restLine(results).extra);
+  // the pool sample needs both PThread fields; the methods older workers wrap are the rest's
+  ({ results } = staticChecks(glueWith("pthreads:{},", "")));
+  assert.match(k6Line(results).extra, /^PThread pool: /);
+  ({ results } = staticChecks(glueWith("returnWorkerToPool:worker=>", "giveBack:worker=>")));
+  assert.equal(k6Line(results).ok, true);
+  assert.match(restLine(results).extra, /^PThread methods: /);
+  // message mode: checkMailbox without its keepalive, waitAsyncPolyfilled gone
+  ({ results } = staticChecks(glueWith("runtimeKeepalivePush();callUserCallback", "callUserCallback")));
+  assert.match(k6Line(results).extra, /^checkMailbox: /);
+  ({ results } = staticChecks(glueWith("var waitAsyncPolyfilled=!Atomics.waitAsync;", "")));
+  assert.match(k6Line(results).extra, /^waitAsyncPolyfilled: /);
+  // every K6 name is one exports-audit knows, and 0038's pool variable is not
+  for (const n of ["proxiedFunctionTable", "_proc_exit", "exitOnMainThread", "waitAsyncPolyfilled", "checkMailbox", "__emscripten_check_mailbox", "PThread"])
+    assert.ok(GLUE_NAMES.includes(n), n);
+  assert.equal(GLUE_NAMES.includes("leanPthreadPoolTarget"), false);
+});
+
+test("proxiedFunctionTable reads the table's entries as written: identifiers, or expressions with brackets and strings", () => {
+  assert.deepEqual(proxiedFunctionTable("var a=1;var proxiedFunctionTable=[_proc_exit,exitOnMainThread,pthreadCreateProxied];var b"),
+    ["_proc_exit", "exitOnMainThread", "pthreadCreateProxied"]);
+  assert.deepEqual(proxiedFunctionTable('var proxiedFunctionTable=[ exitOnMainThread , function(fd,x){return [fd,"],",x]},\n_proc_exit ];'),
+    ["exitOnMainThread", 'function(fd,x){return [fd,"],",x]}', "_proc_exit"]);
+  assert.deepEqual(proxiedFunctionTable("var proxiedFunctionTable=[];"), []);
+  assert.equal(proxiedFunctionTable("var notproxiedFunctionTable=[_proc_exit];"), null);
+  assert.equal(proxiedFunctionTable("x.proxiedFunctionTable=[_proc_exit];"), null);
+  assert.equal(proxiedFunctionTable("var proxiedFunctionTable=[_proc_exit,"), null); // unterminated
+});
+
+test("pthreadPool reads the pool the glue allocates at start-up: -sPTHREAD_POOL_SIZE's literal, or 0038's library's default", () => {
+  const loop = (v) => `initMainThread(){var pthreadPoolSize=${v};while(pthreadPoolSize--){PThread.allocateUnusedWorker()}addOnPreRun(()=>{})}`;
+  assert.deepEqual(pthreadPool(`var PThread={${loop(24)}}`), { size: 24, form: "literal" }); // emsdk 6.0.5's -O3 shape, as since D3b and before 0038
+  assert.deepEqual(pthreadPool(`var PThread={${loop(4)}}`), { size: 4, form: "literal" });
+  const lib = 'function leanPoolInt(v,dflt,lo,hi){return dflt}var leanPthreadPoolTarget=leanPoolInt(Module["pthreadPoolSize"],24,0,64);';
+  assert.deepEqual(pthreadPool(`${lib}var PThread={${loop("leanPthreadPoolTarget")}}`), { size: 24, form: "0038" }); // the runtimes from 0038 to D3b
+  assert.deepEqual(pthreadPool(`var PThread={${loop("leanPthreadPoolTarget")}}`), { size: null, form: "0038" }); // the library's variable without its initializer
+  assert.deepEqual(pthreadPool("var PThread={initMainThread(){addOnPreRun(()=>{})}}"), { size: null, form: null }); // no pool at all (PTHREAD_POOL_SIZE=0)
+  assert.deepEqual(pthreadPool(runtimeOf().glue), { size: null, form: null });
 });
 
 test("the static checks fail what hosts would miss: an unbound or non-function export, a generated export, a dynamic module, a lost glue internal", () => {
@@ -422,12 +488,14 @@ test("the static checks fail what hosts would miss: an unbound or non-function e
   assert.equal(byLabel(results, /export-set gate of 0017/).ok, false);
   ({ results } = staticChecks({ ...runtimeOf(names, `/*${"x".repeat(1 << 20)}*/`) }));
   assert.equal(byLabel(results, /under 1 MiB/).ok, false);
-  for (const [cut, id] of [['throw"unwind"', '"unwind"'], ["pthread_ptr+204", "mailbox await"], ["exitOnMainThread,pthreadCreateProxied", "proxiedFunctionTable"],
-    ["runtimeKeepalivePush();callUserCallback", "checkMailbox"], ["var TTY=", "TTY"]]) {
+  // [cut, the item that fails, the line it fails: K6's (QED64's worker) or the rest of S6]
+  for (const [cut, id, line] of [['throw"unwind"', '"unwind"', /^S6 the \[GLUE\]/], ["pthread_ptr+204", "mailbox await", /^S6 the \[GLUE\]/],
+    ["exitOnMainThread,pthreadCreateProxied", "exit entries", /^S6 K6 /], ["exitOnMainThread,pthreadCreateProxied", "exit entries at [0] and [1]", /^S6 the \[GLUE\]/],
+    ["runtimeKeepalivePush();callUserCallback", "checkMailbox", /^S6 K6 /], ["var TTY=", "TTY", /^S6 the \[GLUE\]/]]) {
     const g = runtimeOf(names);
     ({ results } = staticChecks({ glue: g.glue.replace(cut, "/*cut*/"), wasmBytes: g.wasmBytes }));
-    assert.equal(byLabel(results, /^S6 the \[GLUE\]/).ok, false, cut);
-    assert.match(byLabel(results, /^S6 the \[GLUE\]/).extra, new RegExp(id.replace(/[[\]]/g, "\\$&")), cut);
+    assert.equal(byLabel(results, line).ok, false, cut);
+    assert.match(byLabel(results, line).extra, new RegExp(`(?:^|; )${id.replace(/[[\]]/g, "\\$&")}: `), cut);
   }
   // an unreadable lean.wasm fails S1 and S2 (the gate's fake-artifact test boots on such bytes)
   ({ results } = staticChecks({ glue: rt.glue, wasmBytes: Buffer.from("not wasm") }));
@@ -440,7 +508,7 @@ const OLD_GATE = "function qed64_symbol_exists(sym){if(!Module.qed64ExportSet){M
 const DYNAMIC = { customs: ["dylink.0"], imports: [["a", "b", 2], ["a", "c", 0], ["GOT.mem", "__heap_base", 3], ["GOT.func", "f", 3]] };
 const olderRuntime = (names, extraGlue = "") => runtimeOf(names, `${OLD_GATE}\n${extraGlue}`, DYNAMIC);
 
-test("an older runtime is held to what it promised: S1 skipped, S2 without the 0038/0039 names, S6 in full; the repository seed only from 0039", () => {
+test("an older runtime is held to what it promised: S1 skipped, S2 without the 0039 names, S6 in full; the repository seed only from 0039", () => {
   const base = CONTRACT.filter((c) => c.patch === null).map((c) => c.name);
   // before 0039 the glue binds the built-ins to globals only, not on Module (r3: `_pthread_self=wasmExports["pthread_self"]`)
   const builtins = 'function more(wasmExports){_pthread_self=wasmExports["pthread_self"];__emscripten_check_mailbox=wasmExports["_emscripten_check_mailbox"]}';
@@ -448,20 +516,25 @@ test("an older runtime is held to what it promised: S1 skipped, S2 without the 0
   assert.equal(level, "base");
   assert.equal(byLabel(results, /S1 skipped/).note, true);
   assert.equal(byLabel(results, /^S2/).ok, true, byLabel(results, /^S2/).extra);
+  assert.equal(byLabel(results, /^S6 K6 /).ok, true, byLabel(results, /^S6 K6 /).extra);
   assert.equal(byLabel(results, /^S6 the \[GLUE\]/).ok, true);
   ({ results } = staticChecks({ ...olderRuntime(base, builtins), seed: ["_lean_extra_from_the_seed"] }));
   assert.equal(byLabel(results, /^S2/).ok, true); // the seed binds a 0039 runtime only
   ({ results } = staticChecks(olderRuntime(base)));
-  assert.match(byLabel(results, /^S6 the \[GLUE\]/).extra, /_pthread_self, __emscripten_check_mailbox/); // no binding at all
-  const with0038 = [...base, "_lean_wasm_task_manager_stat", "_lean_wasm_engine_probes", "_lean_wasm_engine_guard_trips"];
-  ({ level } = staticChecks(olderRuntime(with0038)));
-  assert.equal(level, "0038");
-  assert.deepEqual(requiredExports("0038"), with0038);
+  // no binding at all: the kick is K6's (QED64's worker), _pthread_self the rest's (the copy lean4game pins)
+  assert.match(byLabel(results, /^S6 K6 /).extra, /^__emscripten_check_mailbox: /);
+  assert.match(byLabel(results, /^S6 the \[GLUE\]/).extra, /(?:^|; )_pthread_self: /);
+  // 0038's three counters are required of no runtime since D3b: a glue that still binds them is held to the rest
+  const counters0038 = ["_lean_wasm_task_manager_stat", "_lean_wasm_engine_probes", "_lean_wasm_engine_guard_trips"];
+  for (const lv of ["base", "0039", "0041"]) for (const n of counters0038) assert.equal(requiredExports(lv, []).includes(n), false, `${lv} ${n}`);
+  ({ level, results } = staticChecks(olderRuntime([...base, ...counters0038], builtins)));
+  assert.equal(level, "base"); // a glue with 0038's names and 0017's gate: there was a level "0038" until D3b
+  assert.equal(byLabel(results, /^S2/).ok, true, byLabel(results, /^S2/).extra);
   ({ results } = staticChecks({ ...runtimeOf(), seed: ["_lean_extra_from_the_seed"] }));
   assert.match(byLabel(results, /^S2/).extra, /_lean_extra_from_the_seed not bound on Module/);
 });
 
-test("a 0039 runtime whose glue lost _lean_wasm_symtab_stats is still 0039 (its static module, or its glue without 0017's gate, says so): S2 fails on the name", () => {
+test("a 0039 runtime whose glue lost _lean_wasm_symtab_stats is still 0039 (its static module, or a pre-D3b glue without 0017's gate, says so): S2 fails on the name", () => {
   const all = CONTRACT.map((c) => c.name);
   const lost = all.filter((n) => n !== "_lean_wasm_symtab_stats");
   let { level, results } = staticChecks({ ...runtimeOf(lost), seed: all });
@@ -469,16 +542,22 @@ test("a 0039 runtime whose glue lost _lean_wasm_symtab_stats is still 0039 (its 
   assert.equal(byLabel(results, /S1 no generated Lean name/).ok, true); // S1 ran
   assert.match(byLabel(results, /^S2/).label, new RegExp(`${all.length} names .*with the repository's seed`));
   assert.match(byLabel(results, /^S2/).extra, /_lean_wasm_symtab_stats not bound on Module/);
-  // a dynamically linked module, but a glue with 0038's names and without 0017's gate: 0039, and S1 fails the link
-  ({ level, results } = staticChecks(runtimeOf(lost, "", DYNAMIC)));
+  // a glue from 0038 until D3b (it binds 0038's counter export), dynamically linked, without 0017's gate: 0039, and S1 fails the link
+  const MARK_0038 = 'Module["_lean_wasm_task_manager_stat"]=wasmExports["zz"];';
+  ({ level, results } = staticChecks(runtimeOf(lost, MARK_0038, DYNAMIC)));
   assert.equal(level, "0039");
   assert.equal(byLabel(results, /statically linked module/).ok, false);
-  // the same with 0017's gate is a 0038 runtime; without lean.wasm the glue alone decides
-  assert.equal(staticChecks(runtimeOf(lost, OLD_GATE, DYNAMIC)).level, "0038");
-  assert.equal(contractLevel(runtimeOf(lost).glue), "0039");
-  assert.equal(contractLevel(runtimeOf(lost).glue + OLD_GATE), "0038");
+  // the same with 0017's gate is held to the base contract; without lean.wasm the glue alone decides
+  assert.equal(staticChecks(runtimeOf(lost, `${MARK_0038}\n${OLD_GATE}`, DYNAMIC)).level, "base");
+  assert.equal(contractLevel(runtimeOf(lost).glue + MARK_0038), "0039");
+  assert.equal(contractLevel('var leanPthreadPoolTarget=leanPoolInt(Module["pthreadPoolSize"],24,0,64);'), "0039"); // 0038's pool variable marks it too
+  assert.equal(contractLevel(runtimeOf(lost).glue + MARK_0038 + OLD_GATE), "base");
   assert.equal(contractLevel(runtimeOf(lost).glue + OLD_GATE, readWasm(runtimeOf(lost).wasmBytes)), "0039"); // static wins
   assert.equal(contractLevel(OLD_GATE, readWasm(Buffer.from("not wasm"))), "base");
+  // a glue from D3b on carries no 0038 name: alone it reads "base", and S2 still fails, as lean.wasm is unreadable
+  assert.equal(contractLevel(runtimeOf(lost).glue), "base");
+  ({ results } = staticChecks({ glue: runtimeOf(lost).glue, wasmBytes: Buffer.from("not wasm") }));
+  assert.equal(byLabel(results, /^S2/).ok, false);
 });
 
 test("runtime-contract.mjs's copy of the contract is src/emscripten-exports.seed.txt", (t) => {

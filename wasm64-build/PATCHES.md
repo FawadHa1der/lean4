@@ -26,7 +26,7 @@ follow below. Summary:
 | 0016 | **Replay-control flags on `lean_wasm_load_snapshot_mem`** (bit 0 = run the `[init]` replay; extension states come from the region, the replay rebuilds process-side registrations) | **retired** by the architecture review's R11a (every caller passed 1): the replay always runs; `flags` stays in the export's signature, ignored |
 | 0017 | **Interpreter dlsym probes gated on the wasm export table**: `lookup_symbol_in_cur_exe` consults a one-time `Set` of export names before calling dlsym | **as-is** for the Emscripten target — turns a 173 s pathology into ~1 s (below). **Superseded by 0039** (an in-module table, no dlsym, no JS); a 2-line `#ifdef` skeleton remains |
 | 0018 | **Host-pumped LSP file worker** (`lean_wasm_lsp_init` / `lean_wasm_lsp_send`): drive a single-file server session one message at a time when a blocking stdin is impossible (WASM event-loop hosts); forces `server.reportDelayMs := 0` (timed sleeps on dedicated pthreads do not wake under this build) | **retired** by 0033: the resident transport (0031/0032) replaced it |
-| 0019 | **24 preallocated pthread workers, 8 MiB thread stacks**: every `ServerTask` is `prio := .dedicated`, and synchronous `pthread_create` under Emscripten can only claim preallocated workers | needed by any wasm host running the language server; no line of it is left, its settings live on rewritten: the pool of 24 in 0038's `src/emscripten-pthread-pool.js`, the 8 MiB stacks in `src/CMakeLists.txt` (`-sDEFAULT_PTHREAD_STACK_SIZE=8388608`) |
+| 0019 | **24 preallocated pthread workers, 8 MiB thread stacks**: every `ServerTask` is `prio := .dedicated`, and synchronous `pthread_create` under Emscripten can only claim preallocated workers | needed by any wasm host running the language server; no line of it is left, its settings live on rewritten in `src/CMakeLists.txt`: the pool of 24 (`-sPTHREAD_POOL_SIZE=24`, again since the architecture review's D3b; from 0038 until then the default of 0038's `src/emscripten-pthread-pool.js`) and the 8 MiB stacks (`-sDEFAULT_PTHREAD_STACK_SIZE=8388608`) |
 | 0020 | **Keepalive-guard emscripten's `$checkMailbox`** (build-image patch to emsdk 6.0.5): mailbox servicing ran through `callUserCallback`→`maybeExit`, which `_exit()`s an EXIT_RUNTIME=1 runtime with no keepalives — terminating the pthread blocked in `emscripten_proxy_sync` right after its proxied op executed. Reproduced in 30 lines of pure C on stock wasm32 | **upstream emscripten PR ready** — see docs/EMSDK-BUG-REPORT.md |
 | 0021 | **Pre-built header environments** (`Language.Lean.prebuiltHeaderEnvs`, consulted by `processHeader` before the disk import; populated by `lean_wasm_lsp_init` from the wasm env cache): olean reads from elaboration pthreads proxy to the host and stall under WORKERFS | the hook shape is upstream-plausible for any embedder pre-importing on a preferred thread |
 | 0022 | **Flush the worker's LSP output after each message**: frame bodies have no trailing newline; a line-buffered host stream held them until the next message, whose bytes a framed reader ate as the missing body | **retired**: upstream already flushed after each message; only a comment is left |
@@ -538,6 +538,23 @@ a build by the commits the headings name, so an entry left unnamed would stage a
 as 0037; `stage-release.sh` refuses a heading spelled `## Unreleased: …`. The fixes from the
 review of 0038-0039b (r0038) are a later commit; these entries describe the result.)
 
+**Mostly removed again by the architecture review's D3b** (approved by the user 2026-11-01, for
+the next runtime release: v4.36's). No host set the pool size or either exit, and none read the
+counters (grep of QED64, lean4game, the widgets showcase and the proof sheets), so they are gone,
+the counters inside 0036's guard path included: that path's freeze names them as its one
+exception, and its two sites are 0036's again (with 0044's key). The pool is 24 Workers again
+(`-sPTHREAD_POOL_SIZE=24` in `src/CMakeLists.txt`; `src/emscripten-pthread-pool.js` is deleted),
+and the JavaScript contract lost `lean_wasm_task_manager_stat`, `lean_wasm_engine_probes` and
+`lean_wasm_engine_guard_trips` (25 names). What stays of 0038: on wasm the standard workers are
+counted and created detached; `wasm_knob` (r0038's parser) reads 0035's `LEAN_WASM_PARKED_DEDICATED`,
+the one task-manager knob left; `LEAN_EXE_LINK_DEPS` relinks on a change to the export list.
+Gone from the tools with them: `js/runtime-knobs.mjs`'s pool key and `runtimeStats`, node-runner's
+`[rtstats?]` answer, `js/probes/thread-knobs.lean`, the ten `[0038]` gate checks and the unit
+tests of all these; the gate checks the glue's pool of 24 statically instead. A host that still sets
+`Module.pthreadPoolSize`, `LEAN_WASM_STD_SURPLUS_EXIT` or `LEAN_WASM_PARKED_IDLE_MS` changes
+nothing. The text below describes 0038 as it shipped, in lean-v4.34.0-53cb11e, lean-v4.35.0-b081e7c
+and lean-v4.35.0-0bf1fb2.
+
 Every live pthread holds an Emscripten Worker, and in a browser each Worker is a V8 isolate of
 ~129 MiB in a renderer whose pointer-compression cage fits about 30 of them (EMBED-RUNTIME.md §6;
 qed64 HARDENING #55, #69, #70). This patch gives the host the size of the pool and two opt-in ways
@@ -690,7 +707,8 @@ through JavaScript (`Object.keys(…).indexOf` over the exports, under the dynam
   `_main`, `_lean_wasm_reset`, the 0038 and 0039 gauges, and the three Emscripten built-ins hosts
   reach (`__emscripten_proxy_main`, `__emscripten_check_mailbox`, `_pthread_self`, now also bound
   on `Module`): 27 names (`_lean_wasm_reset`, which no host called, left it and the runtime with
-  the architecture review's R11a). 749 names left it: 221 `@[export]` names (table entries now), 527 C++
+  the architecture review's R11a, and 0038's three counters, which no host read, with its D3b).
+  749 names left it: 221 `@[export]` names (table entries now), 527 C++
   `lean_*` functions no JavaScript calls (the interpreter's keys are never C names: an
   `@[extern]` decl is reached through its boxed wrapper), and `initialize_libuv`. The generator's
   "runtime API defined but not in the seed" report is retired: "every `lean_*` C symbol is

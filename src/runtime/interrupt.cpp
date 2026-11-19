@@ -88,9 +88,7 @@ LEAN_EXPORT scope_rec_depth::scope_rec_depth() {
     // advice (raise maxRecDepth) would not help. The string is a key, not prose:
     // KernelException.toMessageData matches it, owns the English and adds the tag.
     if (g_rec_depth == 1 || g_rec_depth >= g_engine_probe_depth) {
-        note_engine_probe(); // 0038: counted for lean_wasm_engine_probes; the guard is unchanged
         if (!engine_stack_has_headroom()) {
-            note_engine_guard_trip(0);
             g_rec_depth--;
             throw exception("wasm.stackExhausted");
         }
