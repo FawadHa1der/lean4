@@ -12,10 +12,24 @@
 //    gate's S6 guards;
 //  - glue globals reached by name (`self.X`, `globalThis.X`, `M.X`, `Module.X`, at any link of a
 //    chain such as `globalThis.Module.X`, `typeof X`) that the glue declares (--glue <lean.js>: its `var`/`function` names, standard globals left out);
-//    each must be one S6 guards ([GLUE], runtime-contract.mjs GLUE_NAMES), a runtime method or a
-//    Module input;
-//  - the members used of PThread, TTY and FS (listed, not judged: those objects are kept whole).
-// Exit 0 when every name is known, 1 when one is not (listed as UNKNOWN or UNGUARDED), 2 usage (a
+//    each must be one S6 guards ([GLUE], runtime-contract.mjs GLUE_NAMES), a runtime method
+//    (RUNTIME_METHODS) or a Module input;
+//  - BARE reads of what exists on Module only (runtime-contract.mjs moduleOnly: since emsdk 7 the
+//    runtime methods getValue, setValue, ccall, stringToNewUTF8, and every export but _malloc,
+//    _pthread_self, __emscripten_proxy_main and __emscripten_check_mailbox have no global binding),
+//    in code (comments and string, template and regex literals left out; of an .html file, its
+//    <script> elements): such a name read off the global scope (`self.X`, `globalThis.X`,
+//    `window["X"]`) or in `typeof X`; an export named bare (`_free(p)`); and, in a file whose code
+//    names Module, importScripts or FS, one of the four methods named bare (`getValue(p, "i64")`;
+//    elsewhere such a name is the file's own, as a React state setter `setValue`). Named bare is
+//    not an object key, a method definition or TS signature, nor a declaration of that name (a
+//    `function getValue` of the file's own). A name a host destructured from Module is listed too:
+//    judge it;
+//  - the members used of PThread, TTY and FS (listed, not judged: those objects are kept whole; with
+//    --glue, a member the glue's text never names is marked, e.g. FS.filesystems on emsdk 7, for a
+//    human to judge: `PT.` also matches minified third-party code, and a member the previous glue
+//    lacked too is no change).
+// Exit 0 when every name is known, 1 when one is not (listed as UNKNOWN, UNGUARDED or BARE), 2 usage (a
 // missing directory, --glue or --seed file included).
 //
 // Usage: node exports-audit.mjs [--glue <lean.js>] [--seed <emscripten-exports.seed.txt>] [--json] <dir>…
@@ -23,16 +37,19 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { CONTRACT, GLUE_NAMES, parseSeed } from "./runtime-contract.mjs";
+import { CONTRACT, GLUE_NAMES, MODULE_ONLY_METHODS, RUNTIME_METHODS, moduleOnly, parseSeed } from "./runtime-contract.mjs";
 
 const USAGE = "usage: exports-audit.mjs [--glue <lean.js>] [--seed <emscripten-exports.seed.txt>] [--json] <dir>…";
 const argv = process.argv.slice(2);
 if (argv.includes("--help") || argv.includes("-h")) {
   console.log(`${USAGE}\nWhat consumer trees' JavaScript touches on the runtime (exports, glue globals, PThread/TTY/FS members),\n`
-    + "classified against the export contract and the glue surface the gate's S6 guards (kernel patch 0039).\n"
+    + "classified against the export contract and the glue surface the gate's S6 guards (kernel patch 0039), and\n"
+    + "BARE reads of Module-only names (the Module-only runtime methods and exports) in code, comments and strings\n"
+    + "left out: off the global scope or in typeof, an export named bare, a method named bare in a file naming\n"
+    + "Module, importScripts or FS. The members a --glue never names are marked, for a human to judge.\n"
     + "--glue: a built lean.js, whose declared names make glue reach-ins recognizable; --seed: the contract (default:\n"
     + "the repository's src/emscripten-exports.seed.txt when this file runs from it, else runtime-contract.mjs's copy).\n"
-    + "exit codes: 0 every name known, 1 an UNKNOWN export or an UNGUARDED glue global, 2 usage");
+    + "exit codes: 0 every name known, 1 an UNKNOWN export, an UNGUARDED glue global or a BARE read, 2 usage");
   process.exit(0);
 }
 const opts = { glue: null, seed: null, json: false, dirs: [] };
@@ -53,7 +70,9 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const seedFile = opts.seed ?? path.join(here, "..", "..", "src", "emscripten-exports.seed.txt");
 const contract = new Set(fs.existsSync(seedFile) ? parseSeed(fs.readFileSync(seedFile, "utf8")) : CONTRACT.map((c) => c.name));
 if (opts.seed && !fs.existsSync(opts.seed)) { console.error(`exports-audit: ${opts.seed} not found`); process.exit(2); }
-const glueKnown = new Set(GLUE_NAMES);
+const glueKnown = new Set(GLUE_NAMES), methods = new Set(RUNTIME_METHODS);
+const contractNames = [...contract];
+const isModuleOnly = (name) => moduleOnly(name, contractNames);
 // what a host may read on Module besides the glue's own: its inputs (EMBED-RUNTIME.md §3.1)
 const MODULE_INPUTS = new Set(["wasmMemory", "INITIAL_MEMORY", "noInitialRun", "arguments", "locateFile",
   "mainScriptUrlOrBlob", "print", "printErr", "preRun", "onRuntimeInitialized", "onAbort", "onExit", "setStatus", "ENV"]);
@@ -138,10 +157,11 @@ function glueGlobals(src) {
   return names;
 }
 
-let glueDeclared = null;
+let glueDeclared = null, glueText = null;
 if (opts.glue) {
   if (!fs.statSync(opts.glue, { throwIfNoEntry: false })?.isFile()) { console.error(`exports-audit: ${opts.glue} not found\n${USAGE}`); process.exit(2); }
-  glueDeclared = glueGlobals(fs.readFileSync(opts.glue, "utf8"));
+  glueText = fs.readFileSync(opts.glue, "utf8");
+  glueDeclared = glueGlobals(glueText);
   for (const n of glueDeclared) if (n in globalThis) glueDeclared.delete(n);
 }
 
@@ -149,6 +169,25 @@ const SKIP_DIRS = new Set(["node_modules", ".git", ".lake", "dist"]);
 const EXTENSIONS = /\.(m?js|cjs|m?ts|cts|tsx|jsx|html)$/;
 const RUNTIME_NAME = /^_{1,2}(?:lean_|l_|lp_|initialize_|runtime_initialize_|meta_initialize_|emscripten_|malloc$|free$|main$|pthread_self$|proc_exit$)/;
 const isGlueCopy = (text) => /function assignWasmExports\(|var Module\s*=\s*typeof Module\s*!=/.test(text);
+// the objects that are the global scope, where a Module-only name has no binding
+const GLOBAL_SCOPE = new Set(["self", "globalThis", "window"]);
+/** `text` with its comments and its string, template and regex literals blanked, offsets kept: code
+ *  alone, for the BARE scans; of an HTML file, its <script> elements alone. A regex literal is one after
+ *  `(`, `,`, `=`, `:`, `[`, `!`, `&`, `|`, `?`, `{`, `}`, `;`, `>` (an arrow's `=>`) or `return`:
+ *  approximate, as the rest of this audit. Read as code, the `//` of `(s) => /^https?:\/\//` would blank
+ *  the rest of its line, and a quote in such a literal would open a string. */
+const LITERALS = new RegExp([/\/\/[^\n]*/, /\/\*[\s\S]*?\*\//, /"(?:[^"\\\n]|\\.)*"/, /'(?:[^'\\\n]|\\.)*'/, /`(?:[^`\\]|\\[\s\S])*`/,
+  /(?<=(?:[(,=:[!&|?{};>]|\breturn)\s*)\/(?![*/])(?:[^/\\\n[]|\\.|\[(?:[^\]\\\n]|\\.)*\])+\/[A-Za-z]*/].map((r) => r.source).join("|"), "g");
+const blank = (m) => m.replace(/[^\n]/g, " ");
+const codeOnly = (text, file) => (/\.html$/i.test(file) ? text.replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>|[^\n]/gi, (m) => (m.length > 1 ? m : " ")) : text)
+  .replace(LITERALS, blank);
+// `name` named bare in code: not read off an object (`.x`), not a key (`x:`, `x?:`), a method definition
+// or TS signature (`x(…) {`, `x?(…): T`), nor a declaration of a name of the host's own (`function x`, `const x`)
+const namedBare = (name) => new RegExp(String.raw`(?<![\w$.])(?<!\b(?:function|class|var|let|const)\s+)(${name})\b(?!\s*[?!]?\s*:)(?!\s*[?!]?\s*\([^()]*\)\s*[:{])`, "g");
+// an export, and one of the four Module-only methods; a method only in a file whose code names Module,
+// importScripts or FS (the glue's world): elsewhere the name is the file's own, as a React state setter `setValue`
+const BARE_EXPORT = namedBare(String.raw`_{1,2}[A-Za-z]\w*`), BARE_METHOD = namedBare(MODULE_ONLY_METHODS.join("|"));
+const NAMES_GLUE = /(?<![\w$])(?:Module|importScripts|FS)(?![\w$])/;
 
 const uses = new Map();   // key -> { kind, name, files: Set }
 const note = (kind, name, file) => {
@@ -163,11 +202,22 @@ function scanFile(file, shown) {
   const text = fs.readFileSync(file, "utf8");
   if (isGlueCopy(text)) { skippedGlue++; return; }
   files++;
+  // the code alone, its offsets those of `text`: a match of `text` is a read (BARE) only where its first word is code
+  const code = codeOnly(text, file), inCode = (m, word) => code.startsWith(word, m.index);
   for (const m of text.matchAll(/(?:\??\.|\[\s*["'`]|\b)(_{1,2}[A-Za-z][\w]*)/g)) if (RUNTIME_NAME.test(m[1])) note("export", m[1], shown);
-  // a lookahead, so a chain is read at every link: `globalThis.Module.HEAPU8` is Module and HEAPU8
-  for (const m of text.matchAll(/\b(?=(?:self|globalThis|window|M|Module)\??\.([A-Za-z$][\w$]*))/g)) note("global", m[1], shown);
+  // a lookahead, so a chain is read at every link: `globalThis.Module.HEAPU8` is Module and HEAPU8. A Module-only
+  // name read off the global scope or in typeof is BARE where it is code; in a comment or a string, a name reached
+  for (const m of text.matchAll(/\b(?=(self|globalThis|window|M|Module)\??\.([A-Za-z$][\w$]*))/g))
+    note(GLOBAL_SCOPE.has(m[1]) && isModuleOnly(m[2]) && inCode(m, m[1]) ? "bare" : "global", m[2], shown);
   for (const m of text.matchAll(/\bModule\[\s*["']([A-Za-z$][\w$]*)["']\s*\]/g)) note("global", m[1], shown);
-  for (const m of text.matchAll(/\btypeof\s+([A-Za-z_$][\w$]*)/g)) note("typeof", m[1], shown);
+  for (const m of text.matchAll(/\btypeof\s+([A-Za-z_$][\w$]*)/g)) note(isModuleOnly(m[1]) && inCode(m, "typeof") ? "bare" : "typeof", m[1], shown);
+  // Module-only names off the global scope, dotted (an export: `self._free`) or bracketed (`globalThis["_lean_mk_string"]`:
+  // the code-only text blanks the string, so this reads the raw text, its object in code)
+  for (const m of text.matchAll(/\b(self|globalThis|window)\s*(?:\??\.\s*|\[\s*["'`])(_{1,2}[A-Za-z]\w*|[A-Za-z$][\w$]*)/g))
+    if (isModuleOnly(m[2]) && inCode(m, m[1])) note("bare", m[2], shown);
+  // named bare in code: a Module-only export (`_free(p)`); in the glue's world, a Module-only method (`getValue(p, "i64")`)
+  for (const m of code.matchAll(BARE_EXPORT)) if (isModuleOnly(m[1])) note("bare", m[1], shown);
+  if (NAMES_GLUE.test(code)) for (const m of code.matchAll(BARE_METHOD)) note("bare", m[1], shown);
   for (const m of text.matchAll(/\b(PThread|PT|TTY|FS)\??\.([A-Za-z_$][\w$]*)/g)) note("member", `${m[1] === "PT" ? "PThread" : m[1]}.${m[2]}`, shown);
 }
 function walk(dir, root) {
@@ -180,7 +230,7 @@ function walk(dir, root) {
 for (const d of opts.dirs) walk(path.resolve(d), path.resolve(d));
 
 // classify
-const report = { contract: [], glue: [], unknown: [], guarded: [], unguarded: [], members: [] };
+const report = { contract: [], glue: [], unknown: [], guarded: [], unguarded: [], bare: [], members: [] };
 const where = (u) => [...u.files].slice(0, 3).join(", ") + (u.files.size > 3 ? ` +${u.files.size - 3}` : "");
 for (const u of uses.values()) {
   const row = { name: u.name, files: [...u.files] };
@@ -189,23 +239,31 @@ for (const u of uses.values()) {
     if (contract.has(u.name) || contract.has(`_${u.name}`)) report.contract.push(row);
     else if (glueKnown.has(u.name) || glueKnown.has(`_${u.name}`)) report.glue.push(row);
     else report.unknown.push(row);
+  } else if (u.kind === "bare") {
+    report.bare.push(row);
   } else if (u.kind === "member") {
+    // with --glue, a member the glue's text never names (FS.filesystems on emsdk 7) is marked
+    if (glueText && !new RegExp(`(?<![\\w$])${u.name.split(".")[1].replace(/\$/g, "\\$")}(?![\\w$])`).test(glueText)) row.absent = true;
     report.members.push(row);
   } else if (!RUNTIME_NAME.test(u.name)) {
     // a non-export name is a reach-in only when the glue declares it (or it is one S6 knows)
-    const declared = glueDeclared ? glueDeclared.has(u.name) : glueKnown.has(u.name);
-    if (!declared && !glueKnown.has(u.name) && !MODULE_INPUTS.has(u.name)) continue;
-    if (glueKnown.has(u.name) || MODULE_INPUTS.has(u.name)) report.guarded.push(row);
+    const known = glueKnown.has(u.name) || methods.has(u.name) || MODULE_INPUTS.has(u.name);
+    const declared = glueDeclared ? glueDeclared.has(u.name) : known;
+    if (!declared && !known) continue;
+    if (known) report.guarded.push(row);
     else report.unguarded.push(row);
   }
 }
 // one row per name (a name reached as `self.X` and as `typeof X` is one reach-in), its files merged
 for (const k of Object.keys(report)) {
   const byName = new Map();
-  for (const r of report[k]) byName.set(r.name, [...new Set([...(byName.get(r.name) ?? []), ...r.files])]);
-  report[k] = [...byName].map(([name, files]) => ({ name, files })).sort((a, b) => a.name.localeCompare(b.name));
+  for (const r of report[k]) {
+    const prev = byName.get(r.name);
+    byName.set(r.name, { ...r, files: [...new Set([...(prev?.files ?? []), ...r.files])] });
+  }
+  report[k] = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
-const bad = report.unknown.length + report.unguarded.length;
+const bad = report.unknown.length + report.unguarded.length + report.bare.length;
 
 if (opts.json) {
   console.log(JSON.stringify({ files, skippedGlueCopies: skippedGlue, contract: [...contract], ...report }, null, 1));
@@ -218,11 +276,15 @@ if (opts.json) {
   line("exports in the contract", report.contract);
   line("glue built-ins the gate's S6 guards", report.glue);
   line("UNKNOWN exports (neither in the contract nor a guarded glue name)", report.unknown);
-  line("glue globals reached by name, guarded by S6 or Module inputs", report.guarded);
+  line("glue globals and runtime methods reached by name, guarded by S6 or Module inputs", report.guarded);
   line("UNGUARDED glue globals (the glue declares them; nothing checks they survive a link)", report.unguarded);
+  line("BARE reads of Module-only names (no global binding since emsdk 7: read them on Module)", report.bare);
   const byObject = new Map();
-  for (const r of report.members) { const [o, m] = r.name.split("."); byObject.set(o, [...(byObject.get(o) ?? []), m]); }
+  for (const r of report.members) {
+    const [o, m] = r.name.split(".");
+    byObject.set(o, [...(byObject.get(o) ?? []), r.absent ? `${m} (not in --glue)` : m]);
+  }
   for (const [o, ms] of byObject) console.log(`members of ${o}: ${ms.join(", ")}`);
-  console.log(bad ? `\nAUDIT: ${bad} name(s) the contract and S6 do not cover` : "\nAUDIT: every name is covered");
+  console.log(bad ? `\nAUDIT: ${bad} name(s) the contract and S6 do not cover, or read bare` : "\nAUDIT: every name is covered");
 }
 process.exitCode = bad ? 1 : 0;

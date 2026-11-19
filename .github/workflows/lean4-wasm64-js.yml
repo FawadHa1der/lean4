@@ -29,8 +29,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # the package, what test/runtime-knobs.test.mjs reads of the runtime's link, and the
-          # JS export contract test/symtab.test.mjs compares with runtime-contract.mjs
+          # the package, what test/runtime-knobs.test.mjs (the pool) and test/symtab.test.mjs (the
+          # runtime methods) read of the runtime's link, and the JS export contract
+          # test/symtab.test.mjs compares with runtime-contract.mjs
           sparse-checkout: |
             /wasm64-build/
             /src/CMakeLists.txt

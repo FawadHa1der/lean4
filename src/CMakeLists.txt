@@ -195,8 +195,10 @@ if(CMAKE_SYSTEM_NAME MATCHES "Emscripten")
   # operational ceiling (released runtimes set 16 GiB: docker-wasm64/configure-qed64.sh).
   # Current engines and Emscripten can grow shared memory;
   # keep INITIAL_MEMORY modest so startup does not commit the full working set.
-  # INCOMING_MODULE_JS_API: emsdk 6 strictly validates Module keys supplied by
-    # the embedder; the playground workers set all of these before load.
+  # INCOMING_MODULE_JS_API: the glue reads only the Module keys listed. An
+    # ASSERTIONS build aborts when the embedder supplies another of Emscripten's
+    # own incoming keys (keys of the embedder's own are ignored), on emsdk 6.0.5
+    # and 7.0.0 alike; the playground workers set all of these before load.
     # Threads: 4.33's import machinery creates IO.Promises during env
     # realization, and without LEAN_MULTI_THREAD the task manager is a no-op,
     # so Promise.new panics by design. A single-thread (no COOP/COEP, phone-
@@ -226,7 +228,10 @@ if(CMAKE_SYSTEM_NAME MATCHES "Emscripten")
       # ensures generated Lean C, runtime C++, and the final link all agree.
       string(APPEND EMSCRIPTEN_SETTINGS " -m64")
     endif()
-    set(EMSCRIPTEN_LINK_SETTINGS "-sALLOW_MEMORY_GROWTH=1 -sINCOMING_MODULE_JS_API=print,printErr,setStatus,locateFile,mainScriptUrlOrBlob,INITIAL_MEMORY,wasmMemory,noInitialRun,preRun,onRuntimeInitialized,onAbort,onExit,arguments,ENV -sMALLOC=mimalloc")
+    # -sDEFAULT_TO_CXX=1: the wasm executables link through leanc, i.e. emcc, not em++, and emcc
+    # ignores -lstdc++. Since emsdk 6.0.6 (emscripten#27469) emcc links libc++ and libc++abi only
+    # as em++ or with DEFAULT_TO_CXX, so without it the `lean` link misses the C++ runtime.
+    set(EMSCRIPTEN_LINK_SETTINGS "-sALLOW_MEMORY_GROWTH=1 -sINCOMING_MODULE_JS_API=print,printErr,setStatus,locateFile,mainScriptUrlOrBlob,INITIAL_MEMORY,wasmMemory,noInitialRun,preRun,onRuntimeInitialized,onAbort,onExit,arguments,ENV -sMALLOC=mimalloc -sDEFAULT_TO_CXX=1")
 
   # EMSCRIPTEN_DEBUG: Enable readable function names and assertions for debugging
   # This makes the WASM larger and slower but shows actual function names in stack traces
@@ -237,10 +242,12 @@ if(CMAKE_SYSTEM_NAME MATCHES "Emscripten")
     # --profiling-funcs keeps a name section (accurate, non-folded stack traces)
     # without the size blow-up of -g3; -sASSERTIONS=1 surfaces real abort/OOM
     # messages instead of a bare `unreachable`.
-    # ASSERTIONS=1 is broken on emsdk 6 pthread workers: the stack-cookie
-    # checks call growMemViews() before the load message delivers wasmMemory
+    # ASSERTIONS=1 broke pthread workers on emsdk 6: the stack-cookie checks
+    # call growMemViews() before the load message delivers wasmMemory
     # ("Cannot read properties of undefined (reading 'buffer')" at boot).
-    # Keep the name section for symbolizing traces.
+    # Unverified on emsdk 7.0.0, which needs a debug build to settle
+    # (emscripten#27711, a growMemViews-before-load crash of pool workers under
+    # EXPORT_ALL, was fixed in 6.0.10). Keep the name section for symbolizing traces.
     string(APPEND EMSCRIPTEN_SETTINGS " --profiling-funcs")
   endif()
 
@@ -1026,9 +1033,11 @@ if(CMAKE_SYSTEM_NAME MATCHES "Emscripten")
   # MAXIMUM_MEMORY is an address-space ceiling, not an eager physical
   # allocation. wasm64 uses 128MB initially and may grow to EMSCRIPTEN_MAXIMUM_MEMORY
   # (12GB by default; 16 GiB in released runtimes, docker-wasm64/configure-qed64.sh).
+  # NODEFS and WORKERFS are exported (Module.NODEFS, Module.WORKERFS): hosts mount them, and since
+  # emsdk 6.0.13 (emscripten#27940) the glue no longer lists them in FS.filesystems.
   string(
     APPEND LEAN_EXE_LINKER_FLAGS
-    " ${LIB}/temp/libleanshell.a ${TOOLCHAIN_STATIC_LINKER_FLAGS} ${EMSCRIPTEN_SETTINGS} ${EMSCRIPTEN_LINK_SETTINGS} -lnodefs.js -lworkerfs.js -s EXIT_RUNTIME=1 -s ERROR_ON_UNDEFINED_SYMBOLS=0 -sALLOW_TABLE_GROWTH=1 --emit-symbol-map -sEXPORTED_FUNCTIONS=@${LEAN_SOURCE_DIR}/emscripten-exports.txt -sEXPORTED_RUNTIME_METHODS=ccall,callMain,FS,ENV,getValue,setValue,stringToNewUTF8,UTF8ToString -s STACK_SIZE=16777216 -sINITIAL_MEMORY=${EMSCRIPTEN_INITIAL_MEMORY} -sMAXIMUM_MEMORY=${EMSCRIPTEN_MAXIMUM_MEMORY} -sDEFAULT_PTHREAD_STACK_SIZE=8388608 -sPROXY_TO_PTHREAD=1"
+    " ${LIB}/temp/libleanshell.a ${TOOLCHAIN_STATIC_LINKER_FLAGS} ${EMSCRIPTEN_SETTINGS} ${EMSCRIPTEN_LINK_SETTINGS} -lnodefs.js -lworkerfs.js -s EXIT_RUNTIME=1 -s ERROR_ON_UNDEFINED_SYMBOLS=0 -sALLOW_TABLE_GROWTH=1 --emit-symbol-map -sEXPORTED_FUNCTIONS=@${LEAN_SOURCE_DIR}/emscripten-exports.txt -sEXPORTED_RUNTIME_METHODS=ccall,callMain,FS,ENV,getValue,setValue,stringToNewUTF8,UTF8ToString,NODEFS,WORKERFS -s STACK_SIZE=16777216 -sINITIAL_MEMORY=${EMSCRIPTEN_INITIAL_MEMORY} -sMAXIMUM_MEMORY=${EMSCRIPTEN_MAXIMUM_MEMORY} -sDEFAULT_PTHREAD_STACK_SIZE=8388608 -sPROXY_TO_PTHREAD=1"
   )
   # The pthread pool: 24 Workers created (and loaded) at start-up, so a thread can
   # start without the main JS thread waiting for a new Worker to boot (patch 0019:

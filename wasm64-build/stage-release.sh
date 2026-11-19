@@ -69,8 +69,8 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 JS="$REPO/wasm64-build/js"
 LINE=qed64-wasm64
-IMG=qed64-toolchain:emsdk-6.0.5
-BASE_IMG=emscripten/emsdk:6.0.5
+IMG=qed64-toolchain:emsdk-7.0.0
+BASE_IMG=emscripten/emsdk:7.0.0
 if ! git --version >/dev/null 2>&1 && [ -d /Library/Developer/CommandLineTools ]; then
   export DEVELOPER_DIR=/Library/Developer/CommandLineTools
 fi
@@ -441,10 +441,30 @@ git cat-file -e "$NATIVE^{commit}" 2>/dev/null || die "native commit $NATIVE is 
 TOOLS_COMMIT="$(git rev-parse HEAD)"
 PKG_VERSION="$(node -p 'require(process.argv[1]).version' "$JS/package.json")"
 [ "$PKG_VERSION" = "$V-$K7${RECUT:+-r$RECUT}" ] || die "wasm64-build/js/package.json version is $PKG_VERSION, the release needs $V-$K7${RECUT:+-r$RECUT} (bump and commit it first)"
+# The docker block describes ONE image (js/formats/release.md): IMG and BASE_IMG are this script's
+# own (the running file's), RECIPE the recipe the runtime was built from. Unchecked, a by-value
+# staging of a runtime built on another base (a re-cut of a release built before an emsdk move,
+# staged after it) would record this script's image beside that recipe. Git only: before Docker and
+# before the first write. An empty RECIPE must stop here, or the read below would take the index's.
+RECIPE="$(git log -1 --format=%H "$C" -- docker-wasm64)"
+[ -n "$RECIPE" ] || die "no commit in ${C:0:10}'s history touches docker-wasm64: no toolchain recipe to record"
+FROM_AT_RECIPE="$(git show "$RECIPE:docker-wasm64/Dockerfile" | awk '$1 == "FROM" && !n++ { print $2 }')" \
+  || die "cannot read docker-wasm64/Dockerfile at ${RECIPE:0:10}"
+[ "${FROM_AT_RECIPE%@*}" = "$BASE_IMG" ] \
+  || die "kernel ${C:0:10} was built from the docker-wasm64 recipe at ${RECIPE:0:10} (FROM ${FROM_AT_RECIPE:-nothing}), but this script records $IMG on $BASE_IMG: stage it from a commit whose stage-release.sh names that recipe's image (an older release's re-cut: a branch off its record commit, RELEASE.md)"
+# native64, and the packs it compiles, come from the import build dir $K (native commit $NATIVE). When
+# its recipe is not the runtime's (a runtime-only cut across an emsdk move), the record says so: the
+# docker block is the runtime's. (By reference such a cut is refused: stage-by-reference.mjs.)
+if ! git diff --quiet "$NATIVE" "$C" -- docker-wasm64; then
+  NATIVE_RECIPE="$(git log -1 --format=%H "$NATIVE" -- docker-wasm64)"
+  NATIVE_FROM=""
+  [ -z "$NATIVE_RECIPE" ] || NATIVE_FROM="$(git show "$NATIVE_RECIPE:docker-wasm64/Dockerfile" | awk '$1 == "FROM" && !n++ { print $2 }')" || NATIVE_FROM=""
+  NOTES+=("native64 (${NATIVE:0:10}) and the packs it compiled were built with the docker-wasm64 recipe at ${NATIVE_RECIPE:0:10} (FROM ${NATIVE_FROM:-unknown}), not the runtime's at ${RECIPE:0:10} (FROM $FROM_AT_RECIPE), which the docker block records")
+  say "note: ${NOTES[${#NOTES[@]}-1]}"
+fi
 IMAGE_ID="$(docker image inspect "$IMG" --format '{{.Id}}' 2>/dev/null)" || die "toolchain image $IMG is not local (docker build docker-wasm64)"
 BASE_DIGEST="$(docker image inspect "$BASE_IMG" --format '{{index .RepoDigests 0}}' 2>/dev/null)" || die "base image $BASE_IMG is not local: its digest is part of the release's identity"
 BASE="$BASE_IMG@${BASE_DIGEST#*@}"
-RECIPE="$(git log -1 --format=%H "$C" -- docker-wasm64)"
 say "release $ID: kernel $C (patch $PATCH, gate ${CHECKS:-?} checks), runtime $R, packs/native64/lists $K"
 mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"; REL="$OUT/$ID"   # only now: every refusal comes first
 mkdir -p "$REL"

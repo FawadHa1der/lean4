@@ -45,13 +45,53 @@ export function parseSeed(text) {
 }
 
 /**
+ * The runtime methods the `lean` link exports (-sEXPORTED_RUNTIME_METHODS, src/CMakeLists.txt; a unit
+ * test compares them): what hosts read on Module besides the exports. NODEFS and WORKERFS since the
+ * emsdk 7 move, which hosts mount (emsdk 6.0.13 removed FS.filesystems, emscripten#27940).
+ */
+export const RUNTIME_METHODS = Object.freeze(["ccall", "callMain", "FS", "ENV", "getValue", "setValue", "stringToNewUTF8", "UTF8ToString", "NODEFS", "WORKERFS"]);
+/**
+ * What a host reads on Module only, never as a global of the glue (EMBED-RUNTIME.md §1). Since emsdk
+ * 6.0.13 Terser compresses the -O3 glue (toplevel; emscripten#27926, #27949, #27987), and a name only a
+ * host reads keeps no global binding. In emsdk 7.0.0's glue:
+ *  - MODULE_ONLY_METHODS, the runtime methods the glue does not call itself, are inlined into their
+ *    Module assignment (`Module["getValue"]=function(ptr,type="i8"){…}`);
+ *  - of the export contract, only EXPORT_GLOBALS, the four exports the glue reads itself, keep a
+ *    global (`_malloc=Module["_malloc"]=wasmExports[…]`): `_main`, `_free` and every `_lean_*` are
+ *    bound on Module alone.
+ * Emsdk 6.0.5's glue had a global for each. A host that reads one bare or off its global scope
+ * (`_free(p)`, `getValue(p, "i64")`, `self.getValue`, `typeof ccall`) breaks on 7.0.0. exports-audit.mjs
+ * lists such reads in code (comments and strings left out) as BARE: off the global scope or in typeof,
+ * an export named bare, and a method named bare in a file whose code names Module, importScripts or FS
+ * (elsewhere a bare `setValue` is the file's own, as a React state setter).
+ */
+export const MODULE_ONLY_METHODS = Object.freeze(["getValue", "setValue", "ccall", "stringToNewUTF8"]);
+export const EXPORT_GLOBALS = Object.freeze(["_malloc", "_pthread_self", "__emscripten_proxy_main", "__emscripten_check_mailbox"]);
+/** Whether a host reads `name` on Module only (above); `contract`: the export names (default: CONTRACT's). */
+export function moduleOnly(name, contract = CONTRACT.map((c) => c.name)) {
+  return MODULE_ONLY_METHODS.includes(name) || (contract.includes(name) && !EXPORT_GLOBALS.includes(name));
+}
+
+/**
  * The glue's internals hosts reach into ([GLUE]), as S6 checks them: `need` is "REQ" for what a
  * host needs (QED64's worker, the older copies of it other apps pin, this package's node-runner),
- * "TEST" for what only test probes use (reported, never failed). `k6` is the row of QED64's
+ * "TEST" for what only test probes use (reported, never failed), "PIN" for what only an older copy
+ * of QED64's worker that another app pins reads where a newer glue legitimately differs (reported
+ * on a line of its own, never failed: the app re-pins). `k6` is the row of QED64's
  * table of the glue names its worker reads (docs/ARCHITECTURE.md "Glue internals the worker
  * reads", rows 1-4: the architecture review's K6, every one a name the worker finds in the glue's
  * global scope, a named export only its fallback); S6 checks those apart, on their own line. Each
  * `test` takes the glue's text.
+ *
+ * Two glue generations pass: emsdk 6.0.5's -O3 glue (the runtimes published before the move) and
+ * emsdk 7.0.0's. Since 6.0.13 emsdk runs Terser's compress (toplevel, reduce_vars, unused,
+ * evaluate) over every -O2+ glue (emscripten#27926, #27949, #27987): a top-level function or value
+ * the glue itself uses once is folded into that use, and one only a host reads is dropped. So the
+ * runtime methods and NODEFS/WORKERFS are checked as Module assignments with any right-hand side,
+ * and the exit entries by identity at any index (#28059 sorts the table and #27995 finds library
+ * deps by itself: 7.0.0's starts [exitOnMainThread, _proc_exit, …]). The 7.0.0 shapes were read from
+ * Emscripten's and Terser's sources, then seen in the first 7.0.0 glue (the emsdk7-eval trial build
+ * bd4560f0a3, 2026-11-17); re-check them at each emsdk move.
  */
 const has = (re) => (glue) => re.test(glue);
 const all = (...res) => (glue) => res.every((re) => re.test(glue));
@@ -61,10 +101,12 @@ export function glueDefinition(glue, name, len = 1200) {
   return m ? glue.slice(m.index, m.index + len) : null;
 }
 /**
- * The entries of the glue's top-level `var proxiedFunctionTable=[…]` as written, in order (emsdk
- * 6.0.5's glue: identifiers, `[_proc_exit,exitOnMainThread,pthreadCreateProxied,…]`), or null
- * without one. Brackets and string literals inside an entry are stepped over, so an entry may be
- * an expression; the scan stops at the table's closing bracket.
+ * The entries of the glue's top-level `var proxiedFunctionTable=[…]` as written, in order, or null
+ * without one: identifiers (emsdk 6.0.5's glue: `[_proc_exit,exitOnMainThread,pthreadCreateProxied,…]`),
+ * and from emsdk 7 also the source of a function expression where Terser inlined a proxied function
+ * the glue names only there (`[exitOnMainThread,_proc_exit,…,function(fd,newfd,flags){…},…]`).
+ * Brackets and string literals inside an entry are stepped over; the scan stops at the table's
+ * closing bracket.
  */
 export function proxiedFunctionTable(glue) {
   const g = String(glue);
@@ -89,6 +131,13 @@ export function proxiedFunctionTable(glue) {
 /** A top-level, reassignable binding of the wasm export `name` (`name=Module["name"]=wasmExports[…]` and the like). */
 const exportGlobal = (name) => (glue) =>
   new RegExp(`(?:^|[;,{\\s])${name}\\s*=\\s*(?:Module\\[["']${name}["']\\]\\s*=\\s*)?(?:makeWrapper_\\w+\\()?wasmExports\\[`, "m").test(glue);
+/** `Module["NAME"]=…` (or `['NAME']`) anywhere in the glue, with any right-hand side. */
+const moduleAssigns = (glue, name) => new RegExp(`Module\\[["']${name}["']\\]\\s*=(?!=)`).test(glue);
+/** The file systems hosts mount besides MEMFS, from Module (emsdk 7) or FS.filesystems (emsdk 6.0.5). */
+const FILESYSTEMS = ["WORKERFS", "NODEFS"];
+/** The keys of the glue's `FS.filesystems={…}` (emsdk 6.0.5: `{MEMFS,NODEFS,WORKERFS}`), [] without one. */
+const fsFilesystems = (glue) => (/FS\.filesystems\s*=\s*\{([^}]*)\}/.exec(glue)?.[1] ?? "")
+  .split(",").map((e) => e.split(":")[0].trim().replace(/^["']|["']$/g, "")).filter(Boolean);
 const EXIT_FUNCTIONS = all(/(?:var _proc_exit\s*=|function _proc_exit\s*\()/, /(?:var exitOnMainThread\s*=|function exitOnMainThread\s*\()/);
 export const GLUE_SURFACE = Object.freeze([
   // K6: what QED64's worker reads by name (from 58e1918 and R7a f83bc70 on, QED64 origin/main)
@@ -99,40 +148,53 @@ export const GLUE_SURFACE = Object.freeze([
   { id: "waitAsyncPolyfilled", k6: 2, need: "REQ", test: (g) => /var waitAsyncPolyfilled\s*=/.test(g) && (g.match(/\bwaitAsyncPolyfilled\b/g) ?? []).length >= 2,
     what: "a mutable top-level var the glue reads when it arms a waiter (QED64's message mode sets it)" },
   { id: "checkMailbox", k6: 2, need: "REQ",
-    test: all(/checkMailbox\s*=\s*\(\)\s*=>\s*\{[^}]*runtimeKeepalivePush\(\)/, /__emscripten_check_mailbox\(\)/, /\.then\(\s*checkMailbox\s*\)/),
-    what: "checkMailbox holds a keepalive (build-image patch 0020), calls __emscripten_check_mailbox and is looked up by name (QED64's message mode)" },
+    // the keepalive is pushed before the mailbox callback and popped after it (a missing pop would pin the runtime alive)
+    test: all(/checkMailbox\s*=\s*\(\)\s*=>\s*\{[^}]*runtimeKeepalivePush\(\)\s*;?\s*callUserCallback\(\s*\(\)\s*=>\s*\{[^}]*\}\s*\)\s*;?\s*runtimeKeepalivePop\(\)/,
+      /__emscripten_check_mailbox\(\)/, /\.then\(\s*checkMailbox\s*\)/),
+    what: "checkMailbox holds a keepalive around its callback (build-image patch 0020), calls __emscripten_check_mailbox and is looked up by name (QED64's message mode)" },
   { id: "__emscripten_check_mailbox", k6: 3, need: "REQ", test: exportGlobal("__emscripten_check_mailbox"),
     what: "a top-level, reassignable binding of the wasm export: QED64's mailbox kick (Module.__emscripten_check_mailbox only its fallback)" },
   { id: "PThread pool", k6: 4, need: "REQ", test: all(/var PThread\s*=\s*\{/, /\bunusedWorkers\s*:\s*\[\]/, /\bpthreads\s*:\s*\{\}/),
     what: "a top-level PThread with unusedWorkers and pthreads: QED64's pool sample (without it its edit hold never engages)" },
   // the rest: what every host needs, the rest of QED64's worker, node-runner, and what QED64's worker
   // before 58e1918 and R7a still reads in the copy lean4game pins (QED64 73d7f3b)
-  { id: "Module adoption", need: "REQ", test: has(/var Module\s*=\s*typeof Module\s*!=\s*["']undefined["']\s*\?\s*Module\s*:\s*\{\}/),
+  // `!=` in emsdk 6.0.5's glue, `!==` in 7.0.0's (emscripten#27927: strict typeof comparisons)
+  { id: "Module adoption", need: "REQ", test: has(/var Module\s*=\s*typeof Module\s*!==?\s*["']undefined["']\s*\?\s*Module\s*:\s*\{\}/),
     what: "a classic script that adopts the host's Module (QED64 sets self.Module before importScripts)" },
   { id: "classic script", need: "REQ", test: (g) => !/^\s*export\s+(default|\{)/m.test(g) && !/\bimport\.meta\b/.test(g),
     what: "not MODULARIZE / EXPORT_ES6 (a MODULARIZE glue hides every name above)" },
   { id: "em-pthread", need: "REQ", test: all(/name\s*:\s*["']em-pthread["']/, /globalThis\.name\s*==\s*["']em-pthread["']/),
     what: 'pthread Workers named "em-pthread", detected through globalThis.name' },
+  // any right-hand side: 6.0.5 assigns the global (`Module["getValue"]=getValue`); 7.0.0's Terser
+  // pass inlines a method only its export uses into the assignment (`Module["getValue"]=(ptr,…)=>…`);
+  // NODEFS and WORKERFS are the FS item's
   { id: "runtime methods", need: "REQ",
-    test: (g) => ["callMain", "FS", "ENV", "getValue", "setValue", "stringToNewUTF8", "UTF8ToString", "ccall"]
-      .every((m) => new RegExp(`Module\\[["']${m}["']\\]\\s*=\\s*${m}\\b`).test(g)),
-    what: "Module.callMain, FS, ENV, getValue, setValue, stringToNewUTF8, UTF8ToString, ccall" },
+    test: (g) => RUNTIME_METHODS.filter((m) => !FILESYSTEMS.includes(m)).every((m) => moduleAssigns(g, m)),
+    what: `Module.${RUNTIME_METHODS.filter((m) => !FILESYSTEMS.includes(m)).join(", ")}` },
   { id: "Module inputs", need: "REQ",
     test: (g) => ["wasmMemory", "locateFile", "mainScriptUrlOrBlob", "noInitialRun", "onRuntimeInitialized", "onAbort",
       "onExit", "print", "printErr", "preRun", "arguments"].every((k) => g.includes(`Module["${k}"]`)),
     what: "the Module keys hosts set (EMBED-RUNTIME.md §3.1) are read" },
   { id: "wasmMemory", need: "REQ", test: all(/var wasmMemory\b/, /wasmMemory\s*=\s*Module\[["']wasmMemory["']\]/),
     what: "a top-level wasmMemory that adopts Module.wasmMemory" },
-  { id: "FS", need: "REQ", test: all(/var FS\s*=\s*\{/, /\bmkdirTree\s*[:(]/, /\bmakedev\s*[:(]/, /\bWORKERFS\b/, /\bNODEFS\b/),
-    what: "FS with mkdirTree, makedev, WORKERFS and NODEFS" },
+  // WORKERFS and NODEFS as hosts reach them: on Module (the kernel's link exports both from emsdk 7
+  // on, as emscripten#27940 advises; without the export 7.0.0's Terser pass may drop WORKERFS), or
+  // in FS.filesystems (emsdk 6.0.5; #27940 removed it in 6.0.13)
+  { id: "FS", need: "REQ",
+    test: (g) => all(/var FS\s*=\s*\{/, /\bmkdirTree\s*[:(]/, /\bmakedev\s*[:(]/)(g)
+      && (FILESYSTEMS.every((n) => moduleAssigns(g, n)) || FILESYSTEMS.every((n) => fsFilesystems(g).includes(n))),
+    what: "FS with mkdirTree and makedev; WORKERFS and NODEFS exported on Module (emsdk 7) or held in FS.filesystems (emsdk 6.0.5)" },
   { id: "TTY", need: "REQ", test: all(/var TTY\s*=\s*\{/, /\bttys\s*:\s*\[\]/, /\.ops\.put_char\(/, /\bfsync\s*[:(]/),
     what: "a top-level TTY whose ttys[…].ops.put_char the stream write calls per byte (QED64 replaces it)" },
   { id: "PThread methods", need: "REQ",
     test: all(/\ballocateUnusedWorker\s*\(\)\s*\{/, /\bgetNewWorker\s*\(\)\s*\{/, /\breturnWorkerToPool\s*:/, /PThread\.getNewWorker\(\)/,
       /PThread\.returnWorkerToPool\(/, /PThread\.allocateUnusedWorker\(\)/),
     what: "PThread's allocateUnusedWorker, getNewWorker and returnWorkerToPool, called as PThread.x() (QED64's worker before R7a wraps them for its pool-growth log: lean4game's pin)" },
-  { id: "exit entries at [0] and [1]", need: "REQ", test: has(/var proxiedFunctionTable\s*=\s*\[\s*_proc_exit\s*,\s*exitOnMainThread\s*[,\]]/),
-    what: "proxiedFunctionTable[0] is _proc_exit and [1] exitOnMainThread (QED64's worker before 58e1918 hooks those indices: lean4game's pin)" },
+  // PIN: emsdk 7 sorts the table (emscripten#28059, #27995), so a 7.0.0 glue starts [exitOnMainThread,
+  // _proc_exit, …] and this cannot hold there. That worker then reports no FileWorker exit (it hooks
+  // index and identity together); lean4game re-pins past QED64 58e1918 with the emsdk 7 move.
+  { id: "exit entries at [0] and [1]", need: "PIN", test: has(/var proxiedFunctionTable\s*=\s*\[\s*_proc_exit\s*,\s*exitOnMainThread\s*[,\]]/),
+    what: "proxiedFunctionTable[0] is _proc_exit and [1] exitOnMainThread: QED64's worker before 58e1918 hooks those indices" },
   { id: "mailbox await", need: "REQ", test: (g) => /pthread_ptr\s*\+\s*\d+/.test(glueDefinition(g, "__emscripten_thread_mailbox_await", 600) ?? ""),
     what: "__emscripten_thread_mailbox_await's source has the literal pthread_ptr+N (QED64's worker before R7a parses it for its rescue count: lean4game's pin)" },
   { id: "_pthread_self", need: "REQ", test: exportGlobal("_pthread_self"),
@@ -157,14 +219,18 @@ export const GLUE_SURFACE = Object.freeze([
   { id: "ENVIRONMENT_IS_PTHREAD", need: "TEST", test: has(/var ENVIRONMENT_IS_PTHREAD\s*=/), what: "the widgets showcase's UX probes (typeof-guarded)" },
 ]);
 
-/** The glue's top-level identifiers a host reaches ([GLUE]): what exports-audit knows besides the contract. */
+/**
+ * The glue's top-level identifiers a host reaches ([GLUE]): what exports-audit knows besides the contract
+ * and RUNTIME_METHODS. Not MODULE_ONLY_METHODS: emsdk 7's glue has no such global.
+ */
 export const GLUE_NAMES = Object.freeze([
   // QED64's worker (K6: its docs/ARCHITECTURE.md "Glue internals the worker reads")
   "proxiedFunctionTable", "_proc_exit", "exitOnMainThread", "waitAsyncPolyfilled", "checkMailbox", "__emscripten_check_mailbox",
   "PThread", "TTY", "runtimeKeepalivePush", "ABORT",
-  // every host's Module, runtime methods and memory; callMain's entry; the exit types; node-runner's
-  // thread count; and what QED64's worker before R7a reads (the copy lean4game pins)
-  "Module", "FS", "ENV", "callMain", "getValue", "setValue", "stringToNewUTF8", "UTF8ToString", "ccall", "wasmMemory",
+  // every host's Module, the runtime methods the glue keeps as globals too, and memory; callMain's
+  // entry; the exit types; node-runner's thread count; and what QED64's worker before R7a reads (the
+  // copy lean4game pins)
+  "Module", "FS", "ENV", "callMain", "UTF8ToString", "wasmMemory",
   "__emscripten_proxy_main", "ExitStatus", "spawnThread", "__emscripten_thread_mailbox_await", "_pthread_self",
   // test probes only
   "cleanupThread", "proxiedJSCallArgs", "EXITSTATUS", "runtimeKeepaliveCounter", "runtimeExited", "ENVIRONMENT_IS_PTHREAD",
@@ -172,7 +238,8 @@ export const GLUE_NAMES = Object.freeze([
 
 /**
  * The pthread pool the glue creates at start-up, from PThread.initMainThread's loop (emsdk 6.0.5's
- * shape, `var pthreadPoolSize=24;while(pthreadPoolSize--){PThread.allocateUnusedWorker()}`):
+ * shape, `var pthreadPoolSize=24;while(pthreadPoolSize--){PThread.allocateUnusedWorker()}`; 7.0.0's
+ * Terser pass drops the braces):
  * `{ size, form }`, `size` the Workers it allocates by default (null when no loop is found).
  * `form` "literal" is -sPTHREAD_POOL_SIZE=<n> (0019's 24; again since the architecture review's
  * D3b); "0038" is the pool library 0038 linked until D3b, `var pthreadPoolSize=leanPthreadPoolTarget`
@@ -269,8 +336,9 @@ export function requiredExports(level, extra = []) {
  *  S1 (0039 on) no generated Lean name is exported or bound, lean.js is small, lean.wasm is not a
  *     dynamically linked module (no dylink.0, no GOT import) and has few exports, the 0017 gate is gone;
  *  S2 every contract name the runtime's level requires is bound on Module to a function export;
- *  S6 the [GLUE] surface (REQ items fail, TEST items are reported): K6's rows, the names QED64's
- *     worker reads, on a line of their own, then the rest.
+ *  S6 the [GLUE] surface (REQ items fail, TEST and PIN items are reported): K6's rows, the names
+ *     QED64's worker reads, on a line of their own, then the rest, then what only test probes and
+ *     an app's pinned older worker read.
  * `seed`: the names of src/emscripten-exports.seed.txt when the gate runs from the repository.
  */
 export function staticChecks({ glue, wasmBytes, seed = null }) {
@@ -317,5 +385,9 @@ export function staticChecks({ glue, wasmBytes, seed = null }) {
     extra: missing.map((s) => `${s.id}: ${s.what}`).join("; ") });
   const absent = test.filter((s) => !s.test(glue));
   out.push({ note: true, label: `S6 test-probe internals: ${absent.length ? `absent ${absent.map((s) => s.id).join(", ")}` : `all ${test.length} present`}` });
+  const pin = GLUE_SURFACE.filter((s) => s.need === "PIN"), pinAbsent = pin.filter((s) => !s.test(glue));
+  if (pin.length) out.push({ note: true, label: `S6 what only lean4game's pinned worker (QED64 73d7f3b) reads besides: ${pinAbsent.length
+    ? `absent ${pinAbsent.map((s) => `${s.id} (${s.what})`).join("; ")}: lean4game re-pins before it runs on this runtime`
+    : `all ${pin.length} present`}` });
   return { level, results: out };
 }

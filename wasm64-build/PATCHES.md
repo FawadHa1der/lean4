@@ -8,7 +8,7 @@ follow below. Summary:
 
 | # | Patch | Upstream? |
 |---|---|---|
-| 0001 | Emscripten 6.0.5 wasm64 Docker recipe | recipe replaces the i386-stage0 shim |
+| 0001 | Emscripten wasm64 Docker recipe: emsdk 6.0.5, and 7.0.0 since the v4.36 riders' emsdk 7 move (`FROM emscripten/emsdk:7.0.0` and the image pins of `build.sh`, `native64.sh`, `mathlib-tree.sh` and `stage-release.sh`) | recipe replaces the i386-stage0 shim |
 | 0002 | CMake wasm64 configuration (-m64 end-to-end, memory cache vars, platform target) | plumbing yes; memory values are policy |
 | 0003 | `LEAN_SCALAR_PTR_LITERAL` gated on pointer width, not `LEAN_EMSCRIPTEN` | **as-is** |
 | 0004 | `llvm_is_declaration` C ABI + `LLVMBindings.lean` `Context` declaration order | **as-is** (live correctness bugs) |
@@ -27,7 +27,7 @@ follow below. Summary:
 | 0017 | **Interpreter dlsym probes gated on the wasm export table**: `lookup_symbol_in_cur_exe` consults a one-time `Set` of export names before calling dlsym | **as-is** for the Emscripten target — turns a 173 s pathology into ~1 s (below). **Superseded by 0039** (an in-module table, no dlsym, no JS); a 2-line `#ifdef` skeleton remains |
 | 0018 | **Host-pumped LSP file worker** (`lean_wasm_lsp_init` / `lean_wasm_lsp_send`): drive a single-file server session one message at a time when a blocking stdin is impossible (WASM event-loop hosts); forces `server.reportDelayMs := 0` (timed sleeps on dedicated pthreads do not wake under this build) | **retired** by 0033: the resident transport (0031/0032) replaced it |
 | 0019 | **24 preallocated pthread workers, 8 MiB thread stacks**: every `ServerTask` is `prio := .dedicated`, and synchronous `pthread_create` under Emscripten can only claim preallocated workers | needed by any wasm host running the language server; no line of it is left, its settings live on rewritten in `src/CMakeLists.txt`: the pool of 24 (`-sPTHREAD_POOL_SIZE=24`, again since the architecture review's D3b; from 0038 until then the default of 0038's `src/emscripten-pthread-pool.js`) and the 8 MiB stacks (`-sDEFAULT_PTHREAD_STACK_SIZE=8388608`) |
-| 0020 | **Keepalive-guard emscripten's `$checkMailbox`** (build-image patch to emsdk 6.0.5): mailbox servicing ran through `callUserCallback`→`maybeExit`, which `_exit()`s an EXIT_RUNTIME=1 runtime with no keepalives — terminating the pthread blocked in `emscripten_proxy_sync` right after its proxied op executed. Reproduced in 30 lines of pure C on stock wasm32 | **upstream emscripten PR ready** — see docs/EMSDK-BUG-REPORT.md |
+| 0020 | **Keepalive-guard emscripten's `$checkMailbox`** (build-image patch to emsdk 6.0.5; re-anchored for 7.0.0 by the emsdk 7 move, where emscripten#27995 finds library deps by itself and the deps edit became an assert of 7.0.0's shape, the bug itself unchanged there and on upstream main): mailbox servicing ran through `callUserCallback`→`maybeExit`, which `_exit()`s an EXIT_RUNTIME=1 runtime with no keepalives — terminating the pthread blocked in `emscripten_proxy_sync` right after its proxied op executed. Reproduced in 30 lines of pure C on stock wasm32 | **upstream emscripten PR ready** — see docs/EMSDK-BUG-REPORT.md |
 | 0021 | **Pre-built header environments** (`Language.Lean.prebuiltHeaderEnvs`, consulted by `processHeader` before the disk import; populated by `lean_wasm_lsp_init` from the wasm env cache): olean reads from elaboration pthreads proxy to the host and stall under WORKERFS | the hook shape is upstream-plausible for any embedder pre-importing on a preferred thread |
 | 0022 | **Flush the worker's LSP output after each message**: frame bodies have no trailing newline; a line-buffered host stream held them until the next message, whose bytes a framed reader ate as the missing body | **retired**: upstream already flushed after each message; only a comment is left |
 | 0023 | **Covering-environment aliasing for worker headers**: `lean_wasm_lsp_init` serves a document from the smallest cached env whose closure covers its imports (snapshot-seeded Init/umbrella envs ⇒ no olean import; exact positions; playground superset semantics) | **retired** by 0033; the covering logic moved to 0032's resolver |
@@ -923,6 +923,11 @@ libraries (libc++, libc++abi, libunwind via embuilder) a second time with `-mllv
 which switches that rewrite off: the objects must be identical, and three positive controls
 (`eh-funclet-controls/`, the two bugs' shapes) must differ, or the build fails. Workaround flags
 exist (`-mllvm -enable-scalar-pre=false`, `-mllvm -jump-threading-threshold=0`) if it ever fires.
+Both bugs are still open at emsdk 7.0.0's LLVM (84ba7b37f0; #229448's fix, #229465, unmerged), so
+the guard stays with the emsdk 7 move; it replays the system libraries' compiles one directory
+deeper there (`<cache>/build/wasm64-emscripten/…`, emscripten#27694, 6.0.10). On the first 7.0.0
+build (the emsdk7-eval trial, bd4560f0a3, 2026-11-17) it passed: the controls differ; 124 C++
+translation units, libc++ 58, libc++abi 18 and libunwind 1 sources identical.
 
 **What changes on failure paths** (hosts: EMBED-RUNTIME.md §6):
 - A V8 stack overflow (`RangeError`) is unchanged: V8 marks it uncatchable by wasm, so no C++
@@ -1220,12 +1225,13 @@ malloc-family (`operator new`/`delete` variants, `___libc_{malloc,calloc,realloc
 `_reallocf`, `_strndup`). The glue items hosts reach into are unchanged (gate S6). A host that
 pins the export list exactly sees the new names.
 
-**Known limits (emsdk 6.0.5: emscripten#28028, fixed in emsdk 7.0.0 by #28035).** mimalloc takes
-its memory from emmalloc, and hands it blocks over 512 MiB directly. emmalloc's region sizes are
-32-bit there, which fails in two ways:
+**Known limits of the runtimes linked with emsdk 6.0.5** (emscripten#28028; from this patch until
+the emsdk 7 move, lean-v4.35.0-0bf1fb2 among them; history for later runtimes, below). mimalloc
+takes its memory from emmalloc, and hands it blocks over 512 MiB directly. emmalloc's region sizes
+are 32-bit there, which fails in two ways:
 - A single allocation of about 4 GiB or more returns NULL (reported in #28028 on emsdk 6.0.12:
   4032 MiB succeeds, 4096 MiB fails). A snapshot bake whose compactor reserve is 4 GiB or more stops
-  at "failed to reserve the initial region buffer", so bakes on this runtime keep reserves below
+  at "failed to reserve the initial region buffer", so bakes on such a runtime keep reserves below
   4 GiB. Without a reserve, the compactor's buffer grows by `realloc`, which mimalloc does not extend
   in place for a block that no longer fits. Such a buffer therefore tops out at 2 GiB, because the
   next doubling is a 4 GiB allocation, and the error names `LEAN_COMPACTOR_RESERVE`. The Mathlib
@@ -1233,14 +1239,23 @@ its memory from emmalloc, and hands it blocks over 512 MiB directly. emmalloc's 
 - A free emmalloc region of 4 GiB or more has its size decoded wrongly (the 32-bit `FREE_REGION_FLAG`
   mask, emmalloc.c), and a later free corrupts the heap silently. That needs a wasm heap that has
   grown past 4 GiB. This was read in source, not reproduced. No run reached it (QED64's pages peaked
-  at 3.29 GiB), and heaps past 4 GiB are untested on this runtime. The runtime's maximum is 16 GiB,
-  so a host that lets the heap pass 4 GiB carries this risk until the move to emsdk 7.
+  at 3.29 GiB), and heaps past 4 GiB are untested on such a runtime. The runtime's maximum is
+  16 GiB, so a host that lets the heap of such a runtime pass 4 GiB carries this risk.
 
-**A failed C++ `new` aborts.** emsdk 6.0.5 builds mimalloc as C, and its `operator new` calls
-`abort()` when an allocation fails and no new-handler is installed (the fork installs none). So
-the runtime ends with "Aborted()" (onAbort with an empty reason) instead of throwing
-`std::bad_alloc`. On task threads nothing changes: a `bad_alloc` there already ended in
-`std::terminate`, because the runtime catches nothing on those paths. Two places see the change:
+**Fixed by emsdk 7.0.0** (#28035, the fix of #28028; the emsdk 7 move): emmalloc's sizes are 64-bit
+there. Measured on the first 7.0.0 build (the emsdk7-eval trial, 2026-11-17): single blocks of 4.0
+and 5.0 GiB, the reuse of a freed 4.25 GiB region, and compactor reserves of 4 and 5 GiB on an Init
+header save all succeed; a 16 GiB reserve fails cleanly (the address space). So a bake's reserve,
+or an unreserved buffer's doubling, is bounded by the 16 GiB address space again. (Copies of an
+exact multiple of 4 GiB, which emsdk 6.0.5's memcpy skipped silently, are correct there too, since
+6.0.10: the compactor's 4 to 8 GiB doubling copies correctly.)
+
+**A failed C++ `new` aborts**, on emsdk 7.0.0 as on 6.0.5. Both build mimalloc as C, and its
+`operator new` calls `abort()` when an allocation fails and no new-handler is installed (the fork
+installs none). So the runtime ends with "Aborted()" (onAbort with an empty reason) instead of
+throwing `std::bad_alloc` (measured again on the first 7.0.0 build). On task threads nothing
+changes: a `bad_alloc` there already ended in `std::terminate`, because the runtime catches nothing
+on those paths. Two places see the change:
 - the shell's main-thread handler (shell.cpp), which printed "out of memory" and exited 1;
 - the olean and snapshot save boundary (module.cpp), which returned an IO error.
 A failed Lean-object allocation is unchanged: malloc returns NULL and Lean panics with "out of

@@ -20,28 +20,41 @@ const tmp = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), "l4w-vfs-"))
 after(() => { for (const d of made) fs.rmSync(d, { recursive: true, force: true }); });
 const write = (file, bytes) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, bytes); };
 
-const FAKE_GLUE = `
+/** How each glue generation offers NODEFS and a path lookup to a host (runtime-knobs.mjs glueFilesystem, vfsExists):
+ *  6.0.5 keeps NODEFS in FS.filesystems; 7.0.0 has no FS.filesystems (emscripten#27940) and the kernel's link
+ *  exports NODEFS on Module; -sSTRICT also drops the deprecated FS.analyzePath (#27765), leaving FS.lookupPath;
+ *  a 7.0.0 link without the export leaves only the glue's top-level var (a global under vm.runInThisContext). */
+const GLUES = {
+  "emsdk 6.0.5": { nodefs: "M.FS.filesystems = { MEMFS: {}, NODEFS };", analyzePath: true },
+  "emsdk 7.0.0": { nodefs: "M.NODEFS = NODEFS;", analyzePath: true },
+  "emsdk 7.0.0 -sSTRICT": { nodefs: "M.NODEFS = NODEFS;", analyzePath: false },
+  "emsdk 7.0.0 without the NODEFS export": { nodefs: "", analyzePath: true, globalVar: true },
+};
+const FAKE_GLUE = (glue = "emsdk 6.0.5") => `
 const M = globalThis.Module;
-const NODEFS = { name: "NODEFS" };
-const mounts = [];
+${GLUES[glue].globalVar ? "var" : "const"} NODEFS = { name: "NODEFS" };
+const mounts = [], lookups = [];
+// FAKE_EXISTS=all|none answers every lookup so; unset, a path exists when it lies under a mount
+const exists = (p) => (process.env.FAKE_EXISTS ? process.env.FAKE_EXISTS === "all" : mounts.some(([, mp]) => p === mp || p.startsWith(mp + "/")));
 M.FS = {
-  filesystems: { NODEFS },
   mkdir() {},
   chdir() {},
-  analyzePath(p) { return { exists: mounts.some(([, mp]) => p === mp || p.startsWith(mp + "/")) }; },
-  mount(type, opts, mp) { mounts.push([opts.root, mp]); return {}; },
+  lookupPath(p, opts) { lookups.push(["lookupPath", p, opts]); if (!exists(p)) throw new Error("ENOENT"); return { path: p, node: {} }; },
+  mount(type, opts, mp) { if (type !== NODEFS) throw new Error("FS.mount: not the glue's NODEFS"); mounts.push([opts.root, mp]); return {}; },
 };
+${GLUES[glue].analyzePath ? 'M.FS.analyzePath = (p) => { lookups.push(["analyzePath", p]); return { exists: exists(p) }; };' : ""}
+${GLUES[glue].nodefs}
 M.ENV = {};
 for (const f of M.preRun) f();
 M.FS.mount(NODEFS, { root: "/home" }, "/home"); // the prologue's own mounts, after preRun
 M.FS.mount(NODEFS, { root: "/tmp" }, "/tmp");
-console.log(JSON.stringify({ cwd: process.cwd(), hostLeanPath: process.env.LEAN_PATH, envLeanPath: M.ENV.LEAN_PATH, leanArgs: M.arguments, mounts }));
+console.log(JSON.stringify({ cwd: process.cwd(), hostLeanPath: process.env.LEAN_PATH, envLeanPath: M.ENV.LEAN_PATH, leanArgs: M.arguments, mounts, lookups }));
 process.exit(0);
 `;
 
-function layout(extraArgs = [], env = {}) {
+function layout(extraArgs = [], env = {}, glue = "emsdk 6.0.5") {
   const a = tmp();
-  write(path.join(a, "bin", "lean.js"), FAKE_GLUE);
+  write(path.join(a, "bin", "lean.js"), FAKE_GLUE(glue));
   write(path.join(a, "bin", "lean.wasm"), Buffer.from("not wasm"));
   fs.mkdirSync(path.join(a, "lib", "lean"), { recursive: true });
   const work = path.join(tmp(), "work");
@@ -52,10 +65,10 @@ function layout(extraArgs = [], env = {}) {
 }
 const has = (mounts, root, mp) => mounts.some(([r, m]) => r === root && m === mp);
 
-test("node-runner: Lean's cwd is the VFS root /, LEAN_PATH is pinned, /lib/lean and /work mounted, no work-dir mirror (QED64's bake layout)", () => {
+for (const glue of Object.keys(GLUES)) test(`node-runner [${glue} glue]: Lean's cwd is the VFS root /, LEAN_PATH is pinned, /lib/lean and /work mounted, no work-dir mirror (QED64's bake layout)`, () => {
   for (const extra of [[], ["--lib", null]]) {
     const lib = extra.length ? tmp() : null;
-    const out = layout(extra.length ? ["--lib", lib] : []);
+    const out = layout(extra.length ? ["--lib", lib] : [], {}, glue);
     assert.equal(out.cwd, "/"); // /work/probe.lean is then module `work.probe`, as under QED64's runner
     assert.equal(out.hostLeanPath, "/lib/lean"); // an inherited host LEAN_PATH never reaches the prologue
     assert.equal(out.envLeanPath, "/lib/lean");
@@ -80,6 +93,33 @@ test("node-runner: LEAN4_WASM64_CWD=work keeps the pre-r2 layout (cwd = the work
   const bogus = layout([], { LEAN4_WASM64_CWD: "here" });
   assert.equal(bogus.cwd, "/");
   assert.equal(bogus.stderr, "node-runner: WARNING — LEAN4_WASM64_CWD=here ignored (only `work` is known); the cwd is /\n");
+});
+
+test("node-runner: with --lib, <artifact>/lib/lean is shadowed exactly where the VFS says it exists, asked through FS.analyzePath or, without it, FS.lookupPath", () => {
+  for (const glue of Object.keys(GLUES)) {
+    const lib = tmp();
+    for (const answer of ["all", "none"]) {
+      const out = layout(["--lib", lib], { FAKE_EXISTS: answer }, glue);
+      const builtins = [...new Set([out.a, fs.realpathSync(out.a)])].map((d) => path.join(d, "lib", "lean"));
+      for (const b of builtins) assert.equal(has(out.mounts, fs.realpathSync(lib), b), answer === "all", `${glue}, ${answer}: ${b} ${JSON.stringify(out.mounts)}`);
+      // the lookups are the shadow's own, one per built-in path each time it is laid (preRun, then after /home and /tmp)
+      assert.deepEqual(out.lookups, Array.from({ length: 3 }, () => builtins).flat()
+        .map((b) => (GLUES[glue].analyzePath ? ["analyzePath", b] : ["lookupPath", b, { follow: true }])), `${glue}, ${answer}`);
+    }
+    assert.deepEqual(layout([], { FAKE_EXISTS: "all" }, glue).lookups, [], glue); // without --lib nothing is shadowed or looked up
+  }
+});
+
+test("node-runner on a glue that exposes no NODEFS fails with the clear error, before any mount", () => {
+  const a = tmp();
+  write(path.join(a, "bin", "lean.js"), FAKE_GLUE("emsdk 7.0.0").replace("M.NODEFS = NODEFS;", ""));
+  write(path.join(a, "bin", "lean.wasm"), Buffer.from("not wasm"));
+  fs.mkdirSync(path.join(a, "lib", "lean"), { recursive: true });
+  const r = spawnSync(process.execPath, ["--stack-size=8192", path.join(pkg, "node-runner.mjs"), "--artifact", a, "--work", path.join(tmp(), "work"), "--", "/work/probe.lean"],
+    { encoding: "utf8", env: ENV, timeout: 60_000 });
+  assert.notEqual(r.status, 0, r.stdout);
+  assert.match(r.stderr, /the runtime's glue exposes no NODEFS: not as Module\.NODEFS \(exported from emsdk 7 on\), FS\.filesystems\.NODEFS \(emsdk 6\) or a global NODEFS/);
+  assert.equal(r.stdout, "");
 });
 
 test("node-runner: a --lib (or --work) given as a symbolic link to a directory is mounted by its target, so the VFS can walk it", () => {

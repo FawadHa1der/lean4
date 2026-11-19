@@ -92,10 +92,23 @@ changed only a native 32-bit build.
    used it, then delete it from the seed; adding a name means a host calls it.
    Before a release that changes the seed or the glue, run
    `node wasm64-build/js/exports-audit.mjs --glue <the new lean.js> <consumer
-   trees>` over QED64, lean4game, the widgets showcase and the proof sheets: it
+   trees>` over QED64, lean4game, the widgets showcase and the proof sheets. It
+   fails on an UNKNOWN export (neither in the contract nor a glue built-in S6
+   guards), an UNGUARDED glue global (reached by name, declared by the glue,
+   not guarded by S6) and a BARE read of a name that exists on `Module` only
+   (since emsdk 7: `getValue`, `setValue`, `ccall`, `stringToNewUTF8` and every
+   export but four). A BARE read is one in code, comments and strings left out:
+   such a name read off the global scope (`self.X`, `globalThis["X"]`) or in
+   `typeof X`, an export named bare (`_free(p)`), or one of the four methods
+   named bare in a file whose code names `Module`, `importScripts` or `FS`. It
    must report every name covered, but for one known and dead reach-in,
    `globalThis.Module.HEAPU8` in QED64's resident probe and the proof sheets'
-   browser check (PATCHES.md, 0039). `link-undefined-allowlist.txt` is
+   browser check (PATCHES.md, 0039). It never fails on a `PThread`, `TTY` or
+   `FS` member, but marks each one the new glue's text never names
+   "(not in --glue)" (`FS.filesystems` on emsdk 7): a human judges every mark.
+   Some are noise: `PT.` also matches minified third-party code such as
+   Monaco's, and `PThread.runningWorkers` and `PThread.finishedThreads` are
+   absent from emsdk 6.0.5's glue too. `link-undefined-allowlist.txt` is
    calibrated (from the first 0039 link: empty): a link that leaves a symbol
    undefined fails until the name is reviewed and added there.
 5. **Library ports** — game patches in lean4game were validated against one
@@ -139,8 +152,14 @@ selection over an existing build in seconds.
 
 Build directory: `../wasm64-lean-kernel-build-<tag>` (override `QED64_BUILD_DIR`).
 It is never an app's build tree — a stage1 rebuild unpairs every snapshot baked
-against the old binary. Docker's VM needs ≥ 10 GB for the final `wasm-metadce`
-link and must not be shared with another build (silent rc-137 OOM kills).
+against the old binary. One toolchain image per import: `native64.sh` and
+`mathlib-tree.sh` run in the image HEAD's `docker-wasm64` builds, and refuse a
+build dir whose recipe (at its `BUILT-COMMIT`, or native64's `NATIVE-COMMIT`) is
+another, as the gate does; run them from a checkout of that recipe. A build dir
+does not record its image, and `build.sh`'s default one is shared by every
+checkout: pass `QED64_BUILD_DIR` for a build of another recipe. Docker's VM
+needs ≥ 10 GB for the final `wasm-metadce` link and must not be shared with
+another build (silent rc-137 OOM kills).
 
 `native64.sh` refuses to continue unless the native build's core library is
 the wasm64 build's core library (every `.olean*`/`.ir*` compared) — that

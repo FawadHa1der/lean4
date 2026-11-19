@@ -10,8 +10,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { CONTRACT, GLUE_NAMES, GLUE_SURFACE, contractLevel, exportBindings, parseSeed, proxiedFunctionTable, pthreadPool, readWasm, requiredExports,
-  staticChecks } from "../runtime-contract.mjs";
+import { CONTRACT, EXPORT_GLOBALS, GLUE_NAMES, GLUE_SURFACE, MODULE_ONLY_METHODS, RUNTIME_METHODS, contractLevel, exportBindings, moduleOnly, parseSeed,
+  proxiedFunctionTable, pthreadPool, readWasm, requiredExports, staticChecks } from "../runtime-contract.mjs";
 
 const pkg = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const BUILD = path.resolve(pkg, "..");
@@ -366,16 +366,51 @@ const SURFACE = [
   'var _proc_exit=code=>{throw new ExitStatus(code)};function exitOnMainThread(returnCode){}var proxiedJSCallArgs=[];',
   'var proxiedFunctionTable=[_proc_exit,exitOnMainThread,pthreadCreateProxied];',
   'var waitAsyncPolyfilled=!Atomics.waitAsync;function __emscripten_thread_mailbox_await(pthread_ptr){if(!waitAsyncPolyfilled){var wait=Atomics.waitAsync(HEAP32,(pthread_ptr+204)/4,pthread_ptr);wait.value.then(checkMailbox)}}',
-  'var checkMailbox=()=>{var pthread_ptr=_pthread_self();if(!pthread_ptr)return;runtimeKeepalivePush();callUserCallback(()=>{__emscripten_check_mailbox()})};',
+  'var checkMailbox=()=>{var pthread_ptr=_pthread_self();if(!pthread_ptr)return;runtimeKeepalivePush();callUserCallback(()=>{__emscripten_thread_mailbox_await(pthread_ptr);__emscripten_check_mailbox()});runtimeKeepalivePop()};',
   'var FS={mkdirTree(path,mode){},makedev:(ma,mi)=>ma<<8|mi,filesystems:null};FS.filesystems={MEMFS,NODEFS,WORKERFS};',
   'var TTY={ttys:[],stream_ops:{write(stream,buffer){stream.tty.ops.put_char(stream.tty,buffer[0])}},default_tty_ops:{put_char(tty,val){},fsync(tty){}}};',
   'function callMain(args=[]){var entryFunction=__emscripten_proxy_main;runtimeKeepalivePush();throw"unwind"}',
   ...["callMain", "FS", "ENV", "getValue", "setValue", "stringToNewUTF8", "UTF8ToString", "ccall"].map((m) => `Module["${m}"]=${m};`),
 ].join("\n");
-/** A 0039 glue binding `names` to minified raw exports, and its wasm (every raw name a function export). */
-function runtimeOf(names = CONTRACT.map((c) => c.name), extraGlue = "", wasmExtra = {}) {
-  const bind = names.map((n, i) => `${n}=Module["${n}"]=wasmExports["e${i}"];`).join("");
-  const glue = `${SURFACE}\nfunction assignWasmExports(wasmExports){${bind}}\n${extraGlue}`;
+/**
+ * The same reach-ins in the shapes emsdk 7.0.0's -O3 glue has (the trial build of 2026-11-17,
+ * emsdk7-eval bd4560f0a3): `!==` (emscripten#27927); the exit hooks swapped in the table, which
+ * also holds proxied functions Terser inlined (#28059, #27995); runtime methods used only by their
+ * export inlined into it, so no global getValue, setValue, ccall or stringToNewUTF8 (Terser); no
+ * FS.filesystems (#27940), NODEFS and WORKERFS exported on Module by the kernel's link.
+ */
+const SURFACE_7 = [
+  'var Module=typeof Module!=="undefined"?Module:{};',
+  'var ENVIRONMENT_IS_PTHREAD=ENVIRONMENT_IS_WORKER&&globalThis.name=="em-pthread";',
+  'var ABORT=false;var EXITSTATUS;var wasmMemory;function initMemory(){if(Module["wasmMemory"]){wasmMemory=Module["wasmMemory"]}}',
+  'var out=Module["print"]||console.log;var err=Module["printErr"]||console.error;Module["arguments"];Module["locateFile"];Module["noInitialRun"];',
+  'Module["onRuntimeInitialized"];Module["onAbort"];Module["onExit"];Module["preRun"];',
+  'class ExitStatus{name="ExitStatus";constructor(status){this.message=`Program terminated with exit(${status})`;this.status=status}}',
+  'var runtimeKeepaliveCounter=0;var runtimeKeepalivePush=()=>{runtimeKeepaliveCounter+=1};var runtimeExited=false;',
+  'var PThread={unusedWorkers:[],tlsInitFunctions:[],pthreads:{},allocateUnusedWorker(){var worker;var pthreadMainJs=Module["mainScriptUrlOrBlob"];worker=new Worker(pthreadMainJs,{workerData:"em-pthread",name:"em-pthread"});worker.onerror=e=>{err(`worker sent an error! ${e.filename}`);throw e};PThread.unusedWorkers.push(worker);return worker},',
+  'getNewWorker(){if(PThread.unusedWorkers.length==0){var newWorker=PThread.allocateUnusedWorker()}return PThread.unusedWorkers.pop()},returnWorkerToPool:worker=>{delete PThread.pthreads[worker.pthread_ptr]}};',
+  'var cleanupThread=pthread_ptr=>{var worker=PThread.pthreads[pthread_ptr];PThread.returnWorkerToPool(worker)};',
+  'var spawnThread=threadParams=>{var worker=PThread.getNewWorker();if(!worker)return 6;return 0};function pthreadCreateProxied(){return spawnThread(threadParams)}',
+  'function exitOnMainThread(returnCode){if(ENVIRONMENT_IS_PTHREAD)return proxyToMainThread(0,0,0,returnCode)}function _proc_exit(code){if(ENVIRONMENT_IS_PTHREAD)return proxyToMainThread(1,0,1,code);throw new ExitStatus(code)}var proxiedJSCallArgs=[];',
+  'var proxiedFunctionTable=[exitOnMainThread,_proc_exit,pthreadCreateProxied,function(fd,newfd,flags){if(ENVIRONMENT_IS_PTHREAD)return proxyToMainThread(3,0,1,fd,newfd,flags);try{if(fd===newfd)return-28;var old=SYSCALLS.getStreamFromFD(fd);return FS.dupStream(old,newfd).fd}catch(e){if(typeof FS==="undefined"||!(e.name==="ErrnoError"))throw e;return-e.errno}},_fd_write];',
+  'var waitAsyncPolyfilled=!Atomics.waitAsync;function __emscripten_thread_mailbox_await(pthread_ptr){if(!waitAsyncPolyfilled){var wait=Atomics.waitAsync(HEAP32,pthread_ptr/4,pthread_ptr);wait.value.then(checkMailbox);var waitingAsync=pthread_ptr+204}}',
+  'var checkMailbox=()=>{var pthread_ptr=_pthread_self();if(!pthread_ptr)return;runtimeKeepalivePush();callUserCallback(()=>{__emscripten_thread_mailbox_await(pthread_ptr);__emscripten_check_mailbox()});runtimeKeepalivePop()};',
+  'var FS={mkdirTree(path,mode=511){},makedev:(ma,mi)=>ma<<8|mi};var NODEFS={staticInit(){}};var WORKERFS={mount(mount){}};',
+  'var TTY={ttys:[],stream_ops:{write(stream,buffer){stream.tty.ops.put_char(stream.tty,buffer[0])}},default_tty_ops:{put_char(tty,val){},fsync(tty){}}};',
+  'function callMain(args=[]){var entryFunction=__emscripten_proxy_main;runtimeKeepalivePush();throw"unwind"}',
+  'var UTF8ToString=(ptr,maxBytesToRead,ignoreNul)=>"";',
+  'Module["callMain"]=callMain;Module["ENV"]=ENV;Module["ccall"]=(ident,returnType,argTypes,args)=>{};',
+  'Module["setValue"]=function(ptr,value,type="i8"){};Module["getValue"]=function(ptr,type="i8"){};',
+  'Module["UTF8ToString"]=UTF8ToString;Module["stringToNewUTF8"]=str=>{};Module["FS"]=FS;Module["NODEFS"]=NODEFS;Module["WORKERFS"]=WORKERFS;',
+].join("\n");
+const SURFACES = [["emsdk 6.0.5", SURFACE], ["emsdk 7.0.0", SURFACE_7]];
+// 7.0.0 keeps a global binding only for the exports the glue itself reads (Terser drops the rest)
+const GLUE_READS_7 = new Set(["_malloc", "_pthread_self", "__emscripten_proxy_main", "__emscripten_check_mailbox"]);
+/** A 0039 glue (`surface`'s shapes) binding `names` to minified raw exports, and its wasm (every raw name a function export). */
+function runtimeOf(names = CONTRACT.map((c) => c.name), extraGlue = "", wasmExtra = {}, surface = SURFACE) {
+  const global = (n) => (surface !== SURFACE_7 || GLUE_READS_7.has(n) ? `${n}=` : "");
+  const bind = names.map((n, i) => `${global(n)}Module["${n}"]=wasmExports["e${i}"];`).join("");
+  const glue = `${surface}\nfunction assignWasmExports(wasmExports){${bind}}\n${extraGlue}`;
   const wasm = wasmOf({ exports: [...names.map((_, i) => [`e${i}`, 0, i]), ["mem", 2, 0]], imports: [["a", "b", 2], ["a", "c", 0]], ...wasmExtra });
   return { glue, wasmBytes: wasm };
 }
@@ -394,17 +429,87 @@ test("readWasm reads custom sections, imports and exports, and never throws", ()
   }
 });
 
-test("the static checks pass a 0039 runtime that keeps the contract and the glue surface", () => {
-  const rt = runtimeOf();
-  assert.equal(contractLevel(rt.glue), "0039");
-  const { level, results } = staticChecks(rt);
-  assert.equal(level, "0039");
-  for (const r of results) if (!r.note) assert.equal(r.ok, true, `${r.label}: ${r.extra}`);
-  assert.equal(results.filter((r) => !r.note).length, 7); // S1 x4, S2, S6 K6, S6
-  assert.match(byLabel(results, /^S6 K6 /).label, /5 items/);
-  assert.match(byLabel(results, /^S6 test-probe/).label, /all 4 present/);
-  for (const s of GLUE_SURFACE) assert.equal(s.test(rt.glue), true, s.id);
-  assert.equal(exportBindings(rt.glue).get("_lean_wasm_compile"), `e${CONTRACT.findIndex((c) => c.name === "_lean_wasm_compile")}`);
+test("the static checks pass a 0039 runtime that keeps the contract and the glue surface, in emsdk 6.0.5's and 7.0.0's glue shapes", () => {
+  for (const [gen, surface] of SURFACES) {
+    const rt = runtimeOf(undefined, "", {}, surface);
+    assert.equal(contractLevel(rt.glue), "0039", gen);
+    const { level, results } = staticChecks(rt);
+    assert.equal(level, "0039", gen);
+    for (const r of results) if (!r.note) assert.equal(r.ok, true, `${gen}: ${r.label}: ${r.extra}`);
+    assert.equal(results.filter((r) => !r.note).length, 7, gen); // S1 x4, S2, S6 K6, S6
+    assert.match(byLabel(results, /^S6 K6 /).label, /5 items/, gen);
+    assert.match(byLabel(results, /^S6 test-probe/).label, /all 4 present/, gen);
+    for (const s of GLUE_SURFACE.filter((s) => s.need !== "PIN")) assert.equal(s.test(rt.glue), true, `${gen}: ${s.id}`);
+    assert.equal(exportBindings(rt.glue).get("_lean_wasm_compile"), `e${CONTRACT.findIndex((c) => c.name === "_lean_wasm_compile")}`, gen);
+  }
+  // what only lean4game's pinned worker reads: a note, present in 6.0.5's table order, absent from 7.0.0's
+  const pinLine = (glue) => byLabel(staticChecks({ glue, wasmBytes: runtimeOf().wasmBytes }).results, /^S6 what only lean4game's pinned worker/);
+  assert.deepEqual(GLUE_SURFACE.filter((s) => s.need === "PIN").map((s) => s.id), ["exit entries at [0] and [1]"]);
+  assert.equal(pinLine(runtimeOf().glue).note, true);
+  assert.match(pinLine(runtimeOf().glue).label, /: all 1 present$/);
+  assert.equal(pinLine(runtimeOf(undefined, "", {}, SURFACE_7).glue).note, true);
+  assert.match(pinLine(runtimeOf(undefined, "", {}, SURFACE_7).glue).label,
+    /: absent exit entries at \[0\] and \[1\] \(proxiedFunctionTable\[0\] is _proc_exit .*\): lean4game re-pins before it runs on this runtime$/);
+  // the table as written: the exit hooks at either position; 7.0.0's also holds a function Terser inlined
+  assert.deepEqual(proxiedFunctionTable(SURFACE), ["_proc_exit", "exitOnMainThread", "pthreadCreateProxied"]);
+  const t7 = proxiedFunctionTable(SURFACE_7);
+  assert.deepEqual([t7.length, ...t7.slice(0, 3), t7[4]], [5, "exitOnMainThread", "_proc_exit", "pthreadCreateProxied", "_fd_write"]);
+  assert.match(t7[3], /^function\(fd,newfd,flags\)\{.*"ErrnoError".*\}$/);
+  assert.equal(proxiedFunctionTable("var notTheTable=[_proc_exit,exitOnMainThread];"), null);
+});
+
+test("S6 on either glue fails what hosts would miss: the Module adoption, a runtime method, the FS route, an exit entry", () => {
+  const names = CONTRACT.map((c) => c.name);
+  // both REQ lines of S6, K6's and the rest, as one
+  const s6 = (glue) => {
+    const { results } = staticChecks({ glue, wasmBytes: runtimeOf(names).wasmBytes });
+    const lines = [byLabel(results, /^S6 K6 /), byLabel(results, /^S6 the \[GLUE\]/)];
+    return { ok: lines.every((l) => l.ok), extra: lines.map((l) => l.extra).filter(Boolean).join("; ") };
+  };
+  const cuts = {
+    "emsdk 6.0.5": [
+      ['var Module=typeof Module!="undefined"?Module:{};', "Module adoption"],
+      ['Module["getValue"]=getValue;', "runtime methods"],
+      ["FS.filesystems={MEMFS,NODEFS,WORKERFS};", "FS"], // 6.0.5's only route to NODEFS and WORKERFS
+      ["FS.filesystems={MEMFS,NODEFS,WORKERFS}", "FS", "FS.filesystems={MEMFS,NODEFS}"],
+      ["exitOnMainThread,pthreadCreateProxied", "exit entries", "pthreadCreateProxied"],
+      ["[_proc_exit,", "exit entries", "["],
+    ],
+    "emsdk 7.0.0": [
+      ['var Module=typeof Module!=="undefined"?Module:{};', "Module adoption"],
+      ['Module["getValue"]=function(ptr,type="i8"){};', "runtime methods"],
+      ['Module["stringToNewUTF8"]=str=>{};', "runtime methods"],
+      ['Module["WORKERFS"]=WORKERFS;', "FS"], // no FS.filesystems: the exports are the route
+      ['Module["NODEFS"]=NODEFS;', "FS"],
+      ["[exitOnMainThread,", "exit entries", "["],
+      ["exitOnMainThread,_proc_exit,", "exit entries", "exitOnMainThread,"],
+      ["function _proc_exit(code)", "exit entries", "function _proc_exit2(code)"], // in the table, not defined
+    ],
+  };
+  for (const [gen, surface] of SURFACES) {
+    const glue = runtimeOf(names, "", {}, surface).glue;
+    assert.equal(s6(glue).ok, true, gen);
+    for (const [cut, id, by = "/*cut*/"] of cuts[gen]) {
+      assert.ok(glue.includes(cut), `${gen}: ${cut}`);
+      const r = s6(glue.replace(cut, by));
+      assert.equal(r.ok, false, `${gen}: ${cut}`);
+      assert.match(r.extra, new RegExp(`(?:^|; )${id}: `), `${gen}: ${cut}`);
+    }
+  }
+  // either route passes, whatever the rest of the glue looks like; the names alone (var NODEFS, var WORKERFS) do not
+  const g7 = runtimeOf(names, "", {}, SURFACE_7).glue;
+  const noExports = g7.replace('Module["NODEFS"]=NODEFS;Module["WORKERFS"]=WORKERFS;', "");
+  assert.notEqual(noExports, g7);
+  assert.equal(s6(noExports).ok, false);
+  assert.match(s6(noExports).extra, /^FS: /);
+  assert.equal(s6(`${noExports}\nFS.filesystems={MEMFS,NODEFS,WORKERFS};`).ok, true);
+  assert.equal(s6(`${noExports}\nFS.filesystems={'MEMFS':MEMFS,'NODEFS':NODEFS,'WORKERFS':WORKERFS};`).ok, true); // emsdk's unminified spelling
+  assert.equal(s6(`${noExports}\nModule['NODEFS']=NODEFS;Module['WORKERFS']=WORKERFS;`).ok, true); // single quotes
+  // a reordered 6.0.5 table, and the 7.0.0 adoption line in a 6.0.5 glue: shapes, not generations, are checked
+  const g5 = runtimeOf(names).glue;
+  assert.equal(s6(g5.replace("[_proc_exit,exitOnMainThread,", "[pthreadCreateProxied,exitOnMainThread,_proc_exit,").replace(",pthreadCreateProxied]", "]")).ok, true);
+  assert.equal(s6(g5.replace('typeof Module!="undefined"', "typeof Module!=='undefined'")).ok, true);
+  assert.equal(s6(g5.replace('Module["ccall"]=ccall;', 'Module["ccall"]==ccall;')).ok, false); // a comparison is no export
 });
 
 test("K6: S6 checks the glue names QED64's worker reads on a line of their own, the exit entries at any index", () => {
@@ -416,10 +521,13 @@ test("K6: S6 checks the glue names QED64's worker reads on a line of their own, 
   const glueWith = (from, to) => { const g = runtimeOf(); return { glue: g.glue.replace(from, to), wasmBytes: g.wasmBytes }; };
   const TABLE = "var proxiedFunctionTable=[_proc_exit,exitOnMainThread,pthreadCreateProxied];";
   // emsdk may reorder the table: K6 holds at any index; the copy lean4game pins (QED64 73d7f3b) hooks [0] and [1]
+  // (emsdk 7 does: emscripten#28059), so that is a note of its own (a PIN item), never a failure
+  const pinLine = (r) => byLabel(r, /^S6 what only lean4game's pinned worker/);
   let { results } = staticChecks(glueWith(TABLE, "var proxiedFunctionTable=[pthreadCreateProxied,exitOnMainThread,_proc_exit];"));
   assert.equal(k6Line(results).ok, true, k6Line(results).extra);
-  assert.equal(restLine(results).ok, false);
-  assert.match(restLine(results).extra, /^exit entries at \[0\] and \[1\]: /);
+  assert.equal(restLine(results).ok, true, restLine(results).extra);
+  assert.equal(pinLine(results).note, true);
+  assert.match(pinLine(results).label, /absent exit entries at \[0\] and \[1\]/);
   // an entry missing, or a table that holds the names but not the top-level functions it is compared with
   for (const [from, to, why] of [[TABLE, "var proxiedFunctionTable=[_proc_exit,pthreadCreateProxied];", "no exitOnMainThread entry"],
     ["var _proc_exit=code=>", "var procExit=code=>", "_proc_exit not defined at top level"],
@@ -463,6 +571,10 @@ test("proxiedFunctionTable reads the table's entries as written: identifiers, or
 test("pthreadPool reads the pool the glue allocates at start-up: -sPTHREAD_POOL_SIZE's literal, or 0038's library's default", () => {
   const loop = (v) => `initMainThread(){var pthreadPoolSize=${v};while(pthreadPoolSize--){PThread.allocateUnusedWorker()}addOnPreRun(()=>{})}`;
   assert.deepEqual(pthreadPool(`var PThread={${loop(24)}}`), { size: 24, form: "literal" }); // emsdk 6.0.5's -O3 shape, as since D3b and before 0038
+  // emsdk 7.0.0's: its Terser pass drops the loop's braces (the 0038 line of the emsdk7-eval trial glue had
+  // `var pthreadPoolSize=leanPthreadPoolTarget;while(pthreadPoolSize--)PThread.allocateUnusedWorker();`)
+  assert.deepEqual(pthreadPool("var PThread={initMainThread(){var pthreadPoolSize=24;while(pthreadPoolSize--)PThread.allocateUnusedWorker();addOnPreRun(async()=>{})}}"),
+    { size: 24, form: "literal" });
   assert.deepEqual(pthreadPool(`var PThread={${loop(4)}}`), { size: 4, form: "literal" });
   const lib = 'function leanPoolInt(v,dflt,lo,hi){return dflt}var leanPthreadPoolTarget=leanPoolInt(Module["pthreadPoolSize"],24,0,64);';
   assert.deepEqual(pthreadPool(`${lib}var PThread={${loop("leanPthreadPoolTarget")}}`), { size: 24, form: "0038" }); // the runtimes from 0038 to D3b
@@ -490,8 +602,9 @@ test("the static checks fail what hosts would miss: an unbound or non-function e
   assert.equal(byLabel(results, /under 1 MiB/).ok, false);
   // [cut, the item that fails, the line it fails: K6's (QED64's worker) or the rest of S6]
   for (const [cut, id, line] of [['throw"unwind"', '"unwind"', /^S6 the \[GLUE\]/], ["pthread_ptr+204", "mailbox await", /^S6 the \[GLUE\]/],
-    ["exitOnMainThread,pthreadCreateProxied", "exit entries", /^S6 K6 /], ["exitOnMainThread,pthreadCreateProxied", "exit entries at [0] and [1]", /^S6 the \[GLUE\]/],
-    ["runtimeKeepalivePush();callUserCallback", "checkMailbox", /^S6 K6 /], ["var TTY=", "TTY", /^S6 the \[GLUE\]/]]) {
+    ["exitOnMainThread,pthreadCreateProxied", "exit entries", /^S6 K6 /],
+    ["runtimeKeepalivePush();callUserCallback", "checkMailbox", /^S6 K6 /], ["});runtimeKeepalivePop()", "checkMailbox", /^S6 K6 /],
+    ["var TTY=", "TTY", /^S6 the \[GLUE\]/]]) {
     const g = runtimeOf(names);
     ({ results } = staticChecks({ glue: g.glue.replace(cut, "/*cut*/"), wasmBytes: g.wasmBytes }));
     assert.equal(byLabel(results, line).ok, false, cut);
@@ -567,6 +680,18 @@ test("runtime-contract.mjs's copy of the contract is src/emscripten-exports.seed
   assert.deepEqual(parseSeed("# c\n_a   # x\n\n  _b\n#_c\n"), ["_a", "_b"]);
 });
 
+test("RUNTIME_METHODS are the lean link's -sEXPORTED_RUNTIME_METHODS (src/CMakeLists.txt); what exists on Module only", (t) => {
+  // on Module only since emsdk 7: four runtime methods, and every export of the contract but the four the glue reads itself
+  assert.deepEqual(CONTRACT.map((c) => c.name).filter((n) => !moduleOnly(n)).sort(), [...EXPORT_GLOBALS].sort());
+  for (const n of ["_main", "_free", "_lean_wasm_compile", "_lean_apply_m"]) assert.equal(moduleOnly(n), true, n);
+  for (const m of MODULE_ONLY_METHODS) assert.ok(RUNTIME_METHODS.includes(m) && moduleOnly(m) && !GLUE_NAMES.includes(m), m);
+  for (const n of ["FS", "ENV", "callMain", "UTF8ToString", "NODEFS", "_lean_not_in_the_contract", "_proc_exit"]) assert.equal(moduleOnly(n), false, n);
+  assert.equal(moduleOnly("_lean_x", ["_lean_x"]), true); // against another contract (exports-audit's --seed)
+  const cmake = path.resolve(pkg, "..", "..", "src", "CMakeLists.txt");
+  if (!fs.existsSync(cmake)) return t.skip(`${cmake} is not checked out`);
+  assert.deepEqual([...fs.readFileSync(cmake, "utf8").matchAll(/-sEXPORTED_RUNTIME_METHODS=([\w,]+)/g)].map((m) => m[1].split(",")), [[...RUNTIME_METHODS]]);
+});
+
 // ---------- exports-audit.mjs ----------
 
 test("exports-audit: every runtime name a consumer touches is in the contract or guarded; unknown and unguarded names fail", () => {
@@ -580,6 +705,8 @@ test("exports-audit: every runtime name a consumer touches is in the contract or
   ].join("\n"));
   write(path.join(tree, "node_modules", "dep", "index.js"), "M._lean_from_a_dependency();");
   write(path.join(tree, "public", "runtime", "lean.js"), 'var Module=typeof Module!="undefined"?Module:{};M._lean_inside_a_glue_copy();');
+  // an emsdk 7.0.0 glue copy (strict typeof, emscripten#27927) is skipped as well
+  write(path.join(tree, "public", "runtime-7", "lean.js"), 'var Module=typeof Module!=="undefined"?Module:{};M._lean_inside_a_7_glue_copy();');
   const glue = path.join(root, "glue.js");
   write(glue, 'var Module=typeof Module!="undefined"?Module:{};var someGlueVar=1;var PThread={};function f(){var worker=1;return worker}var a,b,c;');
   const run = (...args) => spawnSync(process.execPath, [path.join(pkg, "exports-audit.mjs"), ...args], { encoding: "utf8" });
@@ -587,7 +714,7 @@ test("exports-audit: every runtime name a consumer touches is in the contract or
   assert.equal(r.status, 1, r.stderr);
   const j = JSON.parse(r.stdout);
   assert.equal(j.files, 1);
-  assert.equal(j.skippedGlueCopies, 1);
+  assert.equal(j.skippedGlueCopies, 2);
   assert.deepEqual(j.unknown.map((u) => u.name), ["_lean_not_in_the_contract"]);
   assert.deepEqual(j.unguarded.map((u) => u.name), ["someGlueVar"]);
   assert.deepEqual(j.contract.map((u) => u.name), ["__emscripten_check_mailbox", "_emscripten_check_mailbox", "_lean_init_task_manager_using", "_lean_wasm_compile", "_pthread_self"]);
@@ -624,4 +751,103 @@ test("exports-audit: every runtime name a consumer touches is in the contract or
     assert.doesNotMatch(r.stderr, /\n\s+at /); // a usage error, not a stack trace
   }
   assert.equal(run("--help").status, 0);
+});
+
+test("exports-audit: a Module-only name read off the global scope or named bare in code is BARE (no global since emsdk 7); FS members a glue lacks are marked", () => {
+  const root = tmp(), tree = path.join(root, "consumer");
+  const BARE = [
+    "_free(p); const v = self.getValue(x, 'i8'); globalThis._lean_wasm_compile(a, b); typeof ccall; window['stringToNewUTF8'];",
+    "if (typeof _main === 'function') {}",
+  ];
+  const FINE = [
+    // Module reads, the four exports the glue keeps as globals, keys, method definitions, declarations, comments, strings
+    "M._free(p); M.getValue(x); Module['_lean_mk_string'](s); self.Module._lean_initialize(); M?._main; _malloc(8n); __emscripten_check_mailbox(); _pthread_self();",
+    "const fake = { _free: () => {}, _lean_wasm_compile(a, b) { return 0; }, _lean_mk_string() {} };",
+    "// _free(ptr) after the load; \"_lean_wasm_compile(code)\"; `_main()`",
+    "const msg = `needs _lean_wasm_load_snapshot_mem in the runtime`; function _free() {} /* _lean_initialize() */",
+    "FS.mount(M.WORKERFS ?? FS.filesystems.WORKERFS, {}, '/p');",
+  ];
+  write(path.join(tree, "worker.js"), [...BARE, ...FINE].join("\n"));
+  write(path.join(tree, "types.d.ts"), "interface M { _free(p: bigint): void; _lean_wasm_compile?(a: bigint, b: bigint): number; _main: () => void; }");
+  const glue7 = path.join(root, "glue-7.js"), glue6 = path.join(root, "glue-6.js");
+  write(glue7, 'var Module=typeof Module!=="undefined"?Module:{};var FS={mount(){}};var WORKERFS={};Module["getValue"]=function(ptr){};');
+  write(glue6, 'var Module=typeof Module!="undefined"?Module:{};var FS={mount(){},filesystems:null};var WORKERFS={};function getValue(ptr){}');
+  const run = (...args) => spawnSync(process.execPath, [path.join(pkg, "exports-audit.mjs"), ...args], { encoding: "utf8" });
+  let r = run("--glue", glue7, "--json", tree);
+  assert.equal(r.status, 1, r.stderr);
+  let j = JSON.parse(r.stdout);
+  assert.deepEqual(j.bare.map((u) => u.name).sort(), ["_free", "_lean_wasm_compile", "_main", "ccall", "getValue", "stringToNewUTF8"]);
+  assert.deepEqual([j.unknown, j.unguarded], [[], []]);
+  assert.ok(["getValue", "WORKERFS"].every((n) => j.guarded.some((u) => u.name === n)), JSON.stringify(j.guarded)); // read on Module: runtime methods
+  assert.deepEqual(j.members.filter((m) => m.absent).map((m) => m.name), ["FS.filesystems"]); // gone from emsdk 7's glue (emscripten#27940)
+  r = run("--glue", glue7, tree);
+  assert.match(r.stdout, /^BARE reads of Module-only names \(no global binding since emsdk 7: read them on Module\) \(6\):\n {2}_free {3}consumer\/worker\.js$/m);
+  assert.match(r.stdout, /^members of FS: .*filesystems \(not in --glue\)/m);
+  assert.match(r.stdout, /AUDIT: 6 name\(s\) the contract and S6 do not cover, or read bare/);
+  // a glue that still names the member marks nothing; without the bare reads the tree passes, on either glue
+  j = JSON.parse(run("--glue", glue6, "--json", tree).stdout);
+  assert.deepEqual(j.members.filter((m) => m.absent), []);
+  write(path.join(tree, "worker.js"), FINE.join("\n"));
+  for (const glue of [glue7, glue6]) {
+    r = run("--glue", glue, tree);
+    assert.equal(r.status, 0, r.stdout);
+    assert.match(r.stdout, /AUDIT: every name is covered/);
+  }
+});
+
+test("exports-audit: a Module-only method named bare is BARE in a file whose code names Module, importScripts or FS; no mention in a comment or a string is", () => {
+  const root = tmp(), tree = path.join(root, "consumer");
+  const run = (...args) => spawnSync(process.execPath, [path.join(pkg, "exports-audit.mjs"), ...args], { encoding: "utf8" });
+  /** The BARE rows ("name file,…") of a tree of `files` ({ path: text }); a BARE read fails the audit like any other. */
+  const bare = (files) => {
+    fs.rmSync(tree, { recursive: true, force: true });
+    for (const [name, text] of Object.entries(files)) write(path.join(tree, name), text);
+    const r = run("--json", tree);
+    const rows = JSON.parse(r.stdout).bare.map((u) => `${u.name} ${[...u.files].sort().join(",")}`).sort();
+    assert.equal(r.status, rows.length ? 1 : 0, r.stdout);
+    return rows;
+  };
+  // a bare call in a worker-like file, one whose code names importScripts, Module or FS (of an .html file, its <script>)
+  assert.deepEqual(bare({
+    "worker.js": 'importScripts("lean.js");\nconst n = getValue(p, "i64");',
+    "boot.mjs": "self.Module = { preRun: [() => setValue(p, 1, 'i32')] };",
+    "mount.ts": "FS.mkdirTree('/w'); const s = stringToNewUTF8(path);",
+    "page.html": '<script>var Module = {}; Module.onRuntimeInitialized = () => ccall("main", null, [], []);</script>',
+  }), ["ccall consumer/page.html", "getValue consumer/worker.js", "setValue consumer/boot.mjs", "stringToNewUTF8 consumer/mount.ts"]);
+  assert.match(run(tree).stdout, /^BARE reads of Module-only names .*\(4\):\n {2}ccall {3}consumer\/page\.html$[\s\S]*AUDIT: 4 name\(s\) the contract and S6 do not cover, or read bare/m);
+  // the same calls in files whose code names none of them are the files' own (a React state setter, a library's
+  // getValue): Module, importScripts or FS named in a comment, a string or an .html file's text do not count
+  assert.deepEqual(bare({
+    "view.tsx": 'const [value, setValue] = useState("");\nsetValue(x); const n = getValue(p, "i64");',
+    "lib.js": '// after importScripts, Module and FS are up\nconst label = "Module"; ccall("main", null, [], []); stringToNewUTF8(path);',
+    "page.html": '<p>var Module = {}; ccall("main", null, [], []);</p><script>run();</script>',
+  }), []);
+  // in a worker-like file, a mention in a comment, a string, a template or an .html file's text is no read; nor are a
+  // local definition or declaration, an object key, a method definition, a TS signature, or a read off an object
+  assert.deepEqual(bare({
+    "worker.js": [
+      'importScripts("lean.js"); // getValue(p, "i64") once the runtime is up; setValue(p, 1) too',
+      'const s = "ccall(\'main\')", t = `stringToNewUTF8(${x})`; /* getValue(p) */',
+      "function getValue(o) { return o.v; } const setValue = (o, v) => { o.v = v; }; let ccall;",
+      "const api = { getValue: 1, setValue(o, v) {}, stringToNewUTF8(s) { return s; } }; class Store { ccall(name) { return name; } }",
+      'M.getValue(p, "i64"); Module.ccall("main", null, [], []); store?.setValue(1); Module["stringToNewUTF8"](s);',
+    ].join("\n"),
+    "types.d.ts": "declare const Module: { getValue(p: number, t: string): number; ccall?(n: string): number; setValue: (p: number) => void };",
+    "page.html": '<p>getValue(p, "i64") is prose</p>\n<script>var Module = {};</script>',
+  }), []);
+  // the global-scope and typeof forms are BARE in code (any file), and not in a comment, a string or a template
+  const FORMS = "self.getValue(p); globalThis._free(p); typeof ccall; window?.stringToNewUTF8; self['_main']; typeof _lean_wasm_compile;";
+  assert.deepEqual(bare({ "worker.js": `importScripts("lean.js");\n${FORMS}`, "node.mjs": FORMS }),
+    ["_free", "_lean_wasm_compile", "_main", "ccall", "getValue", "stringToNewUTF8"].map((n) => `${n} consumer/node.mjs,consumer/worker.js`));
+  assert.deepEqual(bare({
+    "worker.js": `importScripts("lean.js");\n// ${FORMS}\n/* ${FORMS} */ const why = ${JSON.stringify(FORMS)};`,
+    "node.mjs": `// ${FORMS}\nconst t = \`${FORMS}\`;`,
+  }), []);
+  // a regex literal in an arrow body (`=> /…/`) is a literal: its `//`, a quote or a backtick in it hides no code after
+  // it on the line (or the lines after), and turns no string's text into code
+  assert.deepEqual(bare({
+    "worker.js": 'importScripts("lean.js"); const isUrl = (s) => /^https?:\\/\\//i.test(s); self.getValue(p, "i64"); typeof ccall; _free(p);',
+    "tick.js": 'importScripts("lean.js"); const isTick = (s) => /`/.test(s);\nsetValue(p, 1, "i32"); const done = `ok`;',
+    "quote.js": 'importScripts("lean.js"); const isQuote = (s) => /"/.test(s); const why = "call getValue(p) first, then _free(p)";',
+  }), ["_free consumer/worker.js", "ccall consumer/worker.js", "getValue consumer/worker.js", "setValue consumer/tick.js"]);
 });

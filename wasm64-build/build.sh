@@ -1,12 +1,13 @@
 #!/bin/bash
 # Clean-room wasm64 (Memory64) toolchain build for this branch.
-# Expected wall-clock on a 14-core M-series: 1.5-3 h cold, ~10-25 min warm.
+# Expected wall-clock on a 14-core M-series: ~15 min cold (the first emsdk 7.0.0
+# build, 2026-11-17, with the toolchain image, ccache and build dir new), less warm.
 # Build tree and ccache live OUTSIDE the repo (BUILD_DIR, default sibling
 # <repo>-build) so the checkout stays clean.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="${QED64_BUILD_DIR:-$REPO/../wasm64-lean-kernel-build}"
-IMG=qed64-toolchain:emsdk-6.0.5
+IMG=qed64-toolchain:emsdk-7.0.0
 mkdir -p "$BUILD_DIR/build" "$BUILD_DIR/ccache"
 # what this build is of: written at the end only if the sources were clean at the
 # start and the end, unchanged between the two commits, and the binary embeds that

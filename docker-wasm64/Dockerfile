@@ -1,4 +1,4 @@
-FROM emscripten/emsdk:6.0.5
+FROM emscripten/emsdk:7.0.0
 
 # Native stage0 needs the host libuv headers/library. The wasm stage builds its
 # own patched libuv through Emscripten.
@@ -21,13 +21,14 @@ RUN apt-get update \
 RUN python3 - <<'PYEOF2'
 path = '/emsdk/upstream/emscripten/src/lib/libpthread.js'
 s = open(path).read()
-old = """  $checkMailbox__deps: ['$callUserCallback',
-                        'pthread_self',"""
-assert old in s, 'checkMailbox deps anchor missing'
-s = s.replace(old, """  $checkMailbox__deps: ['$callUserCallback',
-                        '$runtimeKeepalivePush',
-                        '$runtimeKeepalivePop',
-                        'pthread_self',""", 1)
+# emsdk 7.0.0 (emscripten#27995) finds JS-to-JS library dependencies by scanning the body, so
+# the keepalive calls added below pull in $runtimeKeepalivePush/Pop by themselves; an explicit
+# __deps entry would only print a "redundant __deps entry" warning. Assert the shape we patch.
+deps = """  $checkMailbox__deps: [
+                        'pthread_self',
+                        '_emscripten_check_mailbox',
+  ],"""
+assert deps in s, 'checkMailbox deps shape changed'
 old2 = """    var pthread_ptr = _pthread_self();
     if (!pthread_ptr) return;
     callUserCallback(() => {"""

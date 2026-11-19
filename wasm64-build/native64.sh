@@ -20,13 +20,19 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 TAG="${1:?usage: native64.sh <tag>}"
 BD="${QED64_BUILD_DIR:-$REPO/../wasm64-lean-kernel-build-$TAG}"
-IMG=qed64-toolchain:emsdk-6.0.5
+IMG=qed64-toolchain:emsdk-7.0.0
 JOBS="${JOBS:-10}"
 if ! git --version >/dev/null 2>&1 && [ -d /Library/Developer/CommandLineTools ]; then
   export DEVELOPER_DIR=/Library/Developer/CommandLineTools
 fi
 [ -f "$BD/BUILT-COMMIT" ] || { echo "native64: $BD/BUILT-COMMIT missing — run import-release.sh build $TAG first" >&2; exit 1; }
 COMMIT="$(cat "$BD/BUILT-COMMIT")"
+# One recipe: $IMG is the image of HEAD's docker-wasm64 (build.sh builds it under that tag), the
+# compiler is built from $COMMIT's sources. Refuse a build dir whose recipe is another (one built
+# before an emsdk move, its native64 built after it): nothing would record the image it came from
+# (NATIVE-COMMIT names the commit only). The same rule as import-release.sh's gate.
+git -C "$REPO" diff --quiet "$COMMIT" HEAD -- docker-wasm64 \
+  || { echo "native64: docker-wasm64 at HEAD is not ${COMMIT:0:10}'s recipe ($IMG would not be the image it was built with): run this from a checkout of ${COMMIT:0:10}'s recipe" >&2; exit 1; }
 SRC="$BD/native-src"; OUT="$BD/native"
 mkdir -p "$OUT" "$BD/ccache-native"
 

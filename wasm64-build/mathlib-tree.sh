@@ -28,7 +28,7 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 TAG="${1:?usage: mathlib-tree.sh <tag>}"
 BD="${QED64_BUILD_DIR:-$REPO/../wasm64-lean-kernel-build-$TAG}"
-IMG=qed64-toolchain:emsdk-6.0.5
+IMG=qed64-toolchain:emsdk-7.0.0
 MATHLIB_URL="${MATHLIB_URL:-https://github.com/leanprover-community/mathlib4}"
 MATHLIB_REV="${MATHLIB_REV:-$TAG}"
 # Three roots whose closure is the served profile. Extra roots (the games';
@@ -53,6 +53,11 @@ if ! git --version >/dev/null 2>&1 && [ -d /Library/Developer/CommandLineTools ]
 fi
 NATIVE="$BD/native"
 [ -x "$NATIVE/stage1/bin/lean" ] || { echo "mathlib-tree: no native64 compiler in $NATIVE — run native64.sh $TAG" >&2; exit 1; }
+# One recipe per import: Lake, git and ProofWidgets' Node build run in HEAD's $IMG, which must be the
+# recipe native64 was built with (native64.sh's rule; the image's Node builds ProofWidgets' JS)
+NC="$(cat "$NATIVE/NATIVE-COMMIT" 2>/dev/null || true)"
+[ -n "$NC" ] && git -C "$REPO" diff --quiet "$NC" HEAD -- docker-wasm64 \
+  || { echo "mathlib-tree: docker-wasm64 at HEAD is not native64's recipe (${NC:-no $NATIVE/NATIVE-COMMIT}; $IMG): run this from a checkout of that recipe" >&2; exit 1; }
 W="$BD/mathlib"; ML="$W/mathlib4"; mkdir -p "$W"
 
 echo "=== [1/4] Mathlib $MATHLIB_REV ==="

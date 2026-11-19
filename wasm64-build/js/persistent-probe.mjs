@@ -15,7 +15,7 @@ import path from "node:path";
 import vm from "node:vm";
 import { createRequire } from "node:module";
 import { applyCliContract, ensureStackSize } from "./cli-args.mjs";
-import { forwardWasmEnv, symtabStats } from "./runtime-knobs.mjs";
+import { forwardWasmEnv, glueFilesystem, symtabStats } from "./runtime-knobs.mjs";
 
 // First, before the contract prints anything: replaces this process (same PID) when
 // started without --stack-size, so every line below is printed once.
@@ -146,7 +146,7 @@ globalThis.Module = {
   preRun: [
     function mount() {
       const FS = globalThis.Module.FS;
-      const NODEFS = FS.filesystems.NODEFS;
+      const NODEFS = glueFilesystem(globalThis.Module, "NODEFS"); // Module.NODEFS (emsdk 7) or FS.filesystems.NODEFS (6.0.5)
       for (const d of ["/lib/lean", "/workspace", "/bin"]) {
         let cur = "";
         for (const part of d.split("/").filter(Boolean)) {

@@ -454,20 +454,27 @@ const SHIMS = {
   //   STAGE_TEST_TAGS                         the output of tag --merged (default: v4.33.0, v4.34.0, v4.34.0-rc1)
   //   STAGE_TEST_PATCHES <file>               show HEAD:wasm64-build/PATCHES.md
   //   STAGE_TEST_RECIPE                       log (the docker-wasm64 recipe; default: the base's docker.recipeCommit)
-  //   STAGE_TEST_STDLIB_DIFF, _FORMAT_DIFF     diff: the changed paths ("," between them) for a pathspec naming
-  //                                           src/Init (the stdlib) or not (the olean format); --quiet exits 1 when any
+  //   STAGE_TEST_RECIPES "<commit>=<recipe>[;…]"  log of that commit, before STAGE_TEST_RECIPE (a by-value staging asks
+  //                                           for the runtime's and native64's)
+  //   STAGE_TEST_FROM "<recipe>=<image>[;…]"  show <recipe>:docker-wasm64/Dockerfile: "FROM <image>"; another recipe's fails
+  //   STAGE_TEST_STDLIB_DIFF, _FORMAT_DIFF,   diff: the changed paths ("," between them) for a pathspec naming
+  //   _RECIPE_DIFF                            src/Init (the stdlib), docker-wasm64 (the recipe) or neither (the olean
+  //                                           format); --quiet exits 1 when any
   git: `${SHIM_HEAD}let a = process.argv.slice(2), C = null;
 if (a[0] === "-C") { C = a[1]; a = a.slice(2); }
 log({ tool: "git", C, argv: a });
 const e = process.env, id = e.STAGE_TEST_BASE_ID, say = (s) => process.stdout.write(s);
 if (C !== null && ["add", "commit", "tag", "push"].includes(a[0])) process.exit(0);
 const notAncestor = (x, y) => (e.STAGE_TEST_NOT_ANCESTOR ?? "").split(";").filter(Boolean).some((p) => p === x + " " + y);
+const per = (v) => Object.fromEntries((v ?? "").split(";").filter(Boolean).map((p) => [p.slice(0, p.indexOf("=")), p.slice(p.indexOf("=") + 1)]));
 switch (a[0]) {
   case "--version": say("git version 0 (stage test shim)\\n"); break;
   case "rev-parse": if (a[1] === "HEAD") say("c".repeat(40) + "\\n"); else if (a.includes("refs/tags/" + id)) say("1".repeat(40) + "\\n"); else process.exitCode = 1; break;
   case "show":
     if (a[1] === "refs/tags/" + id + ":wasm64-build/releases/" + id + ".json") say(fs.readFileSync(e.STAGE_TEST_BASE_RECORD));
     else if (a[1] === "HEAD:wasm64-build/PATCHES.md" && e.STAGE_TEST_PATCHES) say(fs.readFileSync(e.STAGE_TEST_PATCHES));
+    else if ((a[1] ?? "").endsWith(":docker-wasm64/Dockerfile") && per(e.STAGE_TEST_FROM)[a[1].split(":")[0]] !== undefined)
+      say("FROM " + per(e.STAGE_TEST_FROM)[a[1].split(":")[0]] + "\\nRUN true\\n");
     else process.exitCode = 128;
     break;
   case "merge-base": if (a[1] === "--is-ancestor" && notAncestor(a[2], a[3])) process.exitCode = 1; break;
@@ -475,9 +482,9 @@ switch (a[0]) {
   case "status": break;
   case "tag": say(e.STAGE_TEST_TAGS ?? "v4.33.0\\nv4.34.0\\nv4.34.0-rc1\\n"); break;
   case "symbolic-ref": say("refs/heads/qed64-wasm64\\n"); break;
-  case "log": say((e.STAGE_TEST_RECIPE ?? JSON.parse(fs.readFileSync(e.STAGE_TEST_BASE_RECORD, "utf8")).docker.recipeCommit) + "\\n"); break;
+  case "log": say((per(e.STAGE_TEST_RECIPES)[a[3]] ?? e.STAGE_TEST_RECIPE ?? JSON.parse(fs.readFileSync(e.STAGE_TEST_BASE_RECORD, "utf8")).docker.recipeCommit) + "\\n"); break;
   case "diff": {
-    const list = ((a.includes("src/Init") ? e.STAGE_TEST_STDLIB_DIFF : e.STAGE_TEST_FORMAT_DIFF) ?? "").split(",").filter(Boolean);
+    const list = ((a.includes("src/Init") ? e.STAGE_TEST_STDLIB_DIFF : a.includes("docker-wasm64") ? e.STAGE_TEST_RECIPE_DIFF : e.STAGE_TEST_FORMAT_DIFF) ?? "").split(",").filter(Boolean);
     if (a.includes("--quiet")) process.exitCode = list.length ? 1 : 0;
     else say(list.map((x) => x + "\\n").join(""));
     break;
@@ -907,5 +914,51 @@ test("stage-release.sh --base --runtime: every refusal comes before any write, w
     }
   } finally {
     fs.writeFileSync(pj, pjText);
+  }
+});
+
+// ---------- stage-release.sh by value: the docker block is one image (the provenance guard) ----------
+// A by-value staging reads Docker past these checks: each case ends at the guard's refusal, or, when the
+// recipe passes, at the shim's `docker image inspect` (the toolchain image "is not local"), before any write.
+
+test("stage-release.sh by value: a runtime whose recipe names another base is refused before Docker; a native64 of another recipe is noted", { skip: E2E, timeout: 180_000 }, () => {
+  const w = world();
+  // what a by-value staging reads of the import build dir: native64's and Mathlib's commits and the compiler
+  const K = path.join(w.S, "import build dir");
+  const NATIVE = "857544b439aa51633344d638dacc03d304b9ea96";
+  fs.mkdirSync(path.join(K, "native", "stage1", "bin"), { recursive: true });
+  fs.mkdirSync(path.join(K, "mathlib"), { recursive: true });
+  fs.writeFileSync(path.join(K, "native", "NATIVE-COMMIT"), `${NATIVE}\n`);
+  fs.writeFileSync(path.join(K, "mathlib", "MATHLIB-COMMIT"), "5ed2965256430c3649e86755f9576b54eca72435\n");
+  fs.writeFileSync(path.join(K, "native", "stage1", "bin", "lean"), "#!/bin/sh\n", { mode: 0o755 });
+  // two docker-wasm64 recipe commits: the script's base (it names emscripten/emsdk:7.0.0) and an older one
+  const R7 = "7".repeat(40), R6 = "6".repeat(40);
+  const FROM = `${R7}=emscripten/emsdk:7.0.0;${R6}=emscripten/emsdk:6.0.5`;
+  const env = (recipes, more = {}) => ({ STAGE_TEST_PATCHES: w.patches, QED64_BUILD_DIR: K, STAGE_TEST_RECIPES: recipes, STAGE_TEST_FROM: FROM, ...more });
+  const notLocal = /^stage-release: toolchain image qed64-toolchain:emsdk-7\.0\.0 is not local \(docker build docker-wasm64\)$/m;
+  const cases = [
+    // [label, env, the refusal on stderr, the note on stdout (null: none), Docker asked]
+    ["the runtime built on emsdk 6.0.5's recipe (a re-cut of an older release from a later script)", env(`${RT_KERNEL}=${R6}`),
+      /^stage-release: kernel 1234567890 was built from the docker-wasm64 recipe at 6666666666 \(FROM emscripten\/emsdk:6\.0\.5\), but this script records qed64-toolchain:emsdk-7\.0\.0 on emscripten\/emsdk:7\.0\.0: stage it from a commit whose stage-release\.sh names that recipe's image \(an older release's re-cut: a branch off its record commit, RELEASE\.md\)$/m, null, false],
+    ["no docker-wasm64 commit in the runtime's history", env(`${RT_KERNEL}=`),
+      /^stage-release: no commit in 1234567890's history touches docker-wasm64: no toolchain recipe to record$/m, null, false],
+    ["a recipe whose Dockerfile cannot be read", env(`${RT_KERNEL}=${"5".repeat(40)}`),
+      /^stage-release: cannot read docker-wasm64\/Dockerfile at 5555555555$/m, null, false],
+    ["the script's recipe, native64 of the same: no note", env(`${RT_KERNEL}=${R7};${NATIVE}=${R7}`), notLocal, null, true],
+    ["the script's base pinned by digest in the recipe", { ...env(`${RT_KERNEL}=${R7}`), STAGE_TEST_FROM: `${R7}=emscripten/emsdk:7.0.0@sha256:${"a".repeat(64)}` }, notLocal, null, true],
+    ["native64 built with another recipe (a runtime-only cut across an emsdk move): noted", env(`${RT_KERNEL}=${R7};${NATIVE}=${R6}`, { STAGE_TEST_RECIPE_DIFF: "docker-wasm64/Dockerfile" }), notLocal,
+      /^note: native64 \(857544b439\) and the packs it compiled were built with the docker-wasm64 recipe at 6666666666 \(FROM emscripten\/emsdk:6\.0\.5\), not the runtime's at 7777777777 \(FROM emscripten\/emsdk:7\.0\.0\), which the docker block records$/m, true],
+  ];
+  for (const [label, extra, refusal, note, dockerAsked] of cases) {
+    const out = path.join(w.S, `out by value ${label}`);
+    fs.rmSync(w.logFile, { force: true });
+    const r = w.stage(["--runtime", w.rtBuild, "--note", "x", "--out", out], { using: w.rtScript, extra });
+    assert.equal(r.status, 1, `${label}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, refusal, label);
+    if (note) assert.match(r.stdout, note, label);
+    else assert.doesNotMatch(r.stdout, /^note: /m, label);
+    const docker = w.calls().filter((c) => c.tool === "docker").map((c) => c.argv.slice(0, 3).join(" "));
+    assert.deepEqual(docker, dockerAsked ? ["image inspect qed64-toolchain:emsdk-7.0.0"] : [], label);
+    assert.equal(fs.existsSync(out), false, `${label}: nothing written`);
   }
 });

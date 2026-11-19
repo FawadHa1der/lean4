@@ -14,7 +14,10 @@ release is `release.json` `kernel.patch`.
 Layers, so a host knows what it may rely on:
 
 - **[RT]** — this runtime's ABI, changed only with a `PATCHES.md` entry;
-- **[GLUE]** — Emscripten 6.0.5 glue internals some hosts reach into: valid for this toolchain image, not a promise;
+- **[GLUE]** — Emscripten 7.0.0 glue internals some hosts reach into (6.0.5's in the runtimes released before the
+  emsdk 7 move): valid for this toolchain image (`release.json` `docker`), not a promise. Since emsdk 6.0.13 a
+  Terser pass compresses the -O3 glue, so a top-level name only a host reads keeps no global binding, and one
+  the glue uses once may be folded into its use: reach what §1 lists through `Module`;
 - **[HOST]** — what QED64's worker does (policy, not requirement).
 
 ## 1. The binary [RT]
@@ -25,9 +28,9 @@ Layers, so a host knows what it may rely on:
 | Memory import | `WebAssembly.Memory({shared: true, address: "i64", initial: ≥ 2048n, maximum: ≤ 262144n})` pages (128 MiB … 16 GiB), passed as `Module.wasmMemory`; the glue puts it in the import object itself (its module and field names are minified since 0039, `env.memory` before). Without a host `wasmMemory` the glue creates `{initial: INITIAL_MEMORY ‖ 128 MiB, maximum: 262144n}`. The runtime manifest records these values (`memory`). |
 | Threads | a pool of 24 pthread Workers created at load (0019; from 0038 until the architecture review's D3b a host could size it), growing on demand; 16 MiB main/application stack, 8 MiB per pthread (§3.6) |
 | Exit | `-sEXIT_RUNTIME=1` with the keepalive patch 0020 in the build image (§5) |
-| Filesystems | MEMFS (root), NODEFS, WORKERFS |
-| Runtime methods | `callMain, FS, ENV, ccall, getValue, setValue, UTF8ToString, stringToNewUTF8` |
-| Exports | The JavaScript contract (0039): `src/emscripten-exports.seed.txt`, the entry points of §2 plus the Emscripten built-ins hosts reach (§5), and since 0041 two runtime functions no host calls, `_lean_apply_16` and `_lean_apply_m`, exported only so that Binaryen keeps them out of `lean_apply_n` (engine stack per monadic level; PATCHES.md 0041). Lean's own native code is not exported: the IR interpreter finds boxed wrappers, all-object functions without one (since 0039b), `@[export]` functions, constant cells and module initializers in a table linked into the module (`gen-exports.py --symtab`, `library/wasm_symtab.cpp`; until 0039 the others were ~106k exports, and the functions without a wrapper ran interpreted). Interpreted code thus calls every function of Init/Std/Lean natively; package code, and what the C keeps file-local (closed terms), runs through its `.ir` (interpreted). |
+| Filesystems | MEMFS (root), NODEFS, WORKERFS. Hosts mount the last two as `Module.NODEFS` and `Module.WORKERFS` (exported since the emsdk 7 move). Emsdk 6.0.13 removed `FS.filesystems` (emscripten#27940), which the 6.0.5 runtimes still have: a host that serves both reads `Module.X ?? FS.filesystems.X` |
+| Runtime methods | `callMain, FS, ENV, ccall, getValue, setValue, UTF8ToString, stringToNewUTF8, NODEFS, WORKERFS`, read on `Module`: since the emsdk 7 move `getValue`, `setValue`, `ccall` and `stringToNewUTF8` have no global binding (the Terser pass inlines each into its `Module` assignment) |
+| Exports | The JavaScript contract (0039): `src/emscripten-exports.seed.txt`, the entry points of §2 plus the Emscripten built-ins hosts reach (§5), and since 0041 two runtime functions no host calls, `_lean_apply_16` and `_lean_apply_m`, exported only so that Binaryen keeps them out of `lean_apply_n` (engine stack per monadic level; PATCHES.md 0041). Reach every export through `Module` (`M._x`): since the emsdk 7 move only `_malloc`, `_pthread_self`, `__emscripten_proxy_main` and `__emscripten_check_mailbox`, which the glue reads itself, keep a global binding; `_free`, `_main` and every `_lean_*` are on `Module` alone (`js/exports-audit.mjs` lists a consumer's bare reads). Lean's own native code is not exported: the IR interpreter finds boxed wrappers, all-object functions without one (since 0039b), `@[export]` functions, constant cells and module initializers in a table linked into the module (`gen-exports.py --symtab`, `library/wasm_symtab.cpp`; until 0039 the others were ~106k exports, and the functions without a wrapper ran interpreted). Interpreted code thus calls every function of Init/Std/Lean natively; package code, and what the C keeps file-local (closed terms), runs through its `.ir` (interpreted). |
 | Linking | Static since 0039 (no `MAIN_MODULE`: no `dylink.0` section, no GOT, no side modules — `Dynlib.load` fails with an IO error). At -O3 the raw wasm import and export names are minified (`a`, `b`, …): reach an export through the glue's `Module["_x"]`, never `wasmExports["x"]`. `bin/lean.js.symbols` in the build tree maps every function index to its name (crash triage; not released). |
 | Olean trust | githash check compiled off; the SHA-256 manifests and the pack ↔ runtime `leanVersion` rule are the trust root (`js/formats/README.md`) |
 
@@ -40,12 +43,13 @@ may import any memory whose maximum is ≤ that.
 - Every pointer, `size_t` and `usize` parameter is **i64: pass a BigInt** (a
   Number throws `TypeError`); `uint32_t`/`unsigned` are Numbers. i64 results
   come back as BigInt. Exception [GLUE]: `_malloc` and `_free` are wrapped —
-  they accept Number or BigInt, and `_malloc` returns a Number.
-- `getValue(addr, type)` takes a Number address.
+  they accept Number or BigInt, and `_malloc` returns a Number (`Module._free`:
+  it has no global since the emsdk 7 move).
+- `Module.getValue(addr, type)` takes a Number address.
 - Lean objects: arguments are owned (consumed) unless the Lean signature says
   `@&`. An `IO α` result is a constructor: tag byte at offset 7 (`0` ok, `1`
   error), field 0 at offset 8. A `UInt32` inside it is a boxed scalar
-  `(n << 1) | 1`; decode with `Number(BigInt(getValue(ptr + 8, "i64")) >> 1n)`.
+  `(n << 1) | 1`; decode with `Number(BigInt(M.getValue(ptr + 8, "i64")) >> 1n)`.
   No export takes an IO world argument. `_lean_io_result_show_error(res)` prints
   an error result.
 
@@ -78,7 +82,8 @@ with the architecture review's D3b. A runtime from 0038 up to the one before D3b
 
 Since 0039 the module also binds on `Module` the three Emscripten built-ins hosts reach
 ([GLUE], §5): `__emscripten_proxy_main` (what `callMain` runs), `__emscripten_check_mailbox` and
-`_pthread_self`. They stay top-level glue bindings as well, which is how QED64 reaches them.
+`_pthread_self`. They stay top-level glue bindings as well, which is how QED64 reaches them (in the
+emsdk 7 glue they and `_malloc` are the only exports that do).
 
 `_mem` loads: `ptr` is a `_malloc`ed buffer holding a whole `.snap` file of
 `size` bytes; on success it becomes the loaded region's memory (never free or
@@ -132,7 +137,7 @@ mutating `Module.ENV` in `preRun`. Two readers see them:
 |---|---|---|
 | `LEAN_PATH` | Lean | `:`-separated library dirs, prepended to the built-in `/lib/lean` (§3.3) |
 | `LEAN_WASM_PARKED_DEDICATED` | C, at task-manager creation | idle dedicated task threads kept for reuse; clamped to 64; **default 0** — parked pthreads outlive a page reload by the browser's ~2 s termination grace, and overlapping the next boot they exhausted V8's pointer-compression cage (0035b) |
-| `LEAN_COMPACTOR_RESERVE` | C | bytes reserved up front when saving a snapshot (`--incr-header-save`); a doubling buffer needs old + new at once (bakes use 3.5 GiB) |
+| `LEAN_COMPACTOR_RESERVE` | C | bytes reserved up front when saving a snapshot (`--incr-header-save`); a doubling buffer needs old + new at once (bakes use 3.5 GiB). A runtime linked with emsdk 6.0.5's allocator takes less than 4 GiB (4 GiB itself fails: PATCHES.md 0043); since the emsdk 7 move, what the 16 GiB address space holds beside the environment |
 | `LEAN_WASM_STACK_PROBE_SLOTS` | C, once | headroom (in 8-byte argument slots, default 16384 = 128 KiB) the engine-stack probe demands (§6); 0 disables it — for calibration only (0036) |
 | `LEAN_WASM_SYMTAB_TRACE` | C, at the first native-symbol lookup | diagnosis only (0039): print the IR interpreter's lookups in the native-symbol table on stderr, `[symtab] miss - <name>` and `[symtab] hit <kind> <name>`. `miss`, `hit` or `all`, each optionally `:<prefix>,<prefix>…` (only names with one of these prefixes), clauses joined by `;`: `miss:;hit:l_Lean_versionString`. Unset or empty: off; anything else: off, with one warning. A miss is normal: every lookup of a function without a boxed wrapper first misses the wrapper, and package code (`lp_…`) is never native |
 | `LEAN_NAT_MAX_SIZE`, `LEAN_STACK_SIZE_KB` | C | upstream semantics (the latter on the `main` path only) |
@@ -164,8 +169,8 @@ mutating `Module.ENV` in `preRun`. Two readers see them:
   is `/lib/lean`; `/bin` must exist (`lean_init_search_path` stats it).
 - Each `LEAN_PATH` dir holds `<Module path>.olean` with its `.ir`,
   `.olean.server`, `.olean.private` facets. A host that mounts packs mounts
-  each read-only (WORKERFS, by the manifest's byte-range table) at its own
-  dir. QED64's pages mount none since 2026-11: every environment they load is
+  each read-only (`Module.WORKERFS`, by the manifest's byte-range table) at its
+  own dir. QED64's pages mount none since 2026-11: every environment they load is
   a snapshot.
 - WORKERFS works only in a worker, and reads from Lean pthreads are proxied to
   the main runtime thread — olean imports on elaboration threads stall there.
@@ -314,35 +319,64 @@ its Worker).
   exit functions (QED64 wraps the `proxiedFunctionTable` entries equal to
   `_proc_exit` and `exitOnMainThread`, at any index, since its 58e1918; older
   copies of its worker, lean4game's pin among them, wrap `[0]` and `[1]`).
+  Find them by identity, never by position: emsdk 7 sorts the table
+  (emscripten#28059, #27995), which starts `[exitOnMainThread, _proc_exit, …]`
+  and holds function expressions the Terser pass inlined. A worker that hooks
+  `[0]` and `[1]` sees no FileWorker exit on such a runtime: it re-pins first.
 - **Mailbox** [GLUE, HARDENING #52 in QED64]: a lost main-thread mailbox
   wakeup can freeze every Lean pthread. QED64 switches the glue to
   postMessage notifications (`waitAsyncPolyfilled = true` in `preRun`) and
   kicks `__emscripten_check_mailbox()` from a 1 s timer. Kernel patch 0035
-  narrows the trigger; it does not remove it.
+  narrows the trigger; it does not remove it. Every pthread arms an
+  `Atomics.waitAsync` on its own thread block when it starts, unless its own
+  realm's `waitAsyncPolyfilled` is true, and a stale one left on a freed block
+  can swallow a later wakeup (emscripten#27492). Emsdk 7's glue clears it when
+  the thread's Worker returns to the pool (#27501, 6.0.7), but that clear is
+  skipped while the runtime thread's `waitAsyncPolyfilled` is true, as in
+  QED64's message mode. So QED64 now also sets the flag in every pthread realm,
+  in its pthread prelude right after the glue loads (QED64 f4cd57f, HARDENING
+  #94): no pthread arms a native waiter. S6's check (the flag present and
+  mutable) covers both uses.
+- **Growable array buffers** [GLUE]: every emsdk 7 link suggests
+  `-sGROWABLE_ARRAYBUFFERS=2` (`-Wpthreads-mem-growth`). The build does not
+  follow it: it would raise the floors to Chrome 144, Firefox 145, Safari 26.2
+  and Node 26, and it makes `waitAsyncPolyfilled` a constant that the Terser
+  pass folds away, which costs QED64 its message mode (#52; its `typeof` guard
+  fails and its boot line shows a WARNING).
 - **The [GLUE] surface the gate checks** (its S6, `js/runtime-contract.mjs`, on every runtime since
-  0039 linked statically and its glue is generated anew), in two lines. First, apart from the
-  export contract, the names QED64's worker reads (the architecture review's K6: rows 1-4 of
-  QED64's `docs/ARCHITECTURE.md` "Glue internals the worker reads"; a named export is only the
-  worker's fallback): a top-level `proxiedFunctionTable` with `_proc_exit` and `exitOnMainThread`
-  among its entries, at any index, both top-level functions (the exit hook); `waitAsyncPolyfilled`
-  and `checkMailbox` holding a keepalive (0020) and calling `__emscripten_check_mailbox()`
-  (message mode); a top-level binding `__emscripten_check_mailbox` (the kick); a top-level
-  `PThread` with `unusedWorkers` and `pthreads` (the pool sample behind the edit hold). Then the
-  rest: a classic script that adopts the host's `Module`; pthread Workers named `"em-pthread"`;
-  the runtime methods of §1 and the `Module` keys of §3.1; a top-level `wasmMemory` that adopts
-  `Module.wasmMemory`; `FS` (`mkdirTree`, `makedev`, `WORKERFS`, `NODEFS`); `TTY` with
+  0039 linked statically and its glue is generated anew; the shapes of emsdk 6.0.5's glue and of
+  7.0.0's both pass), in two lines. First, apart from the export contract, the names QED64's worker
+  reads (the architecture review's K6: rows 1-4 of QED64's `docs/ARCHITECTURE.md` "Glue internals
+  the worker reads"; a named export is only the worker's fallback): a top-level
+  `proxiedFunctionTable` with `_proc_exit` and `exitOnMainThread` among its entries, at any index,
+  both top-level functions (the exit hook); `waitAsyncPolyfilled` and `checkMailbox` holding a
+  keepalive around its callback (0020: pushed before, popped after) and calling
+  `__emscripten_check_mailbox()` (message mode); a top-level binding `__emscripten_check_mailbox`
+  (the kick); a top-level `PThread` with `unusedWorkers` and `pthreads` (the pool sample behind the
+  edit hold). Then the rest: a classic script that adopts the host's `Module` (`!=` in 6.0.5's
+  glue, `!==` in 7.0.0's); pthread Workers named `"em-pthread"`; the runtime methods of §1 assigned
+  on `Module`, whatever the right-hand side, and the `Module` keys of §3.1; a top-level `wasmMemory`
+  that adopts `Module.wasmMemory`; `FS` (`mkdirTree`, `makedev`) with `WORKERFS` and `NODEFS`
+  exported on `Module` (emsdk 7) or held in `FS.filesystems` (6.0.5); `TTY` with
   `ttys[…].ops.put_char` called per byte; `callMain` running `_emscripten_proxy_main`;
   `runtimeKeepalivePush`; `ABORT`; `class ExitStatus`; the thrown string `"unwind"`; a pthread
   Worker's `onerror` rethrowing; a top-level `spawnThread` the glue calls by name (node-runner's
   `QED64_COUNT_PTHREADS`); and what QED64's worker before its 58e1918 and R7a (f83bc70) reads, in
-  the copy lean4game pins (QED64 73d7f3b): `proxiedFunctionTable[0]` = `_proc_exit` and `[1]` =
-  `exitOnMainThread`, `PThread`'s `allocateUnusedWorker`, `getNewWorker` and `returnWorkerToPool`
-  called as `PThread.x()`, `__emscripten_thread_mailbox_await` with a literal `pthread_ptr+N`, and
-  a top-level `_pthread_self` (also QED64's thread-storm and liveness lanes). Test probes'
-  reach-ins (`cleanupThread`, `proxiedJSCallArgs`, `EXITSTATUS`, `runtimeKeepaliveCounter`,
+  the copy lean4game pins (QED64 73d7f3b): `PThread`'s `allocateUnusedWorker`, `getNewWorker` and
+  `returnWorkerToPool` called as `PThread.x()`, `__emscripten_thread_mailbox_await` with a literal
+  `pthread_ptr+N`, and a top-level `_pthread_self` (also QED64's thread-storm and liveness lanes).
+  That copy also hooks `proxiedFunctionTable[0]` = `_proc_exit` and `[1]` = `exitOnMainThread`,
+  which emsdk 7's sorted table cannot keep: a note of its own reports it (present or absent), never
+  a failure, and lean4game re-pins past QED64 58e1918 before it runs on such a runtime. Test
+  probes' reach-ins (`cleanupThread`, `proxiedJSCallArgs`, `EXITSTATUS`, `runtimeKeepaliveCounter`,
   `runtimeExited`, `ENVIRONMENT_IS_PTHREAD`) are reported, not required. `js/exports-audit.mjs`
-  lists what a consumer tree touches against this list and the export contract. Re-check the list
-  at an emsdk move, when 0020 goes upstream, or when the build changes (K6).
+  lists what a consumer tree touches against this list and the export contract, and the BARE reads
+  of Module-only names (§1) in its code, comments and strings left out: such a name read off the
+  global scope (`self.X`, `globalThis["X"]`) or in `typeof X`, an export named bare (`_free(p)`),
+  and one of the four methods named bare in a file whose code names `Module`, `importScripts` or
+  `FS` (`getValue(p, "i64")`). It marks each `PThread`, `TTY` or `FS` member the given glue never
+  names (`FS.filesystems` on 7.0.0), for a human to judge. Re-check the list at an emsdk move, when
+  0020 goes upstream, or when the build changes (K6).
 
 **stderr: the lines hosts parse (the progress contract)** [RT]. The runtime prints these lines
 itself, and consumers parse them, so their text is frozen: a runtime that changes one is a

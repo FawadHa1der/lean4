@@ -359,14 +359,16 @@ and the tools. Build only to change the runtime itself.
   With less, the final link is killed silently (exit 137).
 - **Disk:** about 6 GB of build directory for a runtime build. The clone and
   the Docker image come on top: GitHub reports the repository at about
-  6.5 GiB, and the emsdk image is about 3 GB. A full upstream import, with
+  6.5 GiB, and the emsdk image is about 3.5 GB. A full upstream import, with
   `native64` and Mathlib, takes about 16 GB of build directory; budget 40 GB.
 - `git`, `bash`, `python3`, `nm` (Apple's works; on Linux, `llvm-nm`), and
   Node 24 or newer.
-- Network on the first run (the `emscripten/emsdk:6.0.5` image, system
+- Network on the first run (the `emscripten/emsdk:7.0.0` image, system
   packages, libuv).
-- **Time:** 1.5 to 3 hours from cold on a 14-core Apple M-series machine; 10 to
-  25 minutes with a warm ccache. The gate takes about 35 minutes.
+- **Time:** about 15 minutes from cold on a 14-core Apple M-series machine (the
+  first emsdk 7.0.0 build, 2026-11-17, with the toolchain image, ccache and build
+  directory new; the emsdk image pulled before); less with a warm ccache. The
+  gate takes about 35 minutes.
 
 **Build and gate**
 

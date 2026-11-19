@@ -29,7 +29,7 @@ import path from "node:path";
 import vm from "node:vm";
 import { createRequire } from "node:module";
 import { applyCliContract, ensureStackSize } from "./cli-args.mjs";
-import { forwardWasmEnv } from "./runtime-knobs.mjs";
+import { forwardWasmEnv, glueFilesystem, vfsExists } from "./runtime-knobs.mjs";
 
 // First, before the contract prints anything: replaces this process (same PID) when
 // started without --stack-size, so every line below is printed once.
@@ -217,7 +217,8 @@ globalThis.Module = {
   preRun: [
     function mountHost() {
       const FS = globalThis.Module.FS;
-      const NODEFS = FS.filesystems.NODEFS;
+      // Module.NODEFS (emsdk 7: the kernel exports it), FS.filesystems.NODEFS (emsdk 6.0.5), the glue's global
+      const NODEFS = glueFilesystem(globalThis.Module, "NODEFS");
       const mkdirTree = (p) => {
         let cur = "";
         for (const part of p.split("/").filter(Boolean)) {
@@ -258,7 +259,8 @@ globalThis.Module = {
       const shadow = () => {
         if (!args.lib) return;
         for (const lib of builtinLibs) {
-          try { if (FS.analyzePath(lib).exists) FS.mount(NODEFS, { root: real(libLean) }, lib); } catch { /* already shadowed */ }
+          // FS.analyzePath where the glue has it, else FS.lookupPath (runtime-knobs.mjs vfsExists)
+          try { if (vfsExists(FS, lib)) FS.mount(NODEFS, { root: real(libLean) }, lib); } catch { /* already shadowed */ }
         }
       };
       shadow();

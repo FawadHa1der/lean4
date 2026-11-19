@@ -6,6 +6,8 @@
 //   given in the Module literal, and libc's environment is built from ENV once, after preRun.
 // - symtabStats: the native-symbol table's gauges and a fresh self-check (kernel patch 0039), or
 //   null on a runtime without the table.
+// - glueFilesystem, vfsExists: the glue's NODEFS (or WORKERFS) and a path lookup, for the tools'
+//   preRun mounts, on the glue of either emsdk this line has used (6.0.5, 7.0.0).
 //
 // Kernel patch 0038's pool size (LEAN4_WASM64_PTHREAD_POOL), thread-exit knobs and counters
 // (runtimeStats, node-runner's [rtstats?]) left with the architecture review's D3b: no host used them.
@@ -21,6 +23,36 @@ export const FORWARDED_WASM_ENV = Object.freeze([
 export function forwardWasmEnv(ENV, env = process.env) {
   for (const name of FORWARDED_WASM_ENV) if (env[name]) ENV[name] = env[name];
   return ENV;
+}
+
+/**
+ * The glue's filesystem `name` ("NODEFS" or "WORKERFS"), for FS.mount in preRun: Module[name], which
+ * the kernel's link exports from emsdk 7 on (EXPORTED_RUNTIME_METHODS; emsdk 6.0.13 removed
+ * FS.filesystems, emscripten#27940); else FS.filesystems[name] (emsdk 6.0.5's glue); else the
+ * glue's top-level var, a property of `g` when the glue was evaluated there (vm.runInThisContext).
+ * Throws when none has it: a glue linked without -l<name>.js, or one that keeps it in none of them.
+ */
+export function glueFilesystem(M, name, g = globalThis) {
+  const fsys = M?.[name] ?? M?.FS?.filesystems?.[name] ?? g?.[name];
+  if (fsys) return fsys;
+  throw new Error(`the runtime's glue exposes no ${name}: not as Module.${name} (exported from emsdk 7 on), `
+    + `FS.filesystems.${name} (emsdk 6) or a global ${name} (is lean.js linked with -l${name.toLowerCase()}.js?)`);
+}
+
+/**
+ * Whether `p` exists in the glue's FS, a final symbolic link followed: FS.analyzePath(p).exists
+ * where the glue has it (emsdk 6.0.5; 7.0.0 keeps it unless built with -sSTRICT, deprecated by
+ * emscripten#27765), else whether FS.lookupPath(p, { follow: true }) resolves, which is what
+ * analyzePath decides `exists` by in both versions (libfs.js).
+ */
+export function vfsExists(FS, p) {
+  if (typeof FS.analyzePath === "function") return !!FS.analyzePath(p).exists;
+  try {
+    FS.lookupPath(p, { follow: true });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** The kinds of the native-symbol table, in the runtime's order (gen-exports.py KIND). */

@@ -170,13 +170,22 @@ base's build dir, `--match-runtime <base>/runtime/runtime-manifest.json`,
 `--packs-from <base>/profiles`; pre-seed `<id>/native64/native64.tar.gz` and
 `<id>.native64.stamp` from the base when the stamp still matches; pass the
 base's notes again plus one for the re-cut. Then `SHA256SUMS` must differ from
-the base's only in `tools/` (and `release.json`).
+the base's only in `tools/` (and `release.json`). A release whose runtime was built
+with another toolchain image than the line's (a 6.0.5 one, from before the emsdk 7
+move) is re-cut from a branch off its record commit, so that the script records the
+image its recipe names; that needs its images local (`qed64-toolchain:emsdk-6.0.5`
+and `emscripten/emsdk:6.0.5`, kept for this: the user's decision of 2026-11-19).
 
 `stage-release.sh` refuses to stage a runtime without a passing gate for that
 commit and that `lean.wasm`, a commit that is not on `qed64-wasm64` or carries
 another upstream tag, a dirty `wasm64-build/js`, a package version that does
-not name the release, or an already tagged id; by reference also what the
-section above lists. It writes `../wasm64-lean-kernel-release/<id>/` and,
+not name the release, or an already tagged id; by value also a runtime whose
+`docker-wasm64/Dockerfile` (at the last commit of its history to touch
+`docker-wasm64/`) names another base than the script's `BASE_IMG`, since the
+record's `docker` block describes one image; by reference also what the
+section above lists. By value, when native64 (and so the packs it compiled)
+comes from an import build dir whose recipe is not the runtime's, a note in
+the record says so. It writes `../wasm64-lean-kernel-release/<id>/` and,
 beside it, the release config (`<id>.config.json`) and the verification report
 (`<id>.verify.json`); a release by value also writes the packs' provenance
 (`<id>.pack-set.json`), a runtime release by reference that of its `lean-lib`,

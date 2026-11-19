@@ -14,7 +14,7 @@ series (the former mail-patch files are retired).
 
 ## Build
 
-Requires Docker (image builds from `../docker-wasm64`, emsdk 6.0.5) and
+Requires Docker (image builds from `../docker-wasm64`, emsdk 7.0.0) and
 at least 10 GB of memory in the Docker VM. Since patch 0039 the host writes into the build tree
 the container made (the native-symbol table, `lib/temp`): Docker Desktop and
 rootless Docker map it to the host user; under rootful Docker on Linux it is

@@ -78,9 +78,11 @@ mapfile -t LIBS < <(cd "$LIBDIR" && ls *except*.a 2>/dev/null | grep -v noexcept
 [ "${#LIBS[@]}" -gt 0 ] || { say "no EH-mode system library in $LIBDIR after the probe link"; exit 1; }
 # Emscripten builds system libraries hermetically (it drops EMCC_CFLAGS), so the library's own
 # compile commands are taken from `embuilder -v` and replayed twice, as for the build's C++ above.
-# They name their sources relative to a build dir three levels below the Emscripten root.
-EMROOT="$(dirname "$(command -v emcc)")"; LIBCWD="$CACHE/build/eh-funclet-guard"; mkdir -p "$LIBCWD"
-[ "$(cd "$LIBCWD/../../.." && pwd -P)" = "$(cd "$EMROOT" && pwd -P)" ] \
+# They name their sources relative to their build dir, which since emsdk 6.0.10 (emscripten#27694)
+# is <cache>/build/<lib dir>/<lib>-tmp, <lib dir> being wasm64-emscripten for this build (no LTO, no
+# PIC): four levels below the Emscripten root (three under 6.0.5's <cache>/build/<lib>-tmp).
+EMROOT="$(dirname "$(command -v emcc)")"; LIBCWD="$CACHE/build/wasm64-emscripten/eh-funclet-guard"; mkdir -p "$LIBCWD"
+[ "$(cd "$LIBCWD/../../../.." && pwd -P)" = "$(cd "$EMROOT" && pwd -P)" ] \
   || { say "the cache is not at <emscripten>/cache ($CACHE): cannot replay the library commands"; exit 1; }
 for l in "${LIBS[@]}"; do
   embuilder build "$l" --wasm64 --force -v > "$OUT/libs/$l.log" 2>&1 || { say "embuilder $l failed"; tail -5 "$OUT/libs/$l.log"; exit 1; }

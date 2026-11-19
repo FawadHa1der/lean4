@@ -20,9 +20,10 @@
 //  Static, first: the glue's pthread pool of 24 Workers (0019; QED64's edit hold counts on it).
 //  0039 (static checks first, the rest folded into the runs above): the JavaScript export contract
 //     and the glue surface hosts reach into (S2, S6 with K6's names on a line of their own: every
-//     runtime), no generated export and a statically linked module (S1), the native-symbol table
-//     intact (G2), core initializers and constant cells found in it (G3, G4), plain core functions
-//     run native (G5, 0039b), no lookup lost (G7). Skipped, with a note, on a runtime before 0039.
+//     runtime, on emsdk 6.0.5's glue or 7.0.0's), no generated export and a statically linked
+//     module (S1), the native-symbol table intact (G2), core initializers and constant cells found
+//     in it (G3, G4), plain core functions run native (G5, 0039b), no lookup lost (G7). Skipped,
+//     with a note, on a runtime before 0039.
 //  (0038's host-sized pool, thread-exit knobs and counters left with the architecture review's D3b,
 //  and their checks with them.)
 // Every check prints ok or FAIL; exits nonzero if any failed.
@@ -213,9 +214,10 @@ gate(pool.size === 24, "the glue allocates the 24-Worker pthread pool at start-u
 // PATCH 0039, STATIC (runtime-contract.mjs). S2 and S6 hold for every runtime: the exports hosts
 // call, bound on Module to function exports (raw wasm names are minified since 0039, so they are
 // checked through the glue's own bindings), and the glue internals hosts reach into, the names
-// QED64's worker reads (K6) on a line of their own. S1, from 0039 on: no generated Lean name
-// exported, a small glue, a statically linked module. From the repository (import-release.sh
-// gate-dir) S2 also checks src/emscripten-exports.seed.txt.
+// QED64's worker reads (K6) on a line of their own (what only lean4game's pinned older worker
+// reads is a note: emsdk 7's glue cannot keep its exit-entry positions). S1, from 0039 on: no
+// generated Lean name exported, a small glue, a statically linked module. From the repository
+// (import-release.sh gate-dir) S2 also checks src/emscripten-exports.seed.txt.
 const seedFile = path.join(root, "..", "..", "src", "emscripten-exports.seed.txt");
 const seed = fs.existsSync(seedFile) ? parseSeed(fs.readFileSync(seedFile, "utf8")) : null;
 const statics = (() => {

@@ -93,10 +93,18 @@ self-check and counters as `SYMTAB {json}` (`runtime-knobs.mjs` `symtabStats`).
 
 Two tools are not commands: `exports-audit.mjs [--glue <lean.js>] <dir>…` lists
 what consumer trees' JavaScript touches on the runtime (exports, glue globals,
-`PThread`/`TTY`/`FS` members) and fails on any name the export contract and the
-gate's glue checks do not cover (`runtime-contract.mjs`; run it over every app
-before a release that changes either); `runtime-contract.mjs` is the contract
-itself, as the gate checks it on a runtime's files (S1, S2, S6).
+`PThread`/`TTY`/`FS` members, marking those the given glue never names, for a
+human to judge) and fails on any name the export contract and the gate's glue
+checks do not cover, and on a BARE read of a Module-only name (since emsdk 7:
+`getValue`, `setValue`, `ccall`, `stringToNewUTF8`, and every export but four;
+`runtime-contract.mjs`). A BARE read is one in code, comments and strings left
+out: such a name read off the global scope (`self.X`, `globalThis["X"]`) or in
+`typeof X`, an export named bare (`_free(p)`), or one of the four methods named
+bare in a file whose code names `Module`, `importScripts` or `FS`
+(`getValue(p, "i64")`; elsewhere such a name is the file's own). Run it over
+every app before a release that changes the contract or the glue;
+`runtime-contract.mjs` is the contract itself, as the gate checks it on a
+runtime's files (S1, S2, S6).
 Every command but `id` runs as the dispatcher's child, which it passes SIGINT, SIGTERM
 and SIGHUP; `npx lean4-wasm64 …` adds a process of its own above the
 dispatcher, so a caller that needs the tool's PID runs `node
