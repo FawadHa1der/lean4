@@ -1374,6 +1374,14 @@ instance : Inhabited Nat where
   default := Nat.zero
 
 /--
+Load the object tag of `x` as a natural number.
+Note that if `α` is a trivial wrapper type `x` might at runtime not be of type `α` but instead be
+of a different type and that tag of that type will be loaded.
+-/
+@[extern "lean_obj_tag_nat", tagged_return]
+unsafe opaque getObjTagNat {α : Sort u} (x : @& α) : Nat
+
+/--
 The class `OfNat α n` powers the numeric literal parser. If you write
 `37 : α`, Lean will attempt to synthesize `OfNat α 37`, and will generate
 the term `(OfNat.ofNat 37 : α)`.
@@ -1817,7 +1825,7 @@ instance [HomogeneousPow α] : Pow α α where
 instance instHSMul {α β} [SMul α β] : HSMul α β β where
   hSMul := SMul.smul
 
-instance (priority := 910) {α : Type u} [Mul α] : SMul α α where
+instance (priority := 1100) {α : Type u} [Mul α] : SMul α α where
   smul x y := Mul.mul x y
 
 @[default_instance]
@@ -3037,7 +3045,7 @@ instance : DecidableEq Char := fun c d => {
 }
 
 /-- Returns the number of bytes required to encode this `Char` in UTF-8. -/
-@[implicit_reducible]
+@[implicit_reducible, inline]
 def Char.utf8Size (c : Char) : Nat :=
   let v := c.val
   ite (LE.le v (UInt32.ofNatLT 0x7F (of_decide_eq_true rfl))) 1
@@ -3658,7 +3666,7 @@ implementation. Use `List.asString` instead. -/
 noncomputable def List.utf8Encode (l : List Char) : ByteArray :=
   l.flatMap String.utf8EncodeChar |>.toByteArray
 
-/-- A byte array is valid UTF-8 if it is of the form `List.Internal.utf8Encode m` for some `m`.
+/-- A byte array is valid UTF-8 if it is of the form `List.utf8Encode m` for some `m`.
 
 Note that in order for this definition to be well-behaved it is necessary to know that this `m`
 is unique. To show this, one defines UTF-8 decoding and shows that encoding and decoding are

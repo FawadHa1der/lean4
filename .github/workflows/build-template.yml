@@ -9,15 +9,6 @@ on:
       nightly:
         type: string
         required: true
-      LEAN_VERSION_MAJOR:
-        type: string
-        required: true
-      LEAN_VERSION_MINOR:
-        type: string
-        required: true
-      LEAN_VERSION_PATCH:
-        type: string
-        required: true
       LEAN_SPECIAL_VERSION_DESC:
         type: string
         required: true
@@ -137,12 +128,7 @@ jobs:
       - name: Set up env
         run: |
           echo "NPROC=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)" >> $GITHUB_ENV
-          if ! diff src/stdlib_flags.h stage0/src/stdlib_flags.h; then
-            echo "src/stdlib_flags.h and stage0/src/stdlib_flags.h differ, will test and pack stage 2"
-            echo "TARGET_STAGE=stage2" >> $GITHUB_ENV
-          else
-            echo "TARGET_STAGE=stage1" >> $GITHUB_ENV
-          fi
+          echo "TARGET_STAGE=stage${{ matrix.target-stage || 1 }}" >> $GITHUB_ENV
       - name: Configure Build
         run: |
           ulimit -c unlimited  # coredumps
@@ -194,10 +180,7 @@ jobs:
           if [[ -n '${{ matrix.release }}' && -n '${{ inputs.nightly }}' ]]; then
             OPTIONS+=(-DLEAN_SPECIAL_VERSION_DESC=${{ inputs.nightly }})
           fi
-          if [[ -n '${{ matrix.release }}' && -n '${{ inputs.RELEASE_TAG }}' ]]; then
-            OPTIONS+=(-DLEAN_VERSION_MAJOR=${{ inputs.LEAN_VERSION_MAJOR }})
-            OPTIONS+=(-DLEAN_VERSION_MINOR=${{ inputs.LEAN_VERSION_MINOR }})
-            OPTIONS+=(-DLEAN_VERSION_PATCH=${{ inputs.LEAN_VERSION_PATCH }})
+          if [[ '${{ matrix.release }}' == true && -n '${{ inputs.RELEASE_TAG }}' ]]; then
             OPTIONS+=(-DLEAN_VERSION_IS_RELEASE=1)
             OPTIONS+=(-DLEAN_SPECIAL_VERSION_DESC=${{ inputs.LEAN_SPECIAL_VERSION_DESC }})
           fi
@@ -320,6 +303,44 @@ jobs:
           mv build/stage1.bak build/stage1
           cd src
           ../build/stage0/bin/lake cache clean
+      # Not part of the default targets because it is big
+      - name: Build leanchecker-paranoid
+        if: matrix.release && !matrix.wasm
+        run: |
+          make -C build/$TARGET_STAGE leanchecker-paranoid -j$NPROC
+      - name: Build lean4lean and con-leche
+        if: matrix.release && !matrix.wasm
+        run: |
+          if ! command -v elan > /dev/null; then
+            # Use consistent `ELAN_HOME` across platforms
+            (cd build && export ELAN_HOME=elan &&
+              curl https://elan.lean-lang.org/elan-init.sh -sSf |
+                sh -s -- -y --default-toolchain none --no-modify-path)
+            export PATH="$PWD/build/elan/bin:$PATH"
+          fi
+          elan --version  # fails step if not found
+          make -C build/$TARGET_STAGE lean4lean con-leche
+      - name: Build lean-beam
+        if: matrix.release && !matrix.wasm && runner.os != 'Windows'
+        run: |
+          if [ -d build/elan/bin ]; then
+            echo "$PWD/build/elan/bin" >> "$GITHUB_PATH"
+          fi
+          # Require Beam in the package test only when this job explicitly builds it.
+          echo 'LEAN_BEAM_REQUIRED=1' >> "$GITHUB_ENV"
+          make -C build/$TARGET_STAGE lean-beam
+      - name: Build nanoda and con-ron
+        if: matrix.release && !matrix.wasm
+        run: |
+          # msys2 hides the runner's preinstalled cargo by trimming the Windows `PATH`
+          if command -v cygpath > /dev/null && [ -n "${USERPROFILE:-}" ]; then
+            export PATH="$(cygpath -u "$USERPROFILE")/.cargo/bin:$PATH"
+            # That cargo targets MSVC, so the `cc` crate has to find `cl.exe` itself rather than
+            # take the job's msys2 `CXX`
+            unset CC CXX
+          fi
+          cargo --version  # fails step if not found
+          make -C build/$TARGET_STAGE nanoda con-ron
       - name: Upload generated Environment.c (diagnostic)
         if: matrix.name == 'Web Assembly' || matrix.name == 'Linux 32bit'
         uses: actions/upload-artifact@v4
@@ -370,6 +391,20 @@ jobs:
         run: |
           build/$TARGET_STAGE/bin/lean --stats src/Lean.lean
         if: ${{ !matrix.cross }}
+      # Tests must not write into the checked-in source tree; scratch output belongs in an
+      # ignored path. Making tracked files read-only catches a test that edits one even if it
+      # restores the file afterwards, which the tree comparison below cannot see.
+      - name: Protect Source Tree
+        run: |
+          git status --porcelain -unormal | sort > "$RUNNER_TEMP/tree-before"
+          git ls-files -z | xargs -0 chmod a-w
+        if: matrix.test
+
+      - name: Lower perf_event_paranoid for samply
+        # Best-effort: some runners lack sudo or won't allow this. The `lake samply`
+        # recording test skips if perf permissions are unavailable.
+        run: command -v sudo && sudo -n sysctl -w kernel.perf_event_paranoid=1 || true
+        if: runner.os == 'Linux' && matrix.test
       - name: Test
         id: test
         run: |
@@ -418,7 +453,7 @@ jobs:
           # Updating `GITHUB_ENV` would only apply to future steps (which do not need it).
           export LEAN_GITHASH=$(cat build/stage1/lake-githash)
           time ctest --preset ${{ matrix.CMAKE_PRESET || 'release' }} --test-dir build/stage1 -j$NPROC
-        if: matrix.check-rebootstrap
+        if: matrix.check-rebootstrap && !matrix.release
       - name: CCache stats
         if: always()
         run: ccache -s
