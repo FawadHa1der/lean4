@@ -6,8 +6,8 @@ language server, built for WebAssembly Memory64. With it, Lean 4 and Mathlib
 run **inside a browser tab**, with no server checking the proofs, and from the
 command line under **Node**.
 
-- **Current release:** [`lean-v4.35.0-b081e7c`](https://github.com/FawadHa1der/lean4/releases/tag/lean-v4.35.0-b081e7c)
-  (Lean 4.35.0, Mathlib v4.35.0).
+- **Current release:** [`lean-v4.36.0-e4ef493`](https://github.com/FawadHa1der/lean4/releases/tag/lean-v4.36.0-e4ef493)
+  (Lean 4.36.0, Mathlib v4.36.0).
 - This is an independent fork, not a project of the Lean FRO or of
   `leanprover`. Please do not report problems with the wasm64 toolchain to
   `leanprover/lean4`.
@@ -62,8 +62,8 @@ What your browser and computer need:
 
 | Term | Meaning |
 |---|---|
-| **runtime** | `lean.js` + `lean.wasm` (about 106 MB): Lean's compiler, elaborator and language server as one Memory64 binary. It is the `lean` program only; there is no `lake`. |
-| **build id** | `wasm64-` plus the first 16 hex digits of the SHA-256 of `lean.wasm`, e.g. `wasm64-36d7f415704473d9`. It names one exact runtime. |
+| **runtime** | `lean.js` + `lean.wasm` (about 110 MB): Lean's compiler, elaborator and language server as one Memory64 binary. It is the `lean` program only; there is no `lake`. |
+| **build id** | `wasm64-` plus the first 16 hex digits of the SHA-256 of `lean.wasm`, e.g. `wasm64-24f92aa50d027c97`. It names one exact runtime. |
 | **pack** | Compiled `.olean` files for the runtime, shipped as a manifest plus gzip parts. A release has four (see [Releases](#releases)). |
 | **snapshot** (`.snapz`) | A memory image of a Lean environment after its imports, so a browser starts in seconds instead of importing thousands of modules. It works **only with the runtime that baked it** (same build id). Releases contain none: QED64 publishes its own, and other sites reuse QED64's or bake theirs. |
 | **native64** | A native Linux (arm64) build of the same Lean commit. It writes the `.olean` files the runtime can read. |
@@ -78,10 +78,11 @@ and that apps should use is published as a
 repository. A release id is
 `lean-<upstream Lean tag>-<first 7 hex digits of the kernel commit>`, with
 `-rN` added for a re-cut (for example `lean-v4.34.0-e1a79c1-r3`). Use the
-latest. For Lean 4.34.0, the newest is `lean-v4.34.0-53cb11e`.
+latest. For Lean 4.35.0, the newest is `lean-v4.35.0-0bf1fb2`, and for Lean
+4.34.0, `lean-v4.34.0-53cb11e`.
 
 ```
-lean-v4.35.0-b081e7c   sha256:5450ccc080ec02cb659a11ef750d4771c155c4d21b62b831df766c1a953c69c7
+lean-v4.36.0-e4ef493   sha256:27dea82eb6d233baf5c762e9e5dfe7c2094f8eda583f7b709b44956a17e17155
 ```
 
 The second value is the release's **digest**, which is also in its release
@@ -90,23 +91,23 @@ checked against the release record, and a file that does not match is refused.
 The pin makes sure that the record itself is the published one: without it,
 the tools accept any record that is consistent with itself.
 
-What `lean-v4.35.0-b081e7c` contains (2.87 GB in all; sizes are downloads):
+What `lean-v4.36.0-e4ef493` contains (2.93 GB in all; sizes are downloads):
 
 | Part | Download | What it is for |
 |---|---|---|
-| runtime | 106 MB | everything: browser and Node |
-| `lean-lib` pack | 588 MB | Node: Init, Std, Lean and Lake (2,546 modules, 2.1 GB unpacked) |
-| `lean-core` pack | 120 MB | Init only (653 modules); combined with `mathlib-essential` |
-| `mathlib-essential` pack | 1.03 GB | 4,438 modules: 2,432 from Mathlib v4.35.0, plus Std, Lean and Mathlib's other dependencies (3.6 GB unpacked) |
-| `mathlib-game-extra` pack | 199 MB | 721 more modules (716 from Mathlib) that the games need, including `Mathlib.Tactic` |
-| `native64.tar.gz` | 825 MB | only for compiling your own library (Linux arm64) |
-| `lean4-wasm64-4.35.0-b081e7c.tgz` | 165 KB | the tools |
+| runtime | 110 MB | everything: browser and Node |
+| `lean-lib` pack | 600 MB | Node: Init, Std, Lean and Lake (2,591 modules, 2.2 GB unpacked) |
+| `lean-core` pack | 121 MB | Init only (668 modules); combined with `mathlib-essential` |
+| `mathlib-essential` pack | 1.06 GB | 4,526 modules: 2,462 from Mathlib v4.36.0, plus Std, Lean and Mathlib's other dependencies (3.7 GB unpacked) |
+| `mathlib-game-extra` pack | 202 MB | 746 more modules (740 from Mathlib) that the games need, including `Mathlib.Tactic` |
+| `native64.tar.gz` | 844 MB | only for compiling your own library (Linux arm64) |
+| `lean4-wasm64-4.36.0-e4ef493.tgz` | 143 KB | the tools |
 | `release.json`, `SHA256SUMS`, module lists | small | the record, every file's digest, the packs' module lists |
 
-**Mathlib is a subset.** The packs hold the 4,438 modules in
-[`essential-modules.txt`](https://github.com/FawadHa1der/lean4/releases/download/lean-v4.35.0-b081e7c/essential-modules.txt)
-plus the 721 in
-[`extra-modules.txt`](https://github.com/FawadHa1der/lean4/releases/download/lean-v4.35.0-b081e7c/extra-modules.txt),
+**Mathlib is a subset.** The packs hold the 4,526 modules in
+[`essential-modules.txt`](https://github.com/FawadHa1der/lean4/releases/download/lean-v4.36.0-e4ef493/essential-modules.txt)
+plus the 746 in
+[`extra-modules.txt`](https://github.com/FawadHa1der/lean4/releases/download/lean-v4.36.0-e4ef493/extra-modules.txt),
 not all of Mathlib. There is no `Mathlib` umbrella module in them.
 
 **Install each release's own tools.** Older tools refuse a release record that
@@ -124,8 +125,8 @@ about 3 GB of disk (about 5 GB with Mathlib).
 
 ```bash
 mkdir lean-wasm && cd lean-wasm && npm init -y
-npm install https://github.com/FawadHa1der/lean4/releases/download/lean-v4.35.0-b081e7c/lean4-wasm64-4.35.0-b081e7c.tgz
-npx lean4-wasm64 --version     # 4.35.0-b081e7c
+npm install https://github.com/FawadHa1der/lean4/releases/download/lean-v4.36.0-e4ef493/lean4-wasm64-4.36.0-e4ef493.tgz
+npx lean4-wasm64 --version     # 4.36.0-e4ef493
 ```
 
 Run every later `npx lean4-wasm64` command in this directory, so that `npx`
@@ -135,9 +136,9 @@ finds the installed package. The name is not reserved on the npm registry.
 
 ```bash
 npx lean4-wasm64 fetch \
-  --from https://github.com/FawadHa1der/lean4/releases/download/lean-v4.35.0-b081e7c/ \
-  --id lean-v4.35.0-b081e7c \
-  --digest sha256:5450ccc080ec02cb659a11ef750d4771c155c4d21b62b831df766c1a953c69c7 \
+  --from https://github.com/FawadHa1der/lean4/releases/download/lean-v4.36.0-e4ef493/ \
+  --id lean-v4.36.0-e4ef493 \
+  --digest sha256:27dea82eb6d233baf5c762e9e5dfe7c2094f8eda583f7b709b44956a17e17155 \
   --out toolchain --only runtime,lean-lib
 npx lean4-wasm64 unpack --manifest toolchain/profiles/lean-lib.manifest.json --out toolchain/lib/lean
 ```
@@ -168,16 +169,16 @@ Things to know:
 - **There is no exit code.** A script should read stdout and stderr, treat any
   `error` message as a failure, and stop the process itself.
 
-### 4. Use Mathlib (about 1.15 GB more)
+### 4. Use Mathlib (about 1.18 GB more)
 
 `mathlib-essential` has no `Init`, so unpack it together with `lean-core` into
 one directory, and pass that directory with `--lib`:
 
 ```bash
 npx lean4-wasm64 fetch \
-  --from https://github.com/FawadHa1der/lean4/releases/download/lean-v4.35.0-b081e7c/ \
-  --id lean-v4.35.0-b081e7c \
-  --digest sha256:5450ccc080ec02cb659a11ef750d4771c155c4d21b62b831df766c1a953c69c7 \
+  --from https://github.com/FawadHa1der/lean4/releases/download/lean-v4.36.0-e4ef493/ \
+  --id lean-v4.36.0-e4ef493 \
+  --digest sha256:27dea82eb6d233baf5c762e9e5dfe7c2094f8eda583f7b709b44956a17e17155 \
   --out toolchain --only lean-core,mathlib-essential
 npx lean4-wasm64 unpack --slim --manifest toolchain/profiles/lean-core.manifest.json --out mathlib-lib
 npx lean4-wasm64 unpack --slim --manifest toolchain/profiles/mathlib-essential.manifest.json --out mathlib-lib
@@ -202,11 +203,11 @@ npx lean4-wasm64 run --artifact toolchain --lib mathlib-lib --work . -- /work/m.
 - **Import specific modules.** `import Mathlib` fails, because the packs have
   no umbrella module (see [Releases](#releases)). `import Mathlib.Tactic`
   fails too: it is in `mathlib-game-extra`. Either fetch that pack as well
-  (`--only mathlib-game-extra`, 199 MB) and unpack it with `--slim` into
+  (`--only mathlib-game-extra`, 202 MB) and unpack it with `--slim` into
   `mathlib-lib`, or import the tactics you use, such as `Mathlib.Tactic.Ring`.
-  For the reals, import `Mathlib.Basic.Real.Basic`: in Mathlib v4.35.0,
+  For the reals, import `Mathlib.Basic.Real.Basic`: in Mathlib v4.36.0,
   `Mathlib.Data.Real.Basic` is deprecated and only warns.
-- `run` does not read the downloaded parts in `toolchain/profiles` (1.6 GB).
+- `run` does not read the downloaded parts in `toolchain/profiles` (1.8 GB).
   You can delete them once the unpacks are done; fetch again to re-unpack.
 
 On an Apple M4 Max, a file importing `Mathlib.Data.Nat.Basic` took about
@@ -254,8 +255,8 @@ QED64's [README](https://github.com/FawadHa1der/QED64#use-qed64) and
 [`docs/EMBEDDING.md`](https://github.com/FawadHa1der/QED64/blob/main/docs/EMBEDDING.md)
 explain each one, with a tested recipe. QED64 also fetches the runtime and its
 published snapshots for you. There, `import Mathlib` and `import Mathlib.Tactic`
-work: both mean the curated 4,438-module set, which lacks a few tactics such
-as `cases'` and `induction'`.
+work: both mean the curated `mathlib-essential` set, which lacks a few tactics
+such as `mod_cases` and `mono`.
 
 ### Route 2: host the runtime yourself
 
@@ -265,9 +266,9 @@ as `cases'` and `induction'`.
 
    ```bash
    npx lean4-wasm64 fetch \
-     --from https://github.com/FawadHa1der/lean4/releases/download/lean-v4.35.0-b081e7c/ \
-     --id lean-v4.35.0-b081e7c \
-     --digest sha256:5450ccc080ec02cb659a11ef750d4771c155c4d21b62b831df766c1a953c69c7 \
+     --from https://github.com/FawadHa1der/lean4/releases/download/lean-v4.36.0-e4ef493/ \
+     --id lean-v4.36.0-e4ef493 \
+     --digest sha256:27dea82eb6d233baf5c762e9e5dfe7c2094f8eda583f7b709b44956a17e17155 \
      --out site --only runtime-chunks
    ```
 
@@ -312,7 +313,7 @@ npx lean4-wasm64 run --artifact toolchain --work mylib -- \
   appeared (a few seconds), stop the process. If Lean prints an error, no
   `.olean` is written.
 - To compile against Mathlib, put `--lib mathlib-lib` before the `--`. The
-  `--slim` tree from [step 4](#4-use-mathlib-about-115-gb-more) is enough.
+  `--slim` tree from [step 4](#4-use-mathlib-about-118-gb-more) is enough.
 - To import the module, copy every file Lean wrote for it into your library
   tree (`toolchain/lib/lean`, or the directory you pass with `--lib`):
   `MyLib.olean`, and for a file that starts with `module`, also
@@ -400,7 +401,7 @@ wasm64-build/import-release.sh gate-dir ../wasm64-lean-kernel-build    # the rel
   ```
 - Treat your build as a **new runtime**. Its build id differs from a
   release's unless its `lean.wasm` is byte-identical (a normal clone also
-  embeds its commit hash, which the v4.35.0 release build does not), and
+  embeds its commit hash, which the v4.36.0 release build does not), and
   snapshots baked for another build id will not load on it.
 
 [`wasm64-build/README.md`](wasm64-build/README.md) has the build details.
@@ -418,19 +419,19 @@ the branch's own git history, and
 it.
 
 Upstream stable releases are **merged** into the branch, never rebased, so
-published commits stay valid. v4.34.0 and v4.35.0 were merged this way
+published commits stay valid. v4.34.0, v4.35.0 and v4.36.0 were merged this way
 (v4.34.1 was not imported). The same branch serves QED64 and lean4game: what
 differs between them is switched at run time, never by a separate fork.
 
 **Why GitHub shows the branch hundreds of commits "behind".** GitHub compares
 it with upstream `master`. Upstream cuts its stable releases on
 `releases/vX.Y.0` branches, not on `master`, so `master` holds newer
-development work that no release has yet. Compared with the `v4.35.0` tag, the
+development work that no release has yet. Compared with the `v4.36.0` tag, the
 branch is 0 commits behind:
 
 ```bash
-git fetch https://github.com/leanprover/lean4 tag v4.35.0
-git rev-list --left-right --count v4.35.0...qed64-wasm64    # 0  <commits ahead>
+git fetch https://github.com/leanprover/lean4 tag v4.36.0
+git rev-list --left-right --count v4.36.0...qed64-wasm64    # 0  <commits ahead>
 ```
 
 ## Documentation
@@ -438,7 +439,7 @@ git rev-list --left-right --count v4.35.0...qed64-wasm64    # 0  <commits ahead>
 | Document | What it covers |
 |---|---|
 | [`wasm64-build/README.md`](wasm64-build/README.md) | the build, the gate, the outputs |
-| [`wasm64-build/js/README.md`](wasm64-build/js/README.md) | the `lean4-wasm64` tools as of this commit. The published 4.35.0-b081e7c package also has `bake` and `snapshot-probe`, and the README inside it is older. `npx lean4-wasm64 <command> --help` is exact for the version you installed. |
+| [`wasm64-build/js/README.md`](wasm64-build/js/README.md) | the `lean4-wasm64` tools as of this commit, the same as in the published 4.36.0-e4ef493 package. `npx lean4-wasm64 <command> --help` is exact for the version you installed. |
 | [`wasm64-build/EMBED-RUNTIME.md`](wasm64-build/EMBED-RUNTIME.md) | how a page or Worker embeds the runtime |
 | [`wasm64-build/js/formats/HOSTING.md`](wasm64-build/js/formats/HOSTING.md) | serving release files to a browser |
 | [`wasm64-build/js/formats/README.md`](wasm64-build/js/formats/README.md) | the formats: release records, build ids, which pack and snapshot fit which runtime |
@@ -449,7 +450,7 @@ git rev-list --left-right --count v4.35.0...qed64-wasm64    # 0  <commits ahead>
 
 ## Lean 4 itself
 
-The toolchain runs the same Lean, v4.35.0, so upstream's documentation
+The toolchain runs the same Lean, v4.36.0, so upstream's documentation
 applies:
 
 - [Homepage](https://lean-lang.org)

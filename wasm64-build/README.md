@@ -2,7 +2,7 @@
 
 This branch is Lean 4 (base: cauli/lean4 `reinstate-wasm` @ 5732b84 — the
 original Emscripten/Memory64 enablement; upstream stable releases are merged
-in, v4.35.0 the latest) plus the QED64 patch series that
+in, v4.36.0 the latest) plus the QED64 patch series that
 makes the compiler + language server run **inside a browser tab**: the
 resident language server over a shared-memory stdin ring,
 compacted-environment snapshot save/load, covering-environment header
@@ -49,7 +49,7 @@ through all of it: `RELEASE-PIPELINE.md`.
 ## Releases
 
 Gated builds are published as versioned, checksummed releases
-(`lean-v4.35.0-b081e7c`): runtime, library packs, the native compiler, module
+(`lean-v4.36.0-e4ef493`): runtime, library packs, the native compiler, module
 lists and the `lean4-wasm64` tools, as a GitHub Release and an R2 prefix.
 Apps pin a release instead of a build directory. `RELEASE.md` is the process;
 `js/formats/` the specification; `EMBED-RUNTIME.md` the runtime's embedding
