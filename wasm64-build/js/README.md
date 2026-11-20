@@ -8,10 +8,10 @@ A site's environment snapshots are baked with QED64's
 `pipeline/snapshot/bake-snapshot.mjs` (`formats/snapshot-index.md`).
 
 Node ≥ 24, no dependencies. The package version is the release it was cut
-with: `4.35.0-0bf1fb2` belongs to release `lean-v4.35.0-0bf1fb2`.
+with: `4.36.0-e4ef493` belongs to release `lean-v4.36.0-e4ef493`.
 
 ```bash
-npm install https://github.com/FawadHa1der/lean4/releases/download/lean-v4.35.0-0bf1fb2/lean4-wasm64-4.35.0-0bf1fb2.tgz
+npm install https://github.com/FawadHa1der/lean4/releases/download/lean-v4.36.0-e4ef493/lean4-wasm64-4.36.0-e4ef493.tgz
 ```
 
 (It is not on the npm registry: install it from a release, then `npx
@@ -21,8 +21,8 @@ lean4-wasm64 …` runs the local copy.)
 
 ```bash
 # the runtime as an artifact dir: <out>/bin/lean.js, lean.wasm (rebuilt from verified chunks)
-npx lean4-wasm64 fetch --from https://github.com/FawadHa1der/lean4/releases/download/lean-v4.35.0-0bf1fb2/ \
-  --id lean-v4.35.0-0bf1fb2 --digest sha256:<the digest in the release notes> --out toolchain --only runtime,lean-lib
+npx lean4-wasm64 fetch --from https://github.com/FawadHa1der/lean4/releases/download/lean-v4.36.0-e4ef493/ \
+  --id lean-v4.36.0-e4ef493 --digest sha256:<the digest in the release notes> --out toolchain --only runtime,lean-lib
 # lean-lib = the runtime build's own lib/lean (Init, Std, Lean, Lake): what run/gate/probe expect
 npx lean4-wasm64 unpack --manifest toolchain/profiles/lean-lib.manifest.json --out toolchain/lib/lean
 echo 'theorem t : 2 + 2 = 4 := rfl' > t.lean
